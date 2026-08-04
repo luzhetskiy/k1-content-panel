@@ -71,7 +71,7 @@ DEPLOY.md
 ## Как запускать
 
 ```bash
-cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-parser-services/execution
+cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution
 docker compose run --rm --no-deps backend pytest -q          # тесты без БД
 docker compose up -d postgres redis                          # для тестов с БД
 docker compose up api frontend                               # локальная разработка

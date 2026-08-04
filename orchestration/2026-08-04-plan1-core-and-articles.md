@@ -394,37 +394,112 @@ git commit -m "feat: скелет бэкенда — config, db, compose"
 - Create: `execution/backend/alembic.ini`
 - Create: `execution/backend/alembic/env.py`
 - Create: `execution/backend/alembic/script.py.mako`
-- Create: `execution/backend/app/models/__init__.py`
+- Create: `execution/backend/alembic/README` (генерируется `alembic init`, не редактируется)
+- Create: `execution/backend/app/models/__init__.py` — агрегатор моделей, не пустой файл
 - Create: `execution/backend/app/models/user.py`
+- Create: `execution/backend/tests/conftest.py` — фикстура `db_session` (in-memory SQLite)
+- Create: `execution/backend/alembic/versions/884f54cd83b6_users.py` (генерируется `alembic revision --autogenerate`)
 - Test: `execution/backend/tests/test_models_user.py`
 
 - [x] **Step 1: Написать падающий тест**
 
+Python-дефолты (`default=...`) в SQLAlchemy применяются на INSERT, а не в
+`__init__` — значит, чтобы тест реально проверял значение, а не `None`,
+нужна сессия с БД уже на этом шаге. `execution/backend/tests/conftest.py`:
+
+```python
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db import Base
+import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
+
+# SQLite в памяти: модельные и (позже) API-тесты проверяют поведение, а не
+# диалект БД. Postgres-специфичного SQL в моделях нет.
+TEST_URL = "sqlite:///:memory:"
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine(TEST_URL, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = Session()
+    yield session
+    session.close()
+```
+
 `execution/backend/tests/test_models_user.py`:
 
 ```python
+import pytest
+from sqlalchemy.exc import IntegrityError
+
 from app.models.user import User
 
 
-def test_user_defaults():
+def test_user_defaults(db_session):
+    # Дефолты SQLAlchemy применяются на INSERT, а не в __init__ — поэтому
+    # значения проверяются после flush(), иначе role/is_active всегда None
+    # и assert проходит независимо от того, что реально задано в модели.
     user = User(email="a@b.ru", full_name="Иван", password_hash="x")
-    assert user.role is None or user.role == "manager"
+    db_session.add(user)
+    db_session.flush()
+
+    assert user.role == "manager"
+    assert user.is_active is True
     assert User.__tablename__ == "users"
 
 
-def test_role_column_allows_admin():
+def test_role_column_allows_admin(db_session):
     user = User(email="a@b.ru", full_name="Иван", password_hash="x", role="admin")
+    db_session.add(user)
+    db_session.flush()
+
     assert user.role == "admin"
+
+
+def test_email_is_unique(db_session):
+    db_session.add(User(email="dup@b.ru", full_name="Иван", password_hash="x"))
+    db_session.commit()
+
+    db_session.add(User(email="dup@b.ru", full_name="Пётр", password_hash="y"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
 ```
+
+Ранняя версия теста сравнивала `user.role is None or user.role == "manager"` без
+`flush()` — при отсутствующей сессии первая ветвь истинна всегда, и тест не ловил
+ни один из пяти проверенных мутационным тестированием дефектов модели (смена
+дефолта, потеря `unique=True`, инверсия `is_active` и т.д.). Нынешняя версия
+проверяет фактические значения после `flush()/commit()` и реальное поведение
+UNIQUE-констрейнта через `IntegrityError`.
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_user.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'app.models'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.models'` (всплывает
+уже на загрузке `conftest.py`, который делает `import app.models`, поэтому
+pytest репортит `ImportError while loading conftest`, а не ошибку в самом
+тестовом файле)
 
 - [x] **Step 3: Модель User**
 
-`execution/backend/app/models/__init__.py` — пустой файл.
+`execution/backend/app/models/__init__.py` — агрегатор моделей:
+
+```python
+from app.models.user import User
+
+# Единая точка регистрации моделей: alembic/env.py и tests/conftest.py делают
+# `import app.models`, чтобы Base.metadata увидел все таблицы разом. Новую
+# модель — добавляй сюда, а не в env.py/conftest.py по отдельности.
+__all__ = ["User"]
+```
+
+Реестр моделей живёт в одном месте, а не размазан по `env.py` и `conftest.py`
+списком импортов: забытый импорт одной модели в двух местах расходится по-разному
+и ломает автогенерацию или тестовую схему по-разному, далеко от причины.
 
 `execution/backend/app/models/user.py`:
 
@@ -449,7 +524,7 @@ class User(Base):
 - [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_user.py -v`
-Expected: PASS — 2 passed
+Expected: PASS — 3 passed
 
 - [x] **Step 5: Инициализировать Alembic**
 
@@ -473,19 +548,22 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.config import config as app_config
-from app.db import Base
-from app.models import user  # noqa: F401
-# from app.models import setting  # noqa: F401  (раскомментировать в Task 5)
-# from app.models import site  # noqa: F401  (раскомментировать в Task 9)
-# from app.models import prompt_template  # noqa: F401  (раскомментировать в Task 12)
-# from app.models import article, job  # noqa: F401  (раскомментировать в Task 14)
-
 config = context.config
-config.set_main_option("sqlalchemy.url", app_config.database_url)
 
+# Логирование настраивается до импорта app.*: fileConfig(disable_existing_loggers=True)
+# по умолчанию глушит все уже созданные логгеры — если бы app.config/app.db успели
+# завести свои до этого вызова, они замолчали бы молча и без предупреждения.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+from app.config import config as app_config
+from app.db import Base
+import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
+
+# `%` в пароле БД (типичный символ в base64-паролях) иначе интерпретируется
+# ConfigParser'ом как начало интерполяции и роняет любую команду alembic ещё
+# до обращения к БД — экранируем его перед записью в config.
+config.set_main_option("sqlalchemy.url", app_config.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -518,11 +596,26 @@ else:
     run_migrations_online()
 ```
 
-`autogenerate` видит только те таблицы, чьи классы к моменту запуска зарегистрированы в
-`Base.metadata` — поэтому каждая новая модель требует свой импорт в `env.py`. Модули
-`setting`, `site`, `prompt_template`, `article`, `job` появятся в задачах 5, 9, 12, 14;
-до тех пор строки их импорта держи закомментированными (см. блок выше), раскомментируя
-каждую по мере создания соответствующего файла модели.
+Три вещи в этом файле не очевидны сразу:
+
+- `fileConfig()` вызывается ДО импорта `app.config`/`app.db`, а не после. У
+  `fileConfig()` по умолчанию `disable_existing_loggers=True` — если бы модули
+  приложения успели завести свои логгеры раньше, вызов молча заглушил бы их.
+  Сейчас `app.*` логгеров на импорте не заводит, поэтому эффекта нет, но это
+  отложенные грабли: порядок из штатного шаблона `alembic init` соблюдён,
+  чтобы их не встретить в будущей задаче.
+- `import app.models` — одна строка вместо перечисления моделей поимённо.
+  `autogenerate` видит только те таблицы, чьи классы зарегистрированы в
+  `Base.metadata` к моменту запуска, но носителем списка моделей выступает
+  `app/models/__init__.py` (см. Step 3), а не `env.py`: там модель добавляется
+  один раз и видна сразу и alembic'у, и `tests/conftest.py`.
+- `app_config.database_url.replace("%", "%%")` — `config.set_main_option()`
+  кладёт значение в `ConfigParser`, где одиночный `%` означает начало
+  интерполяции. Пароль вида `p%40ss` (типичный результат `openssl rand
+  -base64`, если в нём встретился `%`) роняет любую команду alembic ещё до
+  обращения к БД: `ValueError: invalid interpolation syntax in '...'`.
+  Экранирование `%` → `%%` — стандартный способ ConfigParser'а вставить
+  литеральный `%`.
 
 - [x] **Step 7: Сгенерировать миграцию**
 
@@ -538,7 +631,8 @@ Expected: создан файл в `alembic/versions/`, вывод `Running upgr
 
 ```bash
 git add execution/backend/alembic execution/backend/alembic.ini execution/backend/app/models \
-  execution/backend/tests/test_models_user.py orchestration/2026-08-04-plan1-core-and-articles.md
+  execution/backend/tests/test_models_user.py execution/backend/tests/conftest.py \
+  orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: alembic и таблица users"
 ```
 
@@ -666,55 +760,50 @@ git commit -m "feat: хеширование паролей и JWT"
 - Create: `execution/backend/app/api/auth.py`
 - Create: `execution/backend/app/main.py`
 - Create: `execution/backend/create_admin.py`
-- Create: `execution/backend/tests/conftest.py`
+- Modify: `execution/backend/tests/conftest.py` (дополнить фикстурами для API; `db_session` там уже есть — создан в Task 2)
 - Test: `execution/backend/tests/test_api_auth.py`
 
 - [ ] **Step 1: Фикстуры для тестов API**
 
-`execution/backend/tests/conftest.py`:
+`tests/conftest.py` уже существует (Task 2) и содержит фикстуру `db_session` на
+in-memory SQLite. Здесь он дополняется, а не создаётся заново — `db_session` не
+трогаем, ниже дописываем в тот же файл:
 
 ```python
+import contextlib
+
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from app.api.deps import get_db
 from app.api.security import hash_password
-from app.db import Base
 from app.main import app
 from app.models.user import User
 
-# SQLite в памяти: тесты API проверяют HTTP-контракт и роли, а не диалект БД.
-# Postgres-специфичного SQL в моделях нет.
-TEST_URL = "sqlite:///:memory:"
+
+@pytest.fixture
+def _client_for(db_session):
+    """Фабрика TestClient на переданной сессии БД. Override `get_db` и все
+    открытые клиенты закрываются один раз в конце теста этой фикстурой, а не
+    в каждой client-фикстуре по отдельности: admin_client и manager_client
+    встречаются в одном тесте, и снятие override в одной из них стирало бы
+    её у другой раньше времени."""
+    with contextlib.ExitStack() as stack:
+
+        def _make(email: str = "", password: str = "") -> TestClient:
+            app.dependency_overrides[get_db] = lambda: db_session
+            client = stack.enter_context(TestClient(app))
+            if email:
+                client.post("/api/auth/login", data={"username": email, "password": password})
+            return client
+
+        yield _make
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture
-def db_session():
-    engine = create_engine(TEST_URL, connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    session = Session()
-    yield session
-    session.close()
-    # Подмена снимается здесь, а не в клиентских фикстурах: клиентов на тест
-    # бывает несколько, и каждый снимал бы её из-под остальных.
-    app.dependency_overrides.clear()
-
-
-def _client_for(db_session, email: str = "", password: str = "") -> TestClient:
-    app.dependency_overrides[get_db] = lambda: db_session
-    client = TestClient(app)
-    if email:
-        client.post("/api/auth/login", data={"username": email, "password": password})
-    return client
-
-
-@pytest.fixture
-def client(db_session):
-    with _client_for(db_session) as c:
-        yield c
+def client(_client_for):
+    return _client_for()
 
 
 @pytest.fixture
@@ -736,19 +825,13 @@ def manager(db_session):
 
 
 @pytest.fixture
-def admin_client(db_session, admin):
-    """Свой TestClient на роль. Общий клиент не годится: admin_client и
-    manager_client встречаются в одном тесте, и второй логин затирал бы cookie
-    первого — админские запросы молча уходили бы от имени менеджера и падали
-    с 403 в тесте, который проверяет совсем другое."""
-    with _client_for(db_session, "admin@k1.ru", "adminpass") as c:
-        yield c
+def admin_client(_client_for, admin):
+    return _client_for("admin@k1.ru", "adminpass")
 
 
 @pytest.fixture
-def manager_client(db_session, manager):
-    with _client_for(db_session, "manager@k1.ru", "managerpass") as c:
-        yield c
+def manager_client(_client_for, manager):
+    return _client_for("manager@k1.ru", "managerpass")
 ```
 
 - [ ] **Step 2: Написать падающий тест**
@@ -1026,6 +1109,7 @@ git commit -m "feat: авторизация, роли, первый админи
 - Create: `execution/backend/app/settings/crypto.py`
 - Create: `execution/backend/app/settings/service.py`
 - Create: `execution/backend/app/models/setting.py`
+- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `Setting`)
 - Test: `execution/backend/tests/test_settings.py`
 
 - [ ] **Step 1: Написать падающий тест**
@@ -1224,7 +1308,9 @@ Expected: PASS — 9 passed
 
 - [ ] **Step 7: Миграция**
 
-Раскомментируй `setting` в списке импортов `alembic/env.py`, затем:
+Добавь `Setting` в `app/models/__init__.py` (реестр моделей, см. Task 2, Step 3) —
+`alembic/env.py` и `tests/conftest.py` подхватят её через `import app.models` без
+собственных правок. Затем:
 
 Run:
 ```bash
@@ -1953,6 +2039,7 @@ git commit -m "feat: генерация картинок RouterAI, кроп и �
 
 **Files:**
 - Create: `execution/backend/app/models/site.py`
+- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `Site`)
 - Test: `execution/backend/tests/test_models_site.py`
 
 - [ ] **Step 1: Написать падающий тест**
@@ -2082,7 +2169,9 @@ Expected: PASS — 5 passed
 
 - [ ] **Step 5: Миграция**
 
-Раскомментируй `site` в импортах `alembic/env.py`, затем:
+Добавь `Site` в `app/models/__init__.py` (реестр моделей, см. Task 2, Step 3) —
+`alembic/env.py` и `tests/conftest.py` подхватят её через `import app.models` без
+собственных правок. Затем:
 
 Run:
 ```bash
@@ -3026,6 +3115,7 @@ git commit -m "feat: API сайтов, синхронизация раздела
 
 **Files:**
 - Create: `execution/backend/app/models/prompt_template.py`
+- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `PromptTemplate`)
 - Create: `execution/backend/app/ai/prompts.py`
 - Modify: `execution/backend/app/seed.py`
 - Test: `execution/backend/tests/test_ai_prompts.py`
@@ -3276,7 +3366,9 @@ Expected: PASS — 9 passed
 
 - [ ] **Step 7: Миграция**
 
-Раскомментируй `prompt_template` в импортах `alembic/env.py`, затем:
+Добавь `PromptTemplate` в `app/models/__init__.py` (реестр моделей, см. Task 2,
+Step 3) — `alembic/env.py` и `tests/conftest.py` подхватят её через `import
+app.models` без собственных правок. Затем:
 
 Run:
 ```bash
@@ -3567,6 +3659,7 @@ git commit -m "feat: API промптов с тестовым прогоном"
 **Files:**
 - Create: `execution/backend/app/models/article.py`
 - Create: `execution/backend/app/models/job.py`
+- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `ArticleBatch`, `Article`, `ArticleImage`, `JobRun`)
 - Test: `execution/backend/tests/test_models_article.py`
 
 - [ ] **Step 1: Написать падающий тест**
@@ -3795,7 +3888,9 @@ Expected: PASS — 6 passed
 
 - [ ] **Step 6: Миграция**
 
-Раскомментируй `article` и `job` в импортах `alembic/env.py`, затем:
+Добавь `ArticleBatch`, `Article`, `ArticleImage` и `JobRun` в `app/models/__init__.py`
+(реестр моделей, см. Task 2, Step 3) — `alembic/env.py` и `tests/conftest.py`
+подхватят их через `import app.models` без собственных правок. Затем:
 
 Run:
 ```bash

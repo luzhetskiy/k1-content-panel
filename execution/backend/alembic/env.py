@@ -3,19 +3,22 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.config import config as app_config
-from app.db import Base
-from app.models import user  # noqa: F401
-# from app.models import setting  # noqa: F401  (раскомментировать в Task 5)
-# from app.models import site  # noqa: F401  (раскомментировать в Task 9)
-# from app.models import prompt_template  # noqa: F401  (раскомментировать в Task 12)
-# from app.models import article, job  # noqa: F401  (раскомментировать в Task 14)
-
 config = context.config
-config.set_main_option("sqlalchemy.url", app_config.database_url)
 
+# Логирование настраивается до импорта app.*: fileConfig(disable_existing_loggers=True)
+# по умолчанию глушит все уже созданные логгеры — если бы app.config/app.db успели
+# завести свои до этого вызова, они замолчали бы молча и без предупреждения.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+from app.config import config as app_config
+from app.db import Base
+import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
+
+# `%` в пароле БД (типичный символ в base64-паролях) иначе интерпретируется
+# ConfigParser'ом как начало интерполяции и роняет любую команду alembic ещё
+# до обращения к БД — экранируем его перед записью в config.
+config.set_main_option("sqlalchemy.url", app_config.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

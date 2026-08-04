@@ -1,0 +1,84 @@
+x-backend-base: &backend-base
+  build: ./backend
+  volumes:
+    - ./backend:/app
+    - media:/app/media
+  environment: &backend-env
+    DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/content
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-prod}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:-8Bq3mA0kXqL2pR7vT1yZ4nC6wE9sU5hJ0dF2gK8lM3o=}
+    MEDIA_DIR: /app/media
+    TZ: Europe/Samara
+
+services:
+  backend:
+    <<: *backend-base
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Разовый шаг миграций, а не «каждый сервис мигрирует сам»: api и worker
+  # стартуют одновременно, и два `alembic upgrade head` гонялись бы за одной
+  # DDL-транзакцией на пустой базе.
+  migrate:
+    <<: *backend-base
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend-base
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *backend-base
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host"
+    volumes:
+      - ./frontend:/app
+    ports: ["3000:3000"]
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: content
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d content"]
+      interval: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+
+volumes:
+  postgres_data:
+  redis_data:
+  media:

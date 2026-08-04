@@ -96,7 +96,7 @@ docker compose up api frontend                               # локальна�
 - Create: `execution/docker-compose.yml`
 - Test: `execution/backend/tests/test_config.py`
 
-- [ ] **Step 1: Зависимости**
+- [x] **Step 1: Зависимости**
 
 `execution/backend/requirements.txt`:
 
@@ -130,7 +130,7 @@ pytest-cov==6.0.0
 `beautifulsoup4` понадобятся плану 2 (импорт xlsx и скрейпинг) — ставятся сразу,
 чтобы образ не пересобирался повторно.
 
-- [ ] **Step 2: Dockerfile**
+- [x] **Step 2: Dockerfile**
 
 `execution/backend/Dockerfile`:
 
@@ -151,7 +151,7 @@ COPY . .
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-- [ ] **Step 3: pytest.ini**
+- [x] **Step 3: pytest.ini**
 
 `execution/backend/pytest.ini`:
 
@@ -161,7 +161,7 @@ testpaths = tests
 pythonpath = .
 ```
 
-- [ ] **Step 4: Написать падающий тест**
+- [x] **Step 4: Написать падающий тест**
 
 `execution/backend/tests/test_config.py`:
 
@@ -184,12 +184,12 @@ def test_env_overrides(monkeypatch):
     assert cfg.cookie_secure is True
 ```
 
-- [ ] **Step 5: Запустить тест, убедиться что падает**
+- [x] **Step 5: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose build backend && docker compose run --rm --no-deps backend pytest tests/test_config.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.config'`
 
-- [ ] **Step 6: Реализация config.py**
+- [x] **Step 6: Реализация config.py**
 
 `execution/backend/app/__init__.py` — пустой файл.
 
@@ -219,7 +219,7 @@ class Config(BaseSettings):
 config = Config()
 ```
 
-- [ ] **Step 7: clock.py и db.py**
+- [x] **Step 7: clock.py и db.py**
 
 `execution/backend/app/clock.py`:
 
@@ -249,7 +249,7 @@ engine = create_engine(config.database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 ```
 
-- [ ] **Step 8: docker-compose.yml**
+- [x] **Step 8: docker-compose.yml**
 
 `execution/docker-compose.yml`:
 
@@ -340,12 +340,12 @@ volumes:
   media:
 ```
 
-- [ ] **Step 9: Запустить тест, убедиться что проходит**
+- [x] **Step 9: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose build backend && docker compose run --rm --no-deps backend pytest tests/test_config.py -v`
 Expected: PASS — 2 passed
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add execution/backend execution/docker-compose.yml

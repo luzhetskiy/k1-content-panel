@@ -650,15 +650,22 @@ git commit -m "feat: alembic и таблица users"
 `execution/backend/tests/test_api_security.py`:
 
 ```python
+import time
+from datetime import timedelta
+
 import pytest
+from jose import jwt as jose_jwt
 
 from app.api.security import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    ALGORITHM,
+    BCRYPT_MAX_BYTES,
     create_access_token,
     decode_access_token,
     hash_password,
     verify_password,
 )
+from app.clock import utcnow
 
 
 def test_hash_is_not_plaintext():
@@ -673,6 +680,37 @@ def test_verify_accepts_correct_password():
 
 def test_verify_rejects_wrong_password():
     assert verify_password("wrong", hash_password("secret123")) is False
+
+
+def test_verify_rejects_empty_hash_without_raising():
+    """Пустой password_hash (например, повреждённая строка в БД) должен
+    читаться как «пароль не подошёл», а не валить эндпоинт 500-й."""
+    assert verify_password("secret123", "") is False
+
+
+def test_verify_rejects_truncated_hash_without_raising():
+    """bcrypt 4.2.1 бросает pyo3_runtime.PanicException на хешах с обрезанной
+    солью (длина 8–29 символов после префикса `$2b$12$`) — эта строка длиной
+    16 воспроизводит панику. PanicException наследуется от BaseException, а
+    не от Exception, поэтому `except Exception` в эндпоинте её не поймает."""
+    assert verify_password("secret123", "$2b$12$shortsalt") is False
+
+
+def test_hash_password_accepts_72_byte_password():
+    password = "a" * BCRYPT_MAX_BYTES
+    hashed = hash_password(password)
+    assert verify_password(password, hashed) is True
+
+
+def test_hash_password_rejects_password_over_72_bytes():
+    with pytest.raises(ValueError):
+        hash_password("a" * (BCRYPT_MAX_BYTES + 1))
+
+
+def test_hash_password_rejects_long_cyrillic_password():
+    # Кириллица — 2 байта на символ в UTF-8: 37 символов = 74 байта > лимита.
+    with pytest.raises(ValueError):
+        hash_password("а" * 37)
 
 
 def test_token_roundtrip():
@@ -694,7 +732,76 @@ def test_expire_is_reasonable():
     """12 часов — рабочая смена. Короче — разлогинит посреди партии статей,
     длиннее — расширяет окно злоупотребления украденной cookie."""
     assert 60 <= ACCESS_TOKEN_EXPIRE_MINUTES <= 24 * 60
+
+
+def test_exp_claim_is_now_plus_expiry():
+    before = utcnow()
+    token = create_access_token(user_id=1, role="admin", secret="test-secret")
+    payload = decode_access_token(token, secret="test-secret")
+    after = utcnow()
+
+    expected_min = before.timestamp() + ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    expected_max = after.timestamp() + ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    assert expected_min - 2 <= payload["exp"] <= expected_max + 2
+
+
+def test_exp_claim_is_correct_regardless_of_local_timezone(monkeypatch):
+    """`create_access_token` считает `exp` как `utcnow().timestamp() + ...`.
+    Это корректно только пока `utcnow()` возвращает aware-datetime в UTC —
+    aware `.timestamp()` даёт правильный эпох независимо от TZ процесса.
+    Если `clock.utcnow()` когда-нибудь станет naive (например, ради
+    совместимости с naive-колонками БД, как это случилось в другом
+    проекте), naive `.timestamp()` начнёт трактовать время как локальное
+    для процесса, и exp каждого токена тихо сдвинется на величину TZ. Тест
+    держит TZ процесса не-UTC, чтобы такая регрессия не могла спрятаться за
+    тем, что контейнер по умолчанию работает в UTC."""
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    try:
+        before = utcnow()
+        token = create_access_token(user_id=1, role="admin", secret="test-secret")
+        payload = decode_access_token(token, secret="test-secret")
+        after = utcnow()
+
+        expected_min = before.timestamp() + ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        expected_max = after.timestamp() + ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        assert expected_min - 2 <= payload["exp"] <= expected_max + 2
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+
+
+def test_expired_token_is_rejected():
+    from jose import ExpiredSignatureError
+
+    past = utcnow() - timedelta(minutes=1)
+    token = jose_jwt.encode(
+        {"user_id": 1, "role": "admin", "exp": int(past.timestamp())},
+        "test-secret",
+        algorithm=ALGORITHM,
+    )
+    with pytest.raises(ExpiredSignatureError):
+        decode_access_token(token, secret="test-secret")
+
+
+def test_create_access_token_rejects_empty_secret():
+    with pytest.raises(ValueError):
+        create_access_token(user_id=1, role="admin", secret="")
+
+
+def test_create_access_token_secret_is_keyword_only():
+    with pytest.raises(TypeError):
+        create_access_token(1, "admin", "test-secret")
 ```
+
+Изначальная версия (6 тестов выше многоточия убраны, полный список — 16 штук)
+не покрывала четыре реальных дефекта, найденных ревью (см. пояснение после
+Step 3): необрабатываемое исключение на битом хеше, `exp`, который никогда не
+проверялся на реальное значение, отсутствие защиты от пустого секрета и
+позиционной путаницы `role`/`secret`, и молчаливую обрезку пароля bcrypt'ом на
+72 байтах. Тесты выше добавлены до соответствующих правок в `security.py` и
+были красными до них (см. отчёт о мутационной проверке в коммите
+`fix: замечания ревью по паролям и JWT`).
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
 
@@ -710,6 +817,19 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.api.security'`
 ```python
 """Пароли и JWT. Bcrypt используется напрямую (без passlib) — единственная
 схема хеширования, лишняя абстракция не нужна.
+
+Отзыв токенов: деактивация пользователя и смена роли действуют немедленно —
+`get_current_user`/`require_role` (Task 4) проверяют пользователя в БД на
+каждый запрос. Смена пароля живые сессии НЕ убивает — уже выданный токен
+остаётся рабочим до истечения `ACCESS_TOKEN_EXPIRE_MINUTES` (до 12 часов).
+Для внутренней панели на 2–3 человека это осознанный компромисс, а не
+недосмотр: полноценный отзыв (блэклист, `jti`) не реализуем.
+
+Зависимость: `python-jose` не поддерживается с 2021 года и триггерит
+`DeprecationWarning` на Python 3.12 (использует `datetime.utcnow()` внутри
+`jwt.py`). Известные CVE (алгоритмическая путаница, DoS через JWE) здесь не
+эксплуатируются — используется только HS256, без JWE и асимметричных ключей.
+Если апгрейд когда-нибудь понадобится, заменой является `pyjwt`.
 """
 
 import bcrypt
@@ -720,18 +840,59 @@ from app.clock import utcnow
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 12 * 60
 
+# bcrypt молча обрезает ввод на 72 байтах (36 кириллических символов, т.к. в
+# UTF-8 это 2 байта на букву) — два пароля с общим 72-байтным префиксом
+# становятся взаимозаменяемыми, и смена длинного пароля правкой хвоста тихо
+# ни на что не влияет. Валидируем на входе, чтобы это не выяснялось на
+# инциденте.
+BCRYPT_MAX_BYTES = 72
+
 
 def hash_password(password: str) -> str:
+    if len(password.encode()) > BCRYPT_MAX_BYTES:
+        raise ValueError(f"пароль длиннее {BCRYPT_MAX_BYTES} байт")
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    return bcrypt.checkpw(password.encode(), password_hash.encode())
+    # Битый или пустой хеш в БД — это 401 (не найден/не подходит), а не 500.
+    # bcrypt 4.2.1 бросает ValueError("Invalid salt") на явном мусоре и
+    # pyo3_runtime.PanicException на хешах с обрезанной солью (длина ~8–29
+    # символов после префикса) — вторая наследуется от BaseException, а не
+    # от Exception, и её не поймает ни `except Exception` в эндпоинте, ни
+    # ServerErrorMiddleware Starlette. Ловим широко и намеренно, но не глушим
+    # сигналы прерывания процесса.
+    try:
+        return bcrypt.checkpw(password.encode(), password_hash.encode())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
 
 
-def create_access_token(user_id: int, role: str, secret: str) -> str:
+def create_access_token(user_id: int, role: str, *, secret: str) -> str:
+    # `secret` — keyword-only: `role` и `secret` — соседние параметры одного
+    # типа (str), и при позиционном вызове их перестановка молча подписала бы
+    # токен строкой роли вместо секрета, пройдя проверку типов.
+    if not secret:
+        raise ValueError("secret не может быть пустым")
+
+    # `.timestamp()` даёт корректный UTC-эпох только потому, что
+    # `app.clock.utcnow()` возвращает timezone-aware datetime в UTC. Если
+    # utcnow() когда-нибудь станет naive (например, ради совместимости с
+    # naive-колонками БД), `.timestamp()` начнёт трактовать время как
+    # локальное для процесса — и exp каждого токена тихо сдвинется на
+    # величину локального TZ.
     expire = utcnow().timestamp() + ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    payload = {"user_id": user_id, "role": role, "exp": expire}
+    payload = {
+        "user_id": user_id,
+        # role в токене — информационная подсказка, не источник авторизации.
+        # require_role проверяет роль из БД на каждый запрос: если её когда-
+        # нибудь начнут читать отсюда «ради экономии запроса», деактивация
+        # или смена роли перестанет действовать немедленно.
+        "role": role,
+        "exp": int(expire),
+    }
     return jwt.encode(payload, secret, algorithm=ALGORITHM)
 
 
@@ -739,10 +900,44 @@ def decode_access_token(token: str, secret: str) -> dict:
     return jwt.decode(token, secret, algorithms=[ALGORITHM])
 ```
 
+Ревью Task 3 нашло четыре реальных дефекта в первой версии кода и потребовало
+правок (коммит `fix: замечания ревью по паролям и JWT`):
+
+- `verify_password` падала необрабатываемым исключением на битом/обрезанном
+  bcrypt-хеше. Хуже того, на хешах с обрезанной солью (длина 8–29 символов)
+  bcrypt 4.2.1 бросает `pyo3_runtime.PanicException`, которая наследуется от
+  `BaseException`, а не от `Exception` — её не поймал бы ни `except
+  Exception` в эндпоинте логина (Task 4), ни `ServerErrorMiddleware`
+  Starlette. Битый хеш в БД превращался в 500 с трейсбеком вместо 401.
+  Обёрнуто в `try/except BaseException` с явным пропуском
+  `KeyboardInterrupt`/`SystemExit`.
+- Тесты проходили с токенами, у которых `exp` вообще отсутствовал в payload
+  или был в неверных единицах — `test_expire_is_reasonable` пиннит константу,
+  но ничего не проверяет про сам `create_access_token`. Добавлены
+  `test_exp_claim_is_now_plus_expiry` (реальный `exp` = «сейчас» +
+  `ACCESS_TOKEN_EXPIRE_MINUTES`) и `test_expired_token_is_rejected`
+  (истёкший токен отклоняется `ExpiredSignatureError`). `exp` также приведён
+  к `int` — RFC допускает float, но потребители ожидают int.
+- `create_access_token(user_id, role, secret)` не защищён от пустого
+  `secret` (`config.jwt_secret` по умолчанию `""`, и `jose` спокойно подписал
+  бы токен пустой строкой — подделываемый кем угодно) и уязвим к перепутыванию
+  соседних `str`-параметров `role`/`secret` при позиционном вызове. `secret`
+  сделан keyword-only, добавлена проверка на пустую строку.
+- bcrypt молча обрезает пароль на 72 байтах — два пароля с общим 72-байтным
+  префиксом становятся взаимозаменяемыми, и смена длинного пароля правкой
+  хвоста тихо ни на что не влияет. Добавлена явная проверка длины в
+  `hash_password` (`BCRYPT_MAX_BYTES`).
+
+Также задокументирована зависимость `.timestamp()` от `utcnow()`,
+возвращающего aware-datetime (иначе `.timestamp()` трактует время как
+локальное для процесса), и то, что claim `role` в токене — информационная
+подсказка, а не источник авторизации (роль проверяется из БД в
+`require_role` на каждый запрос).
+
 - [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_security.py -v`
-Expected: PASS — 6 passed
+Expected: PASS — 16 passed (после ревью и правок; изначально — 6 passed)
 
 - [x] **Step 5: Commit**
 
@@ -989,7 +1184,7 @@ def login(
     if user is None or not user.is_active or not password_ok:
         raise HTTPException(401, "неверный email или пароль")
 
-    token = create_access_token(user.id, user.role, config.jwt_secret)
+    token = create_access_token(user.id, user.role, secret=config.jwt_secret)
     response.set_cookie(
         "access_token", token,
         httponly=True, samesite="lax", secure=config.cookie_secure,
@@ -1064,6 +1259,14 @@ def main() -> None:
     if len(password) < 8:
         print("Пароль короче 8 символов")
         sys.exit(1)
+    try:
+        password_hash = hash_password(password)
+    except ValueError as e:
+        # hash_password бросает ValueError на пароле длиннее 72 байт (bcrypt
+        # молча обрезал бы его иначе, см. app/api/security.py) — превращаем
+        # в понятное сообщение, а не даём упасть трейсбеком.
+        print(str(e))
+        sys.exit(1)
 
     db = SessionLocal()
     try:
@@ -1071,7 +1274,7 @@ def main() -> None:
             print(f"Пользователь {email} уже существует")
             sys.exit(1)
         db.add(User(email=email, full_name=full_name,
-                    password_hash=hash_password(password), role="admin", is_active=True))
+                    password_hash=password_hash, role="admin", is_active=True))
         db.commit()
         print(f"Администратор {email} создан")
     finally:
@@ -5481,9 +5684,16 @@ def create_user(payload: UserIn, db: Session = Depends(get_db),
     if db.scalars(select(User).where(User.email == payload.email)).first():
         raise HTTPException(400, f"пользователь {payload.email} уже существует")
 
+    try:
+        password_hash = hash_password(payload.password)
+    except ValueError as e:
+        # hash_password бросает ValueError на пароле длиннее 72 байт —
+        # без перехвата это ушло бы наружу 500-й (см. app/api/security.py).
+        raise HTTPException(422, str(e))
+
     user = User(email=payload.email, full_name=payload.full_name, role=payload.role,
                 is_active=payload.is_active,
-                password_hash=hash_password(payload.password))
+                password_hash=password_hash)
     db.add(user)
     db.commit()
     return _to_out(user)
@@ -5511,7 +5721,10 @@ def update_user(user_id: int, payload: UserIn, db: Session = Depends(get_db),
     if payload.password:
         if len(payload.password) < 8:
             raise HTTPException(422, "пароль короче 8 символов")
-        user.password_hash = hash_password(payload.password)
+        try:
+            user.password_hash = hash_password(payload.password)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
     db.commit()
     return _to_out(user)
 
@@ -5528,6 +5741,12 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
     db.commit()
     return {"ok": True}
 ```
+
+`create_user`/`update_user` оборачивают `hash_password` в `try/except
+ValueError` (правка вслед за ревью Task 3): `hash_password` бросает
+`ValueError`, если пароль длиннее 72 байт — bcrypt иначе молча обрезал бы
+ввод, делая длинные пароли с общим префиксом взаимозаменяемыми. Без перехвата
+это ушло бы наружу как 500, а не как понятная 422-ошибка валидации.
 
 - [ ] **Step 4: Подключить роутер**
 

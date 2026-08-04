@@ -7107,10 +7107,13 @@ x-backend-base: &backend-base
   volumes:
     - media:/app/media
   environment: &backend-env
-    DATABASE_URL: postgresql+psycopg://app:${DB_PASSWORD}@postgres:5432/content
+    # Форма `:?` — обязательное значение: незаданная переменная в форме
+    # `${VAR}` разворачивается в пустую строку, и прод молча поднимется,
+    # подписывая токены пустым секретом. `:?` роняет запуск с внятным текстом.
+    DATABASE_URL: postgresql+psycopg://app:${DB_PASSWORD:?DB_PASSWORD не задан}@postgres:5432/content
     REDIS_URL: redis://redis:6379/0
-    JWT_SECRET: ${JWT_SECRET}
-    ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    JWT_SECRET: ${JWT_SECRET:?JWT_SECRET не задан}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY не задан}
     COOKIE_SECURE: "true"
     MEDIA_DIR: /app/media
     TZ: Europe/Samara
@@ -7152,7 +7155,7 @@ services:
     environment:
       POSTGRES_DB: content
       POSTGRES_USER: app
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD не задан}
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d content"]

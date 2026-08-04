@@ -958,22 +958,58 @@ git commit -m "feat: хеширование паролей и JWT"
 - Modify: `execution/backend/tests/conftest.py` (дополнить фикстурами для API; `db_session` там уже есть — создан в Task 2)
 - Test: `execution/backend/tests/test_api_auth.py`
 
-- [ ] **Step 1: Фикстуры для тестов API**
+- [x] **Step 1: Фикстуры для тестов API**
 
 `tests/conftest.py` уже существует (Task 2) и содержит фикстуру `db_session` на
 in-memory SQLite. Здесь он дополняется, а не создаётся заново — `db_session` не
 трогаем, ниже дописываем в тот же файл:
+
+> **Отступление от плана (задокументировано при исполнении Task 4).** Без
+> `poolclass=StaticPool` в `db_session` тесты этого файла падают: FastAPI
+> выполняет синхронные эндпоинты в отдельном потоке (`run_in_threadpool`), а
+> `sqlite3` для `:memory:` по умолчанию даёт каждому потоку свою, независимую
+> базу — эндпоинт видит пустую БД без таблиц (`no such table: users`), хотя
+> фикстура создала их и записала admin/manager в потоке теста. Эмпирически
+> проверено: без `StaticPool` — `4 failed, 1 passed, 1 error`; с ним — `6
+> passed`. `StaticPool` — официально документированный паттерн FastAPI/
+> SQLAlchemy для тестирования с in-memory SQLite через `TestClient`. Правка
+> внесена в `db_session`, несмотря на пометку «не трогаем» — без неё
+> обязательный пункт приёмки (мутационная проверка, полный зелёный прогон)
+> невыполним.
 
 ```python
 import contextlib
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.db import Base
+import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
 
 from app.api.deps import get_db
 from app.api.security import hash_password
 from app.main import app
 from app.models.user import User
+
+# SQLite в памяти: модельные и (позже) API-тесты проверяют поведение, а не
+# диалект БД. Postgres-специфичного SQL в моделях нет.
+TEST_URL = "sqlite:///:memory:"
+
+
+@pytest.fixture
+def db_session():
+    # poolclass=StaticPool — см. отступление от плана выше.
+    engine = create_engine(
+        TEST_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = Session()
+    yield session
+    session.close()
 
 
 @pytest.fixture
@@ -1029,7 +1065,7 @@ def manager_client(_client_for, manager):
     return _client_for("manager@k1.ru", "managerpass")
 ```
 
-- [ ] **Step 2: Написать падающий тест**
+- [x] **Step 2: Написать падающий тест**
 
 `execution/backend/tests/test_api_auth.py`:
 
@@ -1077,12 +1113,15 @@ def test_inactive_user_cannot_login(client, db_session, admin):
     assert resp.status_code == 401
 ```
 
-- [ ] **Step 3: Запустить тест, убедиться что падает**
+- [x] **Step 3: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_auth.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'app.main'`
+Expected: FAIL — `ModuleNotFoundError` (фактически первым не найден `app.api.deps`,
+т.к. `conftest.py` импортирует его раньше `app.main` — не `app.main`, как
+написано выше; порядок импортов в файле определяет, какой модуль всплывёт
+первым, суть ошибки та же).
 
-- [ ] **Step 4: Зависимости**
+- [x] **Step 4: Зависимости**
 
 `execution/backend/app/api/deps.py`:
 
@@ -1137,7 +1176,7 @@ def require_role(*roles: str):
     return _dependency
 ```
 
-- [ ] **Step 5: Роутер авторизации**
+- [x] **Step 5: Роутер авторизации**
 
 `execution/backend/app/api/auth.py`:
 
@@ -1204,7 +1243,7 @@ def me(user: User = Depends(get_current_user)):
     return UserProfile(email=user.email, full_name=user.full_name, role=user.role)
 ```
 
-- [ ] **Step 6: Сборка приложения**
+- [x] **Step 6: Сборка приложения**
 
 `execution/backend/app/main.py`:
 
@@ -1223,12 +1262,12 @@ def health():
     return {"status": "ok"}
 ```
 
-- [ ] **Step 7: Запустить тест, убедиться что проходит**
+- [x] **Step 7: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_auth.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 8: Скрипт первого администратора**
+- [x] **Step 8: Скрипт первого администратора**
 
 `execution/backend/create_admin.py`:
 
@@ -1285,7 +1324,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 9: Проверить скрипт вживую**
+- [x] **Step 9: Проверить скрипт вживую**
 
 Run:
 ```bash
@@ -1294,7 +1333,7 @@ docker compose run --rm backend python create_admin.py
 ```
 Expected: после ввода данных — `Администратор <email> создан`
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add execution/backend/app execution/backend/create_admin.py execution/backend/tests

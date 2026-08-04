@@ -1,6 +1,7 @@
 import contextlib
 
 import pytest
+from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -9,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.db import Base
 import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_role
 from app.api.security import hash_password
 from app.main import app
 from app.models.user import User
@@ -92,3 +93,23 @@ def admin_client(_client_for, admin):
 @pytest.fixture
 def manager_client(_client_for, manager):
     return _client_for("manager@k1.ru", "managerpass")
+
+
+@pytest.fixture
+def admin_only_route():
+    """`require_role` (Task 4) не подключён ни к одному боевому эндпоинту —
+    ролевые эндпоинты появятся в Task 6+. Чтобы не ждать до тех пор с
+    проверкой самого механизма авторизации, на время теста навешиваем на
+    боевой `app` служебный GET-роут за `require_role("admin")`, а после
+    теста снимаем его — в проде эндпоинт не остаётся."""
+    router = APIRouter()
+
+    @router.get("/_probe/admin-only")
+    def admin_only(user: User = Depends(require_role("admin"))):
+        return {"email": user.email}
+
+    app.include_router(router)
+    yield "/_probe/admin-only"
+    app.router.routes[:] = [
+        route for route in app.router.routes if getattr(route, "path", None) != "/_probe/admin-only"
+    ]

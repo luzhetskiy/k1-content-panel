@@ -1063,7 +1063,36 @@ def admin_client(_client_for, admin):
 @pytest.fixture
 def manager_client(_client_for, manager):
     return _client_for("manager@k1.ru", "managerpass")
+
+
+@pytest.fixture
+def admin_only_route():
+    """`require_role` (Task 4) не подключён ни к одному боевому эндпоинту —
+    ролевые эндпоинты появятся в Task 6+. Чтобы не ждать до тех пор с
+    проверкой самого механизма авторизации, на время теста навешиваем на
+    боевой `app` служебный GET-роут за `require_role("admin")`, а после
+    теста снимаем его — в проде эндпоинт не остаётся."""
+    router = APIRouter()
+
+    @router.get("/_probe/admin-only")
+    def admin_only(user: User = Depends(require_role("admin"))):
+        return {"email": user.email}
+
+    app.include_router(router)
+    yield "/_probe/admin-only"
+    app.router.routes[:] = [
+        route for route in app.router.routes if getattr(route, "path", None) != "/_probe/admin-only"
+    ]
 ```
+
+> **Дополнение (Task 4, после ревью).** Мутационная проверка при сдаче задачи
+> показала: «`require_role` всегда пропускает» и «`get_current_user` не
+> проверяет `is_active`» не роняли ни одного теста — `require_role` нигде не
+> подключён, а деактивация проверялась только на входе, не на уже выданном
+> cookie. `admin_only_route` — временный сервисный роут поверх боевого `app`
+> для проверки `require_role` в изоляции, до появления ролевых эндпоинтов в
+> Task 6+; добавлен импорт `APIRouter`, `Depends` в `fastapi` и `require_role`
+> в `app.api.deps` в начале файла (см. полный текст `conftest.py`).
 
 - [x] **Step 2: Написать падающий тест**
 
@@ -1110,6 +1139,35 @@ def test_inactive_user_cannot_login(client, db_session, admin):
     db_session.commit()
     resp = client.post("/api/auth/login",
                        data={"username": "admin@k1.ru", "password": "adminpass"})
+    assert resp.status_code == 401
+
+
+def test_active_session_revoked_on_deactivation(admin_client, db_session, admin):
+    """Cookie выдан на 12 часов при логине; если админ деактивирует
+    пользователя, следующий же запрос должен получить 401, а не работать
+    до истечения токена — ради этого get_current_user проверяет is_active
+    в БД на каждый запрос, а не только на входе."""
+    admin.is_active = False
+    db_session.commit()
+    resp = admin_client.get("/api/auth/me")
+    assert resp.status_code == 401
+
+
+def test_require_role_allows_matching_role(admin_client, admin_only_route):
+    resp = admin_client.get(admin_only_route)
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "admin@k1.ru"
+
+
+def test_require_role_rejects_other_role(manager_client, admin_only_route):
+    resp = manager_client.get(admin_only_route)
+    assert resp.status_code == 403
+
+
+def test_require_role_rejects_unauthenticated_with_401_not_403(client, admin_only_route):
+    """401, а не 403: иначе защищённый роут выдаёт сам факт своего
+    существования тому, кто вообще не прошёл аутентификацию."""
+    resp = client.get(admin_only_route)
     assert resp.status_code == 401
 ```
 
@@ -1265,7 +1323,9 @@ def health():
 - [x] **Step 7: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_auth.py -v`
-Expected: PASS — 6 passed
+Expected: PASS — 6 passed (на момент этого шага; после ревью и добавления
+тестов на `require_role` и деактивацию активной сессии — см. «Дополнение» в
+Step 1 и Step 2 — в файле 10 тестов, все проходят)
 
 - [x] **Step 8: Скрипт первого администратора**
 

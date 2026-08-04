@@ -39,3 +39,32 @@ def test_inactive_user_cannot_login(client, db_session, admin):
     resp = client.post("/api/auth/login",
                        data={"username": "admin@k1.ru", "password": "adminpass"})
     assert resp.status_code == 401
+
+
+def test_active_session_revoked_on_deactivation(admin_client, db_session, admin):
+    """Cookie выдан на 12 часов при логине; если админ деактивирует
+    пользователя, следующий же запрос должен получить 401, а не работать
+    до истечения токена — ради этого get_current_user проверяет is_active
+    в БД на каждый запрос, а не только на входе."""
+    admin.is_active = False
+    db_session.commit()
+    resp = admin_client.get("/api/auth/me")
+    assert resp.status_code == 401
+
+
+def test_require_role_allows_matching_role(admin_client, admin_only_route):
+    resp = admin_client.get(admin_only_route)
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "admin@k1.ru"
+
+
+def test_require_role_rejects_other_role(manager_client, admin_only_route):
+    resp = manager_client.get(admin_only_route)
+    assert resp.status_code == 403
+
+
+def test_require_role_rejects_unauthenticated_with_401_not_403(client, admin_only_route):
+    """401, а не 403: иначе защищённый роут выдаёт сам факт своего
+    существования тому, кто вообще не прошёл аутентификацию."""
+    resp = client.get(admin_only_route)
+    assert resp.status_code == 401

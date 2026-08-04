@@ -645,7 +645,7 @@ git commit -m "feat: alembic и таблица users"
 - Create: `execution/backend/app/api/security.py`
 - Test: `execution/backend/tests/test_api_security.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_api_security.py`:
 
@@ -696,12 +696,12 @@ def test_expire_is_reasonable():
     assert 60 <= ACCESS_TOKEN_EXPIRE_MINUTES <= 24 * 60
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_security.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.api.security'`
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `execution/backend/app/api/__init__.py` — пустой файл.
 
@@ -739,12 +739,12 @@ def decode_access_token(token: str, secret: str) -> dict:
     return jwt.decode(token, secret, algorithms=[ALGORITHM])
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_security.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add execution/backend/app/api execution/backend/tests/test_api_security.py

@@ -22,16 +22,11 @@ TEST_URL = "sqlite:///:memory:"
 
 @pytest.fixture
 def db_session():
-    # poolclass=StaticPool — ОТСТУПЛЕНИЕ от дословного текста плана Task 4
-    # (который явно требует "db_session не трогаем"), внесено в Task 4 при
-    # реализации API-тестов. Без него FastAPI выполняет синхронные
-    # эндпоинты в отдельном потоке (run_in_threadpool), а sqlite3 для
-    # ":memory:" по умолчанию даёт КАЖДОМУ потоку свою, независимую базу —
-    # эндпоинт видит пустую БД без таблиц ("no such table: users"), хотя
-    # фикстура создала их и записала admin/manager в потоке теста.
-    # StaticPool — задокументированный официальный паттерн FastAPI/SQLAlchemy
-    # для тестирования with in-memory SQLite через TestClient. См. отчёт по
-    # Task 4: без этой правки 4 из 6 тестов test_api_auth.py падают/ошибаются.
+    # poolclass=StaticPool обязателен: FastAPI выполняет синхронные эндпоинты
+    # в отдельном потоке (run_in_threadpool), а sqlite3 для ":memory:" по
+    # умолчанию заводит каждому потоку свою независимую базу — эндпоинт увидел
+    # бы пустую БД без таблиц, хотя фикстура создала их в потоке теста.
+    # StaticPool держит одно соединение на все потоки.
     engine = create_engine(
         TEST_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool
     )

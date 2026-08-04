@@ -411,6 +411,7 @@ Python-дефолты (`default=...`) в SQLAlchemy применяются на 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
@@ -422,7 +423,14 @@ TEST_URL = "sqlite:///:memory:"
 
 @pytest.fixture
 def db_session():
-    engine = create_engine(TEST_URL, connect_args={"check_same_thread": False})
+    # poolclass=StaticPool обязателен: FastAPI выполняет синхронные эндпоинты
+    # в отдельном потоке (run_in_threadpool), а sqlite3 для ":memory:" по
+    # умолчанию заводит каждому потоку свою независимую базу — эндпоинт увидел
+    # бы пустую БД без таблиц, хотя фикстура создала их в потоке теста.
+    # StaticPool держит одно соединение на все потоки.
+    engine = create_engine(
+        TEST_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     session = Session()
@@ -961,21 +969,17 @@ git commit -m "feat: хеширование паролей и JWT"
 - [x] **Step 1: Фикстуры для тестов API**
 
 `tests/conftest.py` уже существует (Task 2) и содержит фикстуру `db_session` на
-in-memory SQLite. Здесь он дополняется, а не создаётся заново — `db_session` не
-трогаем, ниже дописываем в тот же файл:
+in-memory SQLite. Здесь он дополняется, а не создаётся заново — `db_session`
+берётся оттуда как есть, ниже дописываем в тот же файл:
 
-> **Отступление от плана (задокументировано при исполнении Task 4).** Без
-> `poolclass=StaticPool` в `db_session` тесты этого файла падают: FastAPI
-> выполняет синхронные эндпоинты в отдельном потоке (`run_in_threadpool`), а
-> `sqlite3` для `:memory:` по умолчанию даёт каждому потоку свою, независимую
-> базу — эндпоинт видит пустую БД без таблиц (`no such table: users`), хотя
-> фикстура создала их и записала admin/manager в потоке теста. Эмпирически
-> проверено: без `StaticPool` — `4 failed, 1 passed, 1 error`; с ним — `6
-> passed`. `StaticPool` — официально документированный паттерн FastAPI/
-> SQLAlchemy для тестирования с in-memory SQLite через `TestClient`. Правка
-> внесена в `db_session`, несмотря на пометку «не трогаем» — без неё
-> обязательный пункт приёмки (мутационная проверка, полный зелёный прогон)
-> невыполним.
+> **Почему `db_session` в Task 2 создан со `StaticPool`.** Без него тесты
+> этого файла падают с `no such table: users`: FastAPI выполняет синхронные
+> эндпоинты в отдельном потоке (`run_in_threadpool`), а `sqlite3` для
+> `:memory:` по умолчанию даёт каждому потоку свою независимую базу — эндпоинт
+> видит пустую БД, хотя фикстура создала таблицы и записала admin/manager в
+> потоке теста. Эмпирически: без `StaticPool` — `4 failed, 1 passed, 1 error`,
+> с ним — `6 passed`. Обнаружено при исполнении Task 4, устранено в блоке
+> Task 2, чтобы дефект не воспроизводился при повторном прогоне плана.
 
 ```python
 import contextlib
@@ -1001,7 +1005,11 @@ TEST_URL = "sqlite:///:memory:"
 
 @pytest.fixture
 def db_session():
-    # poolclass=StaticPool — см. отступление от плана выше.
+    # poolclass=StaticPool обязателен: FastAPI выполняет синхронные эндпоинты
+    # в отдельном потоке (run_in_threadpool), а sqlite3 для ":memory:" по
+    # умолчанию заводит каждому потоку свою независимую базу — эндпоинт увидел
+    # бы пустую БД без таблиц, хотя фикстура создала их в потоке теста.
+    # StaticPool держит одно соединение на все потоки.
     engine = create_engine(
         TEST_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool
     )

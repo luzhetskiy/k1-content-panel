@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__tavily__tavily_search",
+      "Bash(python3 execution/step2_scrape_company.py --region \"Самара\" --sphere \"многоквартирные застройщики\" --count 15)",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -L --max-time 15 -H \"User-Agent: Mozilla/5.0 \\(Macintosh; Intel Mac OS X 10_15_7\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0.0.0 Safari/537.36\" -H \"Accept-Language: ru-RU,ru;q=0.9\" \"https://newdon.ru\")"
+    ]
+  }
+}

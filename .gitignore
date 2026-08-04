@@ -1,0 +1,24 @@
+# Секреты и доступы
+.env
+.env.prod
+.env.local
+
+# Данные и выгрузки: в истории им не место, объём и приватность
+*.db
+*.xlsx
+execution/data/
+articles_batch_*/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# OS
+.DS_Store

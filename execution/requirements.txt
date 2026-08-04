@@ -1,0 +1,11 @@
+# Актуальный процесс — полностью локальный, на этой машине, без внешних LLM-API.
+# Ключи (ANTHROPIC/TAVILY) НЕ требуются.
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+lxml>=5.0.0
+openpyxl>=3.1.0
+
+# --- legacy (только для устаревших скриптов, в актуальном pipeline не нужны) ---
+# anthropic>=0.40.0      # step3_generate_content.py / step4_verify_content.py (устар.)
+# tavily-python>=0.3.0   # старый поиск компаний (заменён импортом из Яндекс.Карт)

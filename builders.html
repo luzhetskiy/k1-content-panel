@@ -1,0 +1,410 @@
+<!-- 
+  ШАБЛОН СТРАНИЦЫ СТРОИТЕЛЯ
+
+  Общие правила заполнения:
+  1. Все плейсхолдеры вида {{...}} ИИ должен заменить на реальные данные.
+  2. Если данных нет — блок удалить или использовать fallback, указанный в комментарии.
+  3. Не оставлять пустые теги и незаменённые плейсхолдеры.
+  4. Внешние ссылки открывать в новой вкладке:
+     target="_blank" rel="noopener noreferrer".
+  5. Внутренние ссылки можно открывать в этой же вкладке, если проект не требует target="_blank".
+  6. Главный визуальный блок строителя всегда должен иметь id="builder".
+  7. Логотип, фон, кнопки, форма и контакты являются условными блоками.
+  8. Не указывать неподтверждённые факты: год основания, количество объектов, лицензии, рейтинги, если они не найдены в источниках.
+-->
+
+<!--
+  ГЛАВНЫЙ ВИЗУАЛЬНЫЙ БЛОК СТРОИТЕЛЯ
+
+  Назначение:
+  - показать логотип строителя, если он найден;
+  - если логотип не найден — показать текстовый заголовок.
+
+  Важные правила:
+  1. id всегда должен быть "builder".
+  2. Логотип может быть двух видов — выбери подходящий вариант:
+
+     А) <img> — если логотип доступен как отдельный файл (PNG, SVG-файл, WebP и т.п.).
+        Признаки: на сайте есть тег <img src="...logo..."> или <img src="...svg">,
+        либо в src у логотипа прямой URL на файл изображения.
+        → Оставить блок ЛОГОТИП IMG, удалить блоки ЛОГОТИП SVG и ТЕКСТОВЫЙ FALLBACK.
+
+     Б) <svg> — если логотип реализован как инлайн-SVG или SVG-спрайт
+        (<svg><use href="sprite.svg#logo"/></svg>).
+        Признаки: в header сайта нет <img> с логотипом, но есть <svg> или <use href="...#...">.
+        → Скопировать SVG-разметку логотипа из источника в блок ЛОГОТИП SVG,
+          удалить блоки ЛОГОТИП IMG и ТЕКСТОВЫЙ FALLBACK.
+
+     В) Текстовый fallback — если логотип не найден ни в одном из вариантов выше.
+        → Оставить блок ТЕКСТОВЫЙ FALLBACK, удалить блоки ЛОГОТИП IMG и ЛОГОТИП SVG.
+
+-->
+<div
+  class="partner-img-block partner-new universal builder-img-block"
+  id="builder"
+  data-builder-name="{{BUILDER_NAME}}"
+  data-builder-city="{{CITY_NAME}}"
+>
+
+  <span class="partner-wrapper__item__flag builder-label" id="builder-label">
+    Строительная компания
+  </span>
+
+  <!--
+    ВАРИАНТ А: ЛОГОТИП IMG
+    Использовать если логотип — отдельный файл (PNG/WebP/SVG-файл).
+    src: прямой URL на файл логотипа (абсолютный).
+    alt: осмысленное описание, напр. "Логотип {{BUILDER_NAME}}".
+    Удалить если используется вариант Б или В.
+  -->
+  <img
+    class="partner-logo partner-img-logo builder-logo builder-img-logo"
+    id="builder-logo"
+    src="{{BUILDER_LOGO_SRC}}"
+    alt="{{BUILDER_LOGO_ALT}}"
+  >
+
+  <!--
+    ВАРИАНТ Б: ЛОГОТИП SVG (инлайн или спрайт)
+    Использовать если логотип реализован через <svg> на сайте компании.
+    Скопировать SVG-разметку из источника целиком.
+    Удалить если используется вариант А или В.
+
+    Пример со спрайтом:
+    <svg class="partner-logo builder-logo" id="builder-logo" role="img" aria-label="Логотип {{BUILDER_NAME}}">
+      <use href="/local/sprite.svg#i-logo"></use>
+    </svg>
+
+    Пример с инлайн-SVG:
+    <svg class="partner-logo builder-logo" id="builder-logo" role="img" aria-label="Логотип {{BUILDER_NAME}}"
+         xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60">
+      [SVG-контент вставить сюда]
+    </svg>
+  -->
+
+  <!--
+    ВАРИАНТ В: ТЕКСТОВЫЙ FALLBACK
+    Использовать только если логотип не найден ни в варианте А, ни в Б.
+    Удалить если используется вариант А или Б.
+  -->
+  <span class="h2 builder-logo-text" id="builder-logo-text">
+    {{BUILDER_NAME}}
+  </span>
+
+
+  <img
+    class="partner-back partner-img-back builder-back" 
+    id="builder-background" 
+    src="/media/uploads/stroiteli/builder-back.webp" 
+    alt="Строительная компания {{BUILDER_NAME}}" 
+  >
+</div>
+
+<!-- 
+  ВЕРХНИЙ БЛОК КНОПОК
+
+  Кнопки должны быть под блоком с логотипом, а не перед ним.
+  Если кнопки не нужны — удалить весь блок .builder-top-buttons.
+-->
+<div class="buttons-columns builder-top-buttons" id="builder-top-buttons">
+  <a
+    href="/catalog/" 
+    class="btn button-theme_primary builder-button builder-button-catalog" 
+  >
+    Каталог
+  </a>
+
+  <a
+    href="/addresses/services/" 
+    class="btn button-theme_primary grey builder-button builder-button-services" 
+  >
+    Выбрать строителя
+  </a>
+</div>
+
+<!-- 
+  КОРОТКИЙ ОСНОВНОЙ ЗАГОЛОВОК
+
+  partner-main-title должен быть коротким.
+  Примеры:
+  - О компании
+  - Строительная компания
+  - О строителе
+-->
+<h2 class="margin-0 partner-main-title builder-main-title" id="builder-main-title">
+  О компании {{BUILDER_NAME}}
+</h2>
+
+<!-- 
+  БЛОК "О СТРОИТЕЛЕ" 
+
+  Структуру желательно сохранять:
+  - 4 блока .about-item;
+  - в каждом блоке h3 и p;
+  - темы:
+    1. О компании
+    2. Специализация
+    3. Проекты и услуги
+    4. Преимущества
+
+  Если информации мало:
+  - использовать нейтральные формулировки;
+  - не выдумывать точные факты;
+  - писать "может выполнять", "специализируется на", "ориентирована на", если данные не подтверждены точно.
+-->
+<div class="about-partner about-builder" id="builder-about">
+
+  <!-- 
+    БЛОК 1: О КОМПАНИИ
+
+    Что писать:
+    - кто такой строитель;
+    - чем занимается компания;
+    - в каком сегменте работает;
+    - какие типы объектов может строить;
+    - для каких клиентов подходит.
+
+    Не писать без подтверждения:
+    - точный год основания;
+    - количество построенных домов;
+    - лицензии;
+    - членство в СРО;
+    - гарантии;
+    - рейтинг.
+  -->
+  <div class="about-item" id="builder-about-company">
+    <h3>О компании</h3>
+    <p>
+      {{ABOUT_BUILDER_COMPANY_TEXT}}
+    </p>
+  </div>
+
+  <!-- 
+    БЛОК 2: СПЕЦИАЛИЗАЦИЯ
+
+    Что писать:
+    - основные направления строительства;
+    - типы объектов;
+    - технологии, если они известны;
+    - формат работы.
+
+    Примеры направлений:
+    - строительство частных домов;
+    - коттеджное строительство;
+    - малоэтажное строительство;
+    - строительство коммерческих объектов;
+    - проектирование;
+    - ремонт и отделка;
+    - инженерные работы;
+    - строительство под ключ.
+  -->
+  <div class="about-item" id="builder-specialization">
+    <h3>Специализация</h3>
+    <p>
+      {{BUILDER_SPECIALIZATION_TEXT}}
+    </p>
+  </div>
+
+  <!-- 
+    БЛОК 3: ПРОЕКТЫ И УСЛУГИ
+
+    Что писать:
+    - какие услуги может оказывать компания;
+    - какие этапы строительства закрывает;
+    - работает ли с проектированием, подбором материалов, сметой, отделкой;
+    - если есть проекты — упомянуть, что их можно посмотреть в разделе проектов.
+
+    Важно:
+    - не указывать конкретные реализованные объекты, если они не найдены;
+    - не обещать точную стоимость без расчёта.
+  -->
+  <div class="about-item" id="builder-projects-services">
+    <h3>Проекты и услуги</h3>
+    <p>
+      {{BUILDER_PROJECTS_SERVICES_TEXT}}
+    </p>
+  </div>
+
+  <!-- 
+    БЛОК 4: ПРЕИМУЩЕСТВА
+
+    Что писать:
+    - удобство работы с компанией;
+    - комплексный подход;
+    - опыт в нужном сегменте, если он подтверждён;
+    - помощь с подбором решений;
+    - возможность расчёта стоимости;
+    - наличие сайта, проектов, контактов, консультаций.
+
+    Не писать:
+    - "лучшая компания";
+    - "самые низкие цены";
+    - "гарантированно построит дешевле";
+    - "100% качество", если нет подтверждения.
+  -->
+  <div class="about-item" id="builder-benefits">
+    <h3>Преимущества</h3>
+    <p>
+      {{BUILDER_BENEFITS_TEXT}}
+    </p>
+  </div>
+</div>
+
+
+<!-- 
+  БЛОК КОНТАКТОВ СТРОИТЕЛЯ
+
+  Назначение:
+  - вывести контакты строительной компании в конкретном городе;
+  - если контактов несколько — создать несколько .partner-item;
+  - телефон и email всегда должны быть ссылками;
+  - адрес, график и комментарии — обычные div.
+
+  Правила:
+  1. Заголовок:
+     "{{BUILDER_NAME}} в {{CITY_PREPOSITIONAL}}" 
+
+  2. Один .partner-item = один офис, филиал, шоурум, отдел продаж или контактная точка.
+
+  3. Если строка не найдена — удалить её:
+     - нет адреса — удалить адрес;
+     - нет телефона — удалить телефон;
+     - нет email — удалить email;
+     - нет графика — удалить график;
+     - нет сайта/страницы — удалить сайт;
+     - нет комментария — удалить комментарий.
+
+  4. Если у проекта используются иконки — оставить .circle-img.
+     Если иконки не нужны — удалить .circle-img из строк.
+-->
+<div class="about-points builder-contacts" id="builder-contacts">
+  <h2 id="builder-contacts-title">
+    {{BUILDER_NAME}} в {{CITY_PREPOSITIONAL}}
+  </h2>
+
+  <div class="points-grid builder-contacts-grid" id="builder-contacts-grid">
+
+    <!-- 
+      КОНТАКТ 1
+
+      Если найдено несколько контактов в городе — продублировать весь блок .partner-item
+      и заменить id на builder-contact-2, builder-contact-3 и так далее.
+    -->
+    <div
+      class="partner-item builder-contact-item" 
+      id="builder-contact-1" 
+      data-contact-city="{{CITY_NAME}}" 
+    >
+
+      <!-- 
+        АДРЕС
+
+        Выводить только если найден адрес.
+      -->
+      <div class="partner-custom-line partner-item-btn builder-line-address">
+        <!-- Иконку оставить только если она используется в проекте -->
+        <div class="circle-img">
+          <img alt="" src="/media/uploads/svg/bx-map.svg">
+        </div>
+
+        <p>{{BUILDER_CONTACT_1_ADDRESS}}</p>
+      </div>
+
+      <!-- 
+        ТЕЛЕФОН
+
+        Выводить только если найден телефон.
+        Это обязательно ссылка.
+
+        href:
+        - формат tel:+79999999999
+        - без пробелов, скобок, дефисов.
+
+        Текст:
+        - человекочитаемый формат.
+        Пример: +7 (495) 123-45-67
+      -->
+      <a
+        class="partner-custom-line partner-item-btn builder-line-phone" 
+        href="tel:{{BUILDER_CONTACT_1_PHONE_TEL}}" 
+      >
+        <!-- Иконку оставить только если она используется в проекте -->
+        <div class="circle-img">
+          <img alt="" src="/media/uploads/svg/bx-phone-call.svg">
+        </div>
+
+        {{BUILDER_CONTACT_1_PHONE_TEXT}}
+      </a>
+
+      <!-- 
+        EMAIL
+
+        Выводить только если найден email.
+        Это обязательно ссылка.
+      -->
+      <a
+        class="partner-custom-line partner-item-btn builder-line-email" 
+        href="mailto:{{BUILDER_CONTACT_1_EMAIL}}" 
+      >
+        <!-- Иконку оставить только если она используется в проекте -->
+        <div class="circle-img">
+          <img alt="" src="/media/uploads/svg/bx-envelope.svg">
+        </div>
+
+        {{BUILDER_CONTACT_1_EMAIL}}
+      </a>
+
+      <!-- 
+        РЕЖИМ РАБОТЫ
+
+        Выводить только если найден график.
+      -->
+      <div class="partner-custom-line partner-item-btn builder-line-time">
+        <!-- Иконку оставить только если она используется в проекте -->
+        <div class="circle-img">
+          <img alt="" src="/media/uploads/svg/bx-clock.svg">
+        </div>
+
+        <p>{{BUILDER_CONTACT_1_WORKING_HOURS}}</p>
+      </div>
+
+      <!-- 
+        САЙТ ИЛИ СТРАНИЦА КОНТАКТОВ
+
+        Выводить только если нужна отдельная строка сайта в контактах.
+        Обычно сайт строителя также дублируется в нижней кнопке.
+      -->
+      <a
+        class="partner-custom-line partner-item-btn builder-line-site" 
+        href="{{BUILDER_CONTACT_1_SITE_URL}}" 
+        target="_blank" 
+        rel="noopener noreferrer" 
+      >
+        <!-- Иконку оставить только если она используется в проекте -->
+        <div class="circle-img">
+          <img alt="" src="/media/uploads/svg/bx-link-external.svg">
+        </div>
+
+        {{BUILDER_CONTACT_1_SITE_TEXT}}
+      </a>
+
+      <!-- 
+        ДОПОЛНИТЕЛЬНЫЙ КОММЕНТАРИЙ
+
+        Использовать только если есть полезное уточнение:
+        - офис продаж;
+        - шоурум;
+        - предварительная запись;
+        - консультация;
+        - отдел проектирования;
+        - отдел строительства;
+        - самовывоз документов;
+        - ориентир.
+      -->
+      <div class="partner-custom-line partner-item-btn builder-line-note">
+        <p>{{BUILDER_CONTACT_1_NOTE}}</p>
+      </div>
+    </div>
+
+  </div>
+</div>

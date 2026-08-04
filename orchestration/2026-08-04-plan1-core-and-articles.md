@@ -398,7 +398,7 @@ git commit -m "feat: скелет бэкенда — config, db, compose"
 - Create: `execution/backend/app/models/user.py`
 - Test: `execution/backend/tests/test_models_user.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_models_user.py`:
 
@@ -417,12 +417,12 @@ def test_role_column_allows_admin():
     assert user.role == "admin"
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_user.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.models'`
 
-- [ ] **Step 3: Модель User**
+- [x] **Step 3: Модель User**
 
 `execution/backend/app/models/__init__.py` — пустой файл.
 
@@ -446,12 +446,12 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_user.py -v`
 Expected: PASS — 2 passed
 
-- [ ] **Step 5: Инициализировать Alembic**
+- [x] **Step 5: Инициализировать Alembic**
 
 Run: `cd execution && docker compose run --rm --no-deps backend alembic init alembic`
 
@@ -463,7 +463,7 @@ sqlalchemy.url =
 
 URL берётся из окружения в `env.py` — держать пароль БД в файле конфигурации незачем.
 
-- [ ] **Step 6: Настроить alembic/env.py**
+- [x] **Step 6: Настроить alembic/env.py**
 
 Заменить содержимое `execution/backend/alembic/env.py` на:
 
@@ -475,7 +475,11 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import config as app_config
 from app.db import Base
-from app.models import user, setting, site, prompt_template, article, job  # noqa: F401
+from app.models import user  # noqa: F401
+# from app.models import setting  # noqa: F401  (раскомментировать в Task 5)
+# from app.models import site  # noqa: F401  (раскомментировать в Task 9)
+# from app.models import prompt_template  # noqa: F401  (раскомментировать в Task 12)
+# from app.models import article, job  # noqa: F401  (раскомментировать в Task 14)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", app_config.database_url)
@@ -514,17 +518,13 @@ else:
     run_migrations_online()
 ```
 
-Импорт всех модулей моделей одной строкой обязателен: `autogenerate` видит только те
-таблицы, чьи классы к моменту запуска зарегистрированы в `Base.metadata`. Модули
-`setting`, `site`, `prompt_template`, `article`, `job` появятся в задачах 5, 9, 12, 14 —
-до тех пор строку импорта держи закомментированной по одному имени, раскомментируя по
-мере создания файлов. Начни с:
+`autogenerate` видит только те таблицы, чьи классы к моменту запуска зарегистрированы в
+`Base.metadata` — поэтому каждая новая модель требует свой импорт в `env.py`. Модули
+`setting`, `site`, `prompt_template`, `article`, `job` появятся в задачах 5, 9, 12, 14;
+до тех пор строки их импорта держи закомментированными (см. блок выше), раскомментируя
+каждую по мере создания соответствующего файла модели.
 
-```python
-from app.models import user  # noqa: F401
-```
-
-- [ ] **Step 7: Сгенерировать миграцию**
+- [x] **Step 7: Сгенерировать миграцию**
 
 Run:
 ```bash
@@ -534,10 +534,11 @@ docker compose run --rm backend alembic upgrade head
 ```
 Expected: создан файл в `alembic/versions/`, вывод `Running upgrade -> <hash>, users`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
-git add execution/backend/alembic execution/backend/alembic.ini execution/backend/app/models
+git add execution/backend/alembic execution/backend/alembic.ini execution/backend/app/models \
+  execution/backend/tests/test_models_user.py orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: alembic и таблица users"
 ```
 

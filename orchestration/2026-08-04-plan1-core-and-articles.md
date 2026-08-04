@@ -88,6 +88,7 @@ docker compose up api frontend                               # локальна�
 **Files:**
 - Create: `execution/backend/requirements.txt`
 - Create: `execution/backend/Dockerfile`
+- Create: `execution/backend/.dockerignore`
 - Create: `execution/backend/pytest.ini`
 - Create: `execution/backend/app/__init__.py`
 - Create: `execution/backend/app/config.py`
@@ -151,6 +152,16 @@ COPY . .
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
+`execution/backend/.dockerignore` — `COPY . .` иначе запекает в образ `.env` и локальные кэши:
+
+```
+.env*
+__pycache__/
+*.pyc
+.pytest_cache/
+media/
+```
+
 - [x] **Step 3: pytest.ini**
 
 `execution/backend/pytest.ini`:
@@ -169,8 +180,11 @@ pythonpath = .
 from app.config import Config
 
 
-def test_defaults_are_dev_friendly():
-    cfg = Config()
+def test_defaults_are_dev_friendly(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("COOKIE_SECURE", raising=False)
+    cfg = Config(_env_file=None)
     assert cfg.database_url.startswith("postgresql+psycopg://")
     assert cfg.redis_url.startswith("redis://")
     assert cfg.cookie_secure is False
@@ -184,6 +198,10 @@ def test_env_overrides(monkeypatch):
     assert cfg.cookie_secure is True
 ```
 
+Тест дефолтов бежит внутри сервиса `backend`, где compose уже выставляет
+`DATABASE_URL`/`REDIS_URL` — без `delenv` и `_env_file=None` он молча проверял
+бы значения из окружения, а не дефолты класса.
+
 - [x] **Step 5: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose build backend && docker compose run --rm --no-deps backend pytest tests/test_config.py -v`
@@ -196,7 +214,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.config'`
 `execution/backend/app/config.py`:
 
 ```python
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Config(BaseSettings):
@@ -212,12 +230,16 @@ class Config(BaseSettings):
 
     media_dir: str = "/app/media"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 config = Config()
 ```
+
+`extra="ignore"` обязателен: дефолт pydantic-settings 2.7 — `extra="forbid"`, и
+любой лишний ключ в `.env` роняет `ValidationError` прямо на импорте модуля
+(`config = Config()` на уровне модуля падает у api, worker, migrate и тестов
+разом).
 
 - [x] **Step 7: clock.py и db.py**
 
@@ -259,8 +281,8 @@ x-backend-base: &backend-base
   volumes:
     - ./backend:/app
     - media:/app/media
-  environment: &backend-env
-    DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/content
+  environment:
+    DATABASE_URL: postgresql+psycopg://app:${DB_PASSWORD:-app}@postgres:5432/content
     REDIS_URL: redis://redis:6379/0
     JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-prod}
     ENCRYPTION_KEY: ${ENCRYPTION_KEY:-8Bq3mA0kXqL2pR7vT1yZ4nC6wE9sU5hJ0dF2gK8lM3o=}
@@ -270,6 +292,7 @@ x-backend-base: &backend-base
 services:
   backend:
     <<: *backend-base
+    profiles: ["tools"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -287,7 +310,7 @@ services:
   api:
     <<: *backend-base
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       redis:
         condition: service_started
@@ -313,7 +336,7 @@ services:
     command: sh -c "npm install && npm run dev -- --host"
     volumes:
       - ./frontend:/app
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     depends_on:
       - api
 
@@ -323,7 +346,7 @@ services:
       POSTGRES_DB: content
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d content"]
@@ -339,6 +362,17 @@ volumes:
   redis_data:
   media:
 ```
+
+Четыре точечные правки против первой версии: `DATABASE_URL` берёт пароль из
+`${DB_PASSWORD:-app}` (иначе смена `DB_PASSWORD` меняет пароль только у
+postgres, а строка подключения остаётся на `app:app`); порты `api`/`postgres`/
+`frontend` привязаны к `127.0.0.1`, а не ко всем интерфейсам хоста (иначе
+postgres с паролем `app` торчит наружу); якорь `&backend-env` убран как
+неиспользуемый (нигде не разыменовывался); у сервиса `backend` появился
+`profiles: ["tools"]` — без своего `command` он иначе наследует CMD из
+Dockerfile и в обычном `docker compose up` поднимает второй `uvicorn` без
+портов и без смысла. Сервис `backend` остаётся только для разовых команд
+(`docker compose run --rm --no-deps backend pytest ...`).
 
 - [x] **Step 9: Запустить тест, убедиться что проходит**
 

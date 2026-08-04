@@ -3,8 +3,8 @@ x-backend-base: &backend-base
   volumes:
     - ./backend:/app
     - media:/app/media
-  environment: &backend-env
-    DATABASE_URL: postgresql+psycopg://app:app@postgres:5432/content
+  environment:
+    DATABASE_URL: postgresql+psycopg://app:${DB_PASSWORD:-app}@postgres:5432/content
     REDIS_URL: redis://redis:6379/0
     JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-prod}
     ENCRYPTION_KEY: ${ENCRYPTION_KEY:-8Bq3mA0kXqL2pR7vT1yZ4nC6wE9sU5hJ0dF2gK8lM3o=}
@@ -14,6 +14,7 @@ x-backend-base: &backend-base
 services:
   backend:
     <<: *backend-base
+    profiles: ["tools"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -31,7 +32,7 @@ services:
   api:
     <<: *backend-base
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       redis:
         condition: service_started
@@ -57,7 +58,7 @@ services:
     command: sh -c "npm install && npm run dev -- --host"
     volumes:
       - ./frontend:/app
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     depends_on:
       - api
 
@@ -67,7 +68,7 @@ services:
       POSTGRES_DB: content
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d content"]

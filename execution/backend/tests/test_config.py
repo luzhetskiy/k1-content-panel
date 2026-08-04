@@ -1,8 +1,11 @@
 from app.config import Config
 
 
-def test_defaults_are_dev_friendly():
-    cfg = Config()
+def test_defaults_are_dev_friendly(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("COOKIE_SECURE", raising=False)
+    cfg = Config(_env_file=None)
     assert cfg.database_url.startswith("postgresql+psycopg://")
     assert cfg.redis_url.startswith("redis://")
     assert cfg.cookie_secure is False

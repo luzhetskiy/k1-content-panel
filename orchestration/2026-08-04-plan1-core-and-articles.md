@@ -1625,7 +1625,7 @@ git commit -m "feat: авторизация, роли, первый админи
 - Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `Setting`)
 - Test: `execution/backend/tests/test_settings.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_settings.py`:
 
@@ -1687,12 +1687,12 @@ def test_service_defaults(db_session):
     assert service.get_bool("absent", True) is True
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_settings.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.settings'`
 
-- [ ] **Step 3: crypto.py**
+- [x] **Step 3: crypto.py**
 
 `execution/backend/app/settings/__init__.py` — пустой файл.
 
@@ -1729,7 +1729,7 @@ def mask(value: str) -> str:
     return f"{value[:3]}...{value[-4:]}"
 ```
 
-- [ ] **Step 4: Модель Setting**
+- [x] **Step 4: Модель Setting**
 
 `execution/backend/app/models/setting.py`:
 
@@ -1748,7 +1748,7 @@ class Setting(Base):
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False)
 ```
 
-- [ ] **Step 5: SettingsService**
+- [x] **Step 5: SettingsService**
 
 `execution/backend/app/settings/service.py`:
 
@@ -1814,12 +1814,12 @@ class SettingsService:
         return raw.lower() in ("1", "true", "yes") if raw is not None else default
 ```
 
-- [ ] **Step 6: Запустить тест, убедиться что проходит**
+- [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_settings.py -v`
 Expected: PASS — 9 passed
 
-- [ ] **Step 7: Миграция**
+- [x] **Step 7: Миграция**
 
 Добавь `Setting` в `app/models/__init__.py` (реестр моделей, см. Task 2, Step 3) —
 `alembic/env.py` и `tests/conftest.py` подхватят её через `import app.models` без
@@ -1832,7 +1832,7 @@ docker compose run --rm backend alembic upgrade head
 ```
 Expected: `Running upgrade <prev> -> <hash>, settings`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add execution/backend/app/settings execution/backend/app/models/setting.py execution/backend/alembic execution/backend/tests/test_settings.py

@@ -2398,7 +2398,7 @@ git commit -m "feat: настройки RouterAI с маскированием �
 - Create: `execution/backend/app/ai/text.py`
 - Test: `execution/backend/tests/test_ai_text.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_ai_text.py`:
 
@@ -2472,12 +2472,12 @@ def test_empty_content_is_an_error():
         TextClient(client, "test-model").complete_text("промпт")
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_text.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.ai'`
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `execution/backend/app/ai/__init__.py` — пустой файл.
 
@@ -2582,12 +2582,12 @@ class TextClient:
         )
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_text.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add execution/backend/app/ai execution/backend/tests/test_ai_text.py

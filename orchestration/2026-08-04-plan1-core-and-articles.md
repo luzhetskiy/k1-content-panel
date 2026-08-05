@@ -2042,7 +2042,7 @@ git commit -m "feat: шифрование секретов и SettingsService"
 - Modify: `execution/backend/app/main.py`
 - Test: `execution/backend/tests/test_api_admin_settings.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_api_admin_settings.py`:
 
@@ -2091,12 +2091,12 @@ def test_invalid_int_setting_rejected(admin_client):
     assert resp.status_code == 422
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
 Expected: FAIL — 404 на `/api/admin/settings`
 
-- [ ] **Step 3: Дефолты**
+- [x] **Step 3: Дефолты**
 
 `execution/backend/app/seed.py`:
 
@@ -2136,7 +2136,7 @@ def seed_settings(db: Session) -> None:
     db.commit()
 ```
 
-- [ ] **Step 4: Роутер настроек**
+- [x] **Step 4: Роутер настроек**
 
 `execution/backend/app/api/admin_settings.py`:
 
@@ -2206,7 +2206,7 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
     return read_settings(db, _user)
 ```
 
-- [ ] **Step 5: Подключить роутер**
+- [x] **Step 5: Подключить роутер**
 
 В `execution/backend/app/main.py` заменить блок импорта и подключения на:
 
@@ -2217,12 +2217,12 @@ app.include_router(auth.router)
 app.include_router(admin_settings.router)
 ```
 
-- [ ] **Step 6: Запустить тест, убедиться что проходит**
+- [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add execution/backend/app/seed.py execution/backend/app/api/admin_settings.py execution/backend/app/main.py execution/backend/tests/test_api_admin_settings.py

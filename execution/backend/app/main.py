@@ -18,12 +18,13 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api import auth
+from app.api import admin_settings, auth
 from app.api.deps import get_db
 
 app = FastAPI(title="k1 content service")
 
 app.include_router(auth.router)
+app.include_router(admin_settings.router)
 
 
 @app.get("/api/health")

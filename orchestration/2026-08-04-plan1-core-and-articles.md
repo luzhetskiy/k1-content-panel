@@ -5824,22 +5824,27 @@ celery_app.conf.timezone = "Europe/Samara"
 # beat не нужен: периодических задач нет, всё запускается из UI.
 
 # Без лимита зависшее соединение с RouterAI держит слот воркера сколько
-# угодно долго: TextClient (app/ai/text.py) не сдаётся раньше max_retries
-# попыток по REQUEST_TIMEOUT_SECONDS=120 с каждая — до ~366 с на один вызов
-# complete_text/complete_json, и это может повториться на каждой статье
-# партии. Воркеров всего два (--concurrency=2, см. docker-compose.yml), а до
-# введения таймаута в Task 7 у SDK был дефолт в 600 с на попытку — то есть
-# одно молчащее соединение было способно занимать половину мощности воркеров
-# около полутора часов на единственном вызове. Мягкий лимит меньше жёсткого,
-# чтобы задача успела записать status="failed" в JobRun/ArticleBatch и
-# закрыть сессию БД до принудительного завершения. Числа — компромисс:
-# с запасом хватает на generate_topics/retry_article (один вызов LLM плюс
-# сборка одной статьи), но для больших партий в run_batch (до 50 статей,
-# см. Task 18) это может оказаться тесно — точнее было бы считать лимит от
-# числа статей через time_limit= в apply_async() при постановке задачи;
-# это за рамками текущей задачи.
-celery_app.conf.task_soft_time_limit = 1800  # 30 минут
-celery_app.conf.task_time_limit = 2100       # 35 минут
+# угодно долго, а воркеров всего два (--concurrency=2, см. docker-compose.yml),
+# то есть одна такая задача съедает половину мощности.
+#
+# Расчёт худшего случая одного вызова LLM: REQUEST_TIMEOUT_SECONDS=120 с на
+# попытку × llm_max_retries (дефолт 3) плюс паузы backoff 2 с и 4 с ≈ 366 с.
+#
+# Эти глобальные лимиты рассчитаны на задачи с предсказуемой длительностью —
+# generate_topics и retry_article: один вызов LLM плюс сборка одной статьи с
+# картинками. Для run_batch они НЕ применяются: партия обрабатывается
+# последовательно и её длительность пропорциональна числу статей, поэтому
+# лимит вычисляется при постановке задачи и передаётся в apply_async()
+# (см. Task 18). Глухой статический лимит там обрывал бы законную работу на
+# середине партии — часть статей опубликована, часть нет, — что хуже, чем
+# его отсутствие: защищаться нужно от зависшего соединения, а не от штатной
+# нагрузки.
+#
+# Мягкий лимит меньше жёсткого на 3 минуты: этого хватает, чтобы обработчик
+# SoftTimeLimitExceeded (см. tasks.py) записал status="failed" в JobRun и
+# ArticleBatch и закрыл сессию БД до принудительного убийства процесса.
+celery_app.conf.task_soft_time_limit = 900   # 15 минут
+celery_app.conf.task_time_limit = 1080       # 18 минут
 ```
 
 - [ ] **Step 4: Задачи**
@@ -5852,6 +5857,8 @@ celery_app.conf.task_time_limit = 2100       # 35 минут
 """
 
 from __future__ import annotations
+
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.ai.factory import build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
@@ -5914,11 +5921,15 @@ def generate_topics_sync(db, batch_id: int) -> None:
         _finish_job(db, job, "ok",
                     f"предложено {len(proposed)}, отсеяно дублей {len(dropped)}, "
                     f"принято {len(kept)}")
-    except (LLMError, PromptError, SiteAPIError, SecretDecryptionError) as exc:
+    # SoftTimeLimitExceeded — в том же списке: без него мягкий лимит бесполезен,
+    # задача умрёт по жёсткому, а JobRun навсегда останется в статусе "running",
+    # и в журнале это выглядит как «задача до сих пор идёт».
+    except (LLMError, PromptError, SiteAPIError, SecretDecryptionError,
+            SoftTimeLimitExceeded) as exc:
         batch.status = "failed"
-        batch.error_text = str(exc)
+        batch.error_text = str(exc) or "превышен лимит времени задачи"
         db.commit()
-        _finish_job(db, job, "failed", str(exc))
+        _finish_job(db, job, "failed", str(exc) or "превышен лимит времени задачи")
 
 
 @celery_app.task(name="app.tasks.generate_topics")
@@ -5942,13 +5953,26 @@ def run_batch_sync(db, batch_id: int) -> None:
                      {"batch_id": batch_id, "articles": len(batch.articles)})
     site_client = open_site_client(db, site)
 
-    for article in batch.articles:
-        if article.status == "published":
-            continue
-        # Падение одной статьи не должно отменять остальные: билдер сам пишет
-        # причину в error_text и оставляет статью в failed.
-        build_for(db, article, site, site_client, job.id)
+    try:
+        for article in batch.articles:
+            if article.status == "published":
+                continue
+            # Падение одной статьи не должно отменять остальные: билдер сам пишет
+            # причину в error_text и оставляет статью в failed.
+            build_for(db, article, site, site_client, job.id)
+            db.commit()
+    except SoftTimeLimitExceeded:
+        # Лимит вычисляется от числа статей (см. Task 18), так что сюда мы
+        # попадаем только при реально зависшей партии. Уже опубликованные
+        # статьи остаются опубликованными — их пропустит `continue` при
+        # повторном запуске; помечаем партию, чтобы она не висела в "running".
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "failed"
+        batch.error_text = (f"превышен лимит времени партии, готово "
+                            f"{done}/{len(batch.articles)}")
         db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
 
     batch.status = "done"
     db.commit()
@@ -5972,7 +5996,14 @@ def retry_article_sync(db, article_id: int) -> None:
     article = db.get(Article, article_id)
     site = db.get(Site, article.site_id)
     job = _start_job(db, "retry_article", site.id, None, {"article_id": article_id})
-    build_for(db, article, site, open_site_client(db, site), job.id)
+    try:
+        build_for(db, article, site, open_site_client(db, site), job.id)
+    except SoftTimeLimitExceeded:
+        article.status = "failed"
+        article.error_text = "превышен лимит времени задачи"
+        db.commit()
+        _finish_job(db, job, "failed", article.error_text)
+        return
     db.commit()
     _finish_job(db, job, "ok" if article.status == "published" else "failed",
                 article.error_text)
@@ -6042,10 +6073,24 @@ def no_celery(monkeypatch):
     monkeypatch.setattr("app.api.article_batches.generate_topics.delay",
                         lambda batch_id: sent.append(("topics", batch_id)) or
                         type("R", (), {"id": "task-1"})())
-    monkeypatch.setattr("app.api.article_batches.run_batch.delay",
-                        lambda batch_id: sent.append(("run", batch_id)) or
+    # run_batch ставится через apply_async с вычисленными лимитами времени,
+    # а не через delay — подменяем именно его.
+    monkeypatch.setattr("app.api.article_batches.run_batch.apply_async",
+                        lambda args, **kwargs: sent.append(("run", args[0], kwargs)) or
                         type("R", (), {"id": "task-2"})())
     return sent
+
+
+def test_batch_time_limits_grow_with_article_count():
+    """Лимит партии считается от числа статей: иначе большая партия
+    обрывается на середине по глухому статическому лимиту."""
+    from app.api.article_batches import _batch_time_limits
+
+    soft_one, hard_one = _batch_time_limits(1)
+    soft_many, _ = _batch_time_limits(50)
+    assert soft_many > soft_one
+    assert hard_one > soft_one          # мягкий раньше жёсткого
+    assert _batch_time_limits(10_000)[0] <= 6 * 60 * 60   # потолок держит
 
 
 def test_manager_creates_batch(manager_client, site_id, no_celery):
@@ -6251,6 +6296,29 @@ def read_batch(batch_id: int, db: Session = Depends(get_db),
     return _to_out(db, _get_or_404(db, batch_id))
 
 
+# Бюджет времени на одну статью в партии. Складывается из худшего случая
+# генерации текста (≈366 с: 120 с таймаута × 3 попытки плюс паузы backoff,
+# см. app/ai/text.py) и запаса на картинки и публикацию. Это граница
+# «задача зависла», а не ожидаемая длительность: типовая статья укладывается
+# в разы быстрее.
+ARTICLE_TIME_BUDGET_SECONDS = 420
+# Запас на подготовку: открытие клиента сайта, чтение эталона, разбор списка.
+BATCH_OVERHEAD_SECONDS = 300
+# Потолок на случай, если ограничение числа статей в партии когда-нибудь
+# ослабят: без него опечатка в количестве поставила бы задачу на сутки.
+BATCH_TIME_LIMIT_CAP_SECONDS = 6 * 60 * 60
+# Разрыв между мягким и жёстким лимитом: столько есть у обработчика
+# SoftTimeLimitExceeded в tasks.py, чтобы записать отказ в журнал и закрыть
+# сессию БД до принудительного завершения процесса.
+TIME_LIMIT_GAP_SECONDS = 180
+
+
+def _batch_time_limits(article_count: int) -> tuple[int, int]:
+    soft = min(BATCH_OVERHEAD_SECONDS + ARTICLE_TIME_BUDGET_SECONDS * article_count,
+               BATCH_TIME_LIMIT_CAP_SECONDS)
+    return soft, soft + TIME_LIMIT_GAP_SECONDS
+
+
 class TopicsIn(BaseModel):
     topics: list[str]
 
@@ -6283,7 +6351,12 @@ def run(batch_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, "в партии нет тем")
     if batch.status == "running":
         raise HTTPException(400, "партия уже выполняется")
-    run_batch.delay(batch.id)
+    # Лимит времени вычисляется здесь, а не берётся из глобальной настройки
+    # Celery: партия идёт последовательно, и её длительность пропорциональна
+    # числу статей. Глухой статический лимит обрывал бы работу на середине —
+    # часть статей опубликована, часть нет.
+    soft, hard = _batch_time_limits(len(batch.articles))
+    run_batch.apply_async(args=[batch.id], soft_time_limit=soft, time_limit=hard)
     return _to_out(db, batch)
 
 

@@ -42,6 +42,25 @@ def test_invalid_int_setting_rejected(admin_client):
     assert resp.status_code == 422
 
 
+def test_image_workers_accepts_boundary_values(admin_client):
+    for value in ("1", "8"):
+        resp = admin_client.put("/api/admin/settings", json={"image_workers": value})
+        assert resp.status_code == 200
+        assert resp.json()["image_workers"] == value
+
+
+def test_image_workers_rejects_out_of_range(admin_client):
+    """image_workers ограничен не только «целое число»: 0 и отрицательные
+    валят ThreadPoolExecutor(max_workers=...) необработанным ValueError
+    внутри celery-таски (Task 8), а без верхней границы опечатка вроде «40»
+    вместо «4» линейно растит число потоков и память на каждую партию
+    статей. Сообщение об ошибке обязано называть допустимый диапазон."""
+    for value in ("0", "-1", "9", "40"):
+        resp = admin_client.put("/api/admin/settings", json={"image_workers": value})
+        assert resp.status_code == 422
+        assert "1" in resp.json()["detail"] and "8" in resp.json()["detail"]
+
+
 def test_secret_decryption_error_returns_empty_value_and_errors_key(admin_client, db_session):
     """Если ENCRYPTION_KEY сменили после того, как секрет сохранён старым
     ключом, get_secret бросает SecretDecryptionError. Поле секрета обязано

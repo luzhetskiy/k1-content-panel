@@ -26,6 +26,17 @@ SECRET_KEYS = {"routerai_api_key"}
 # внутри celery-таски (Task 8), где её уже никто не увидит.
 INT_KEYS = {"image_workers", "llm_max_retries"}
 
+# Диапазоны для тех int-настроек, которым мало быть просто целым числом.
+# image_workers — ширина ThreadPoolExecutor(max_workers=...) в Task 8/16:
+# 0 и отрицательные валят Celery-таску необработанным ValueError (max_workers
+# must be greater than 0), а сверху границы не было вовсе — опечатка вроде
+# «40» вместо «4» линейно растит число потоков и память на каждую партию
+# статей. 8 — с запасом выше практического максимума, 1 — минимум, при
+# котором параллелизм просто вырождается в последовательную генерацию.
+# Данные, а не условие в роутере: следующие настройки с границами
+# добавляются сюда же, без правки app/api/admin_settings.py.
+INT_RANGES = {"image_workers": (1, 8)}
+
 
 def seed_settings(db: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():

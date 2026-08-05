@@ -2091,6 +2091,25 @@ def test_invalid_int_setting_rejected(admin_client):
     assert resp.status_code == 422
 
 
+def test_image_workers_accepts_boundary_values(admin_client):
+    for value in ("1", "8"):
+        resp = admin_client.put("/api/admin/settings", json={"image_workers": value})
+        assert resp.status_code == 200
+        assert resp.json()["image_workers"] == value
+
+
+def test_image_workers_rejects_out_of_range(admin_client):
+    """image_workers ограничен не только «целое число»: 0 и отрицательные
+    валят ThreadPoolExecutor(max_workers=...) необработанным ValueError
+    внутри celery-таски (Task 8), а без верхней границы опечатка вроде «40»
+    вместо «4» линейно растит число потоков и память на каждую партию
+    статей. Сообщение об ошибке обязано называть допустимый диапазон."""
+    for value in ("0", "-1", "9", "40"):
+        resp = admin_client.put("/api/admin/settings", json={"image_workers": value})
+        assert resp.status_code == 422
+        assert "1" in resp.json()["detail"] and "8" in resp.json()["detail"]
+
+
 def test_secret_decryption_error_returns_empty_value_and_errors_key(admin_client, db_session):
     """Если ENCRYPTION_KEY сменили после того, как секрет сохранён старым
     ключом, get_secret бросает SecretDecryptionError. Поле секрета обязано
@@ -2243,6 +2262,17 @@ SECRET_KEYS = {"routerai_api_key"}
 # внутри celery-таски (Task 8), где её уже никто не увидит.
 INT_KEYS = {"image_workers", "llm_max_retries"}
 
+# Диапазоны для тех int-настроек, которым мало быть просто целым числом.
+# image_workers — ширина ThreadPoolExecutor(max_workers=...) в Task 8/16:
+# 0 и отрицательные валят Celery-таску необработанным ValueError (max_workers
+# must be greater than 0), а сверху границы не было вовсе — опечатка вроде
+# «40» вместо «4» линейно растит число потоков и память на каждую партию
+# статей. 8 — с запасом выше практического максимума, 1 — минимум, при
+# котором параллелизм просто вырождается в последовательную генерацию.
+# Данные, а не условие в роутере: следующие настройки с границами
+# добавляются сюда же, без правки app/api/admin_settings.py.
+INT_RANGES = {"image_workers": (1, 8)}
+
 
 def seed_settings(db: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
@@ -2279,7 +2309,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_role
 from app.config import config
 from app.models.user import User
-from app.seed import DEFAULT_SETTINGS, INT_KEYS, SECRET_KEYS, seed_settings
+from app.seed import DEFAULT_SETTINGS, INT_KEYS, INT_RANGES, SECRET_KEYS, seed_settings
 from app.settings.crypto import SecretDecryptionError, mask
 from app.settings.service import SettingsService
 
@@ -2335,14 +2365,23 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
                     _user: User = Depends(require_role("admin"))) -> dict:
     # int-настройки валидируются здесь, до записи — иначе опечатка проходит
     # с 200 и падает позже необработанным ValueError внутри celery-таски
-    # (Task 8), где её уже никто не увидит.
+    # (Task 8), где её уже никто не увидит. Часть из них дополнительно
+    # ограничена диапазоном (INT_RANGES) — «целое число» само по себе не
+    # спасает от 0 (ThreadPoolExecutor(max_workers=0) тоже падает необработанным
+    # ValueError) или от опечатки вроде «40» вместо «4».
     errors = []
     for key, value in payload.items():
         if key in INT_KEYS:
             try:
-                int(value)
+                parsed = int(value)
             except (TypeError, ValueError):
                 errors.append(f"настройка {key!r} должна быть целым числом")
+                continue
+            bounds = INT_RANGES.get(key)
+            if bounds and not (bounds[0] <= parsed <= bounds[1]):
+                errors.append(
+                    f"настройка {key!r} должна быть целым числом "
+                    f"от {bounds[0]} до {bounds[1]}")
     if errors:
         raise HTTPException(422, "; ".join(errors))
 
@@ -2380,7 +2419,7 @@ app.include_router(admin_settings.router)
 - [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
-Expected: PASS — 10 passed
+Expected: PASS — 12 passed
 
 - [x] **Step 7: Commit**
 
@@ -2388,6 +2427,22 @@ Expected: PASS — 10 passed
 git add execution/backend/app/seed.py execution/backend/app/api/admin_settings.py execution/backend/app/main.py execution/backend/tests/test_api_admin_settings.py
 git commit -m "feat: настройки RouterAI с маскированием секретов"
 ```
+
+- [x] **Step 8: Замечания ревью (при Task 8) — границы image_workers**
+
+Ревью Task 8 показало эмпирически: `ThreadPoolExecutor(max_workers=0)` и
+с отрицательным числом валит Celery-таску необработанным `ValueError`, а
+верхней границы на `image_workers` не было вовсе — опечатка вроде «40»
+вместо «4» линейно растит число потоков и память на каждую партию статей
+(при `image_workers=16` рост RSS составил ≈420 МБ на одну картиночную фазу,
+при двух воркерах Celery в одном контейнере — вдвое больше). Добавлен
+`INT_RANGES = {"image_workers": (1, 8)}` в `app/seed.py` (диапазон — данные,
+а не условие в роутере) и проверка диапазона в PUT `admin_settings.py` с
+сообщением, называющим границы. Код и тесты выше уже отражают исправление;
+коммит — общий с Task 8 (см. его Step 8).
+
+Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
+Expected: PASS — 12 passed
 
 ---
 
@@ -2867,6 +2922,65 @@ def test_generate_retries_then_fails(monkeypatch):
     with pytest.raises(ImageError, match="500"):
         generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
     assert len(calls) == 3
+
+
+# «200 OK, но тело не разобрать» — не лечится повтором (тот же провайдер с
+# высокой вероятностью вернёт тот же мусор), поэтому каждый из следующих
+# случаев обязан обернуться в ImageError и НЕ дёргать requests.post повторно,
+# даже если max_retries > 1.
+
+def _post_once_returning(monkeypatch, payload):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return FakeResponse(200, payload)
+
+    monkeypatch.setattr("app.ai.images.requests.post", fake_post)
+    monkeypatch.setattr("app.ai.images.time.sleep", lambda _s: None)
+    return calls
+
+
+def test_generate_wraps_missing_data_key_as_image_error(monkeypatch):
+    calls = _post_once_returning(monkeypatch, {"usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_non_image_payload_as_image_error(monkeypatch):
+    garbage_b64 = base64.b64encode(b"this is not an image at all").decode()
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": garbage_b64}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_invalid_base64_as_image_error(monkeypatch):
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": "!!!not-base64!!!"}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_truncated_image_as_image_error(monkeypatch):
+    full_png = png_bytes(800, 600)
+    truncated_b64 = base64.b64encode(full_png[: len(full_png) // 2]).decode()
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": truncated_b64}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
 ```
 
 - [x] **Step 2: Написать падающий тест на водяной знак**
@@ -2979,7 +3093,14 @@ from PIL import Image
 
 MAX_WIDTH = 1600
 WEBP_QUALITY = 82
-TIMEOUT = 420
+# Один кадр в норме укладывается в 40-140 с (см. execution/articles/
+# gen_images.py и практику), 180 с — щедрый запас под одну попытку. Худший
+# случай всей generate() с max_retries=2: 180×2 + backoff(5×1) между ними =
+# 365 с — та же величина, что и у худшего случая текстового вызова
+# (app/ai/text.py: REQUEST_TIMEOUT_SECONDS=120 × 3 попытки + паузы ≈366 с).
+# Раньше TIMEOUT=420 и max_retries=3 давали до ≈1275 с на одну картинку —
+# втрое больше всего бюджета статьи (ARTICLE_TIME_BUDGET_SECONDS в Task 18).
+TIMEOUT = 180
 
 
 class ImageError(RuntimeError):
@@ -3013,7 +3134,10 @@ def to_webp(raw: bytes, crop: str | None) -> tuple[bytes, tuple[int, int]]:
     if crop:
         image = crop_to_ratio(image, crop)
     if image.width > MAX_WIDTH:
-        image = image.resize((MAX_WIDTH, round(image.height * MAX_WIDTH / image.width)),
+        # int(), а не round(): та же функция округления, что и в
+        # crop_to_ratio выше, — единое правило на модуль, чтобы никто не
+        # «поправил» одну из них по вкусу и не рассинхронизировал результат.
+        image = image.resize((MAX_WIDTH, int(image.height * MAX_WIDTH / image.width)),
                              Image.LANCZOS)
     buffer = io.BytesIO()
     image.save(buffer, "WEBP", quality=WEBP_QUALITY, method=6)
@@ -3021,7 +3145,7 @@ def to_webp(raw: bytes, crop: str | None) -> tuple[bytes, tuple[int, int]]:
 
 
 class ImageGenerator:
-    def __init__(self, base_url: str, api_key: str, model: str, max_retries: int = 3,
+    def __init__(self, base_url: str, api_key: str, model: str, max_retries: int = 2,
                  backoff: float = 5.0):
         self.url = base_url.rstrip("/") + "/images"
         self.api_key = api_key
@@ -3048,9 +3172,18 @@ class ImageGenerator:
                 last_error = str(exc)[:200]
             else:
                 if response.ok:
-                    body = response.json()
-                    raw = base64.b64decode(body["data"][0]["b64_json"])
-                    data, image_size = to_webp(raw, crop)
+                    try:
+                        body = response.json()
+                        raw = base64.b64decode(body["data"][0]["b64_json"])
+                        data, image_size = to_webp(raw, crop)
+                    except Exception as exc:
+                        # Мусор в теле 200-го ответа не лечится повтором — тот
+                        # же аргумент, что и с неретраибельными ошибками в
+                        # app/ai/text.py: повторный запрос с высокой
+                        # вероятностью вернёт тот же мусор, а не другой ответ.
+                        raise ImageError(
+                            f"RouterAI images вернул 200, но тело не "
+                            f"разобрать ({type(exc).__name__}): {exc}") from exc
                     return ImageResult(
                         data=data, size=image_size,
                         cost=float(body.get("usage", {}).get("cost") or 0.0),
@@ -3127,13 +3260,43 @@ def apply_watermark(image_bytes: bytes, watermark_bytes: bytes) -> bytes:
 - [x] **Step 6: Запустить тесты, убедиться что проходят**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_images.py tests/test_ai_watermark.py -v`
-Expected: PASS — 14 passed
+Expected: PASS — 18 passed
 
 - [x] **Step 7: Commit**
 
 ```bash
 git add execution/backend/app/ai execution/backend/tests/test_ai_images.py execution/backend/tests/test_ai_watermark.py
 git commit -m "feat: генерация картинок RouterAI, кроп и водяной знак"
+```
+
+- [x] **Step 8: Замечания ревью — округление, таймауты, разбор ответа**
+
+Ревью нашло три проблемы (полное исследование — в отчёте по Task 8):
+
+1. `to_webp` округляла через `round()`, а `crop_to_ratio` — через `int()`;
+   для `png_bytes(2400, 1600)` это давало `1067` вместо ожидаемых тестом
+   `1066`. Приведено к `int()` — одна функция округления на модуль (код
+   выше уже отражает исправление).
+2. `TIMEOUT=420` и `max_retries=3` давали до ≈1275 с на одну картинку —
+   втрое больше `ARTICLE_TIME_BUDGET_SECONDS` (Task 18). Приведено к
+   `TIMEOUT=180`, `max_retries=2`: худший случай ≈365 с, симметрично
+   текстовому клиенту (Task 7). Код выше уже отражает исправление.
+3. Разбор тела успешного (200) ответа (`response.json()`,
+   `base64.b64decode`, `to_webp`) не был обёрнут в `try/except` — мусор в
+   теле ответа (`UnidentifiedImageError`, `KeyError`, `binascii.Error`,
+   обрезанный файл) вылетал из `generate()` сырым исключением мимо
+   `ImageError` и мимо перечня перехватываемых исключений в
+   `ArticleBuilder.build()` (Task 16). Обёрнуто в `ImageError` без ретрая —
+   мусор в ответе не лечится повтором, тот же аргумент, что и с
+   неретраибельными ошибками в `app/ai/text.py`. Код и тесты выше уже
+   отражают исправление.
+
+Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_images.py tests/test_ai_watermark.py -v`
+Expected: PASS — 18 passed
+
+```bash
+git add execution/backend/app/ai execution/backend/tests/test_ai_images.py execution/backend/tests/test_ai_watermark.py execution/backend/app/seed.py execution/backend/app/api/admin_settings.py execution/backend/tests/test_api_admin_settings.py orchestration/2026-08-04-plan1-core-and-articles.md
+git commit -m "fix: замечания ревью по картинкам — округление, таймауты, разбор ответа, границы image_workers"
 ```
 
 ---
@@ -5167,6 +5330,25 @@ git commit -m "feat: отсев дублей тем статей"
 
 Ядро процесса: текст → картинки → водяной знак → загрузка → страница-черновик → обложка.
 
+> **Требование (найдено при ревью Task 8, эмпирически):** `_generate_content_images`
+> генерирует контентные картинки параллельно через `ThreadPoolExecutor.map`.
+> Если одна из параллельных генераций падает, `list(pool.map(render, ...))`
+> бросает исключение при первом же неудачном результате в порядке подачи
+> задач — а уже посчитанные к этому моменту результаты соседних, успешных
+> генераций отбрасываются молча: цикл `for position, prompt, data, cost in
+> sorted(rendered): ...`, который пишет `ArticleImage` и `LlmUsage`, вообще
+> не выполняется, потому что до него не доходит. При этом сами HTTP-запросы
+> к RouterAI за эти успешные картинки уже выполнились и, вероятно, уже
+> оплачены — поток внутри `ThreadPoolExecutor` не отменяется истечением
+> `with`-блока, он просто доработает и потом будет отброшен. Итог: расход
+> денег на успешно сгенерированные, но выброшенные из-за соседнего отказа
+> картинки не попадает в финансовый учёт партии (`LlmUsage`), хотя провайдер
+> его уже учёл. Реализация Task 16 обязана записывать `ArticleImage`/
+> `LlmUsage` по каждой успешно завершившейся генерации по мере её готовности
+> (например, через `concurrent.futures.as_completed` вместо `pool.map`, с
+> записью в БД сразу по получении результата), а не только после того, как
+> весь список результатов собран целиком без исключений.
+
 **Files:**
 - Create: `execution/backend/app/articles/builder.py`
 - Test: `execution/backend/tests/test_articles_builder.py`
@@ -6330,15 +6512,33 @@ def read_batch(batch_id: int, db: Session = Depends(get_db),
 
 
 # Бюджет времени на одну статью в партии. Складывается из худшего случая
-# генерации текста (≈366 с: 120 с таймаута × 3 попытки плюс паузы backoff,
-# см. app/ai/text.py) и запаса на картинки и публикацию. Это граница
-# «задача зависла», а не ожидаемая длительность: типовая статья укладывается
-# в разы быстрее.
-ARTICLE_TIME_BUDGET_SECONDS = 420
+# текстовых вызовов (≈366 с на один вызов: 120 с таймаута × 3 попытки плюс
+# паузы backoff, см. app/ai/text.py; вызовов на статью несколько — тело,
+# промпт на каждую картинку, промпт обложки, — но они не суммируются в этот
+# бюджет впритык, а покрываются тем же запасом, что и публикация) плюс
+# худший случай пачки картинок, которые генерируются параллельно
+# (`ThreadPoolExecutor`, см. app/ai/images.py) — тоже ≈365 с на пачку, а не
+# на картинку, — плюс запас на публикацию. Это граница «задача зависла», а
+# не ожидаемая длительность: типовая статья укладывается в разы быстрее.
+# Раньше здесь стояло 420 — ровно столько же, сколько был таймаут ОДНОЙ
+# попытки генерации ОДНОЙ картинки (TIMEOUT=420 в старой версии
+# app/ai/images.py, до трёх попыток с retry — то есть до ≈1275 с на одну
+# картинку). Ревью Task 8 показало и посчитало это несоответствие; заодно
+# TIMEOUT там снижен до 180, а max_retries — до 2 (см. Task 8, Step 8).
+ARTICLE_TIME_BUDGET_SECONDS = 900
 # Запас на подготовку: открытие клиента сайта, чтение эталона, разбор списка.
 BATCH_OVERHEAD_SECONDS = 300
 # Потолок на случай, если ограничение числа статей в партии когда-нибудь
 # ослабят: без него опечатка в количестве поставила бы задачу на сутки.
+# ВНИМАНИЕ (открытый вопрос ревью Task 8): при текущем максимуме партии в 50
+# статей (см. test_count_is_bounded) этот потолок уже связывает бюджет —
+# soft = min(300 + 900×50, 21600) = 21600, то есть на партию из 50 статей
+# приходится не по 900 с на статью, а ≈432 с (21600/50) — почти столько же,
+# сколько было общей (уже признанной заниженной) величиной до правки.
+# Потолок начинает резать бюджет уже с ~24 статей в партии. Раз он бьёт
+# именно по самым крупным и потому самым рискованным партиям, его, вероятно,
+# нужно поднять (например, до 300 + 900×50 = 45300 с ≈ 12.6 часа) — решение
+# за владельцем, здесь оставлено без изменений.
 BATCH_TIME_LIMIT_CAP_SECONDS = 6 * 60 * 60
 # Разрыв между мягким и жёстким лимитом: столько есть у обработчика
 # SoftTimeLimitExceeded в tasks.py, чтобы записать отказ в журнал и закрыть

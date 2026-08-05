@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_role
 from app.config import config
 from app.models.user import User
-from app.seed import DEFAULT_SETTINGS, INT_KEYS, SECRET_KEYS, seed_settings
+from app.seed import DEFAULT_SETTINGS, INT_KEYS, INT_RANGES, SECRET_KEYS, seed_settings
 from app.settings.crypto import SecretDecryptionError, mask
 from app.settings.service import SettingsService
 
@@ -60,14 +60,23 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
                     _user: User = Depends(require_role("admin"))) -> dict:
     # int-настройки валидируются здесь, до записи — иначе опечатка проходит
     # с 200 и падает позже необработанным ValueError внутри celery-таски
-    # (Task 8), где её уже никто не увидит.
+    # (Task 8), где её уже никто не увидит. Часть из них дополнительно
+    # ограничена диапазоном (INT_RANGES) — «целое число» само по себе не
+    # спасает от 0 (ThreadPoolExecutor(max_workers=0) тоже падает необработанным
+    # ValueError) или от опечатки вроде «40» вместо «4».
     errors = []
     for key, value in payload.items():
         if key in INT_KEYS:
             try:
-                int(value)
+                parsed = int(value)
             except (TypeError, ValueError):
                 errors.append(f"настройка {key!r} должна быть целым числом")
+                continue
+            bounds = INT_RANGES.get(key)
+            if bounds and not (bounds[0] <= parsed <= bounds[1]):
+                errors.append(
+                    f"настройка {key!r} должна быть целым числом "
+                    f"от {bounds[0]} до {bounds[1]}")
     if errors:
         raise HTTPException(422, "; ".join(errors))
 

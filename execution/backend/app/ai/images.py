@@ -18,7 +18,14 @@ from PIL import Image
 
 MAX_WIDTH = 1600
 WEBP_QUALITY = 82
-TIMEOUT = 420
+# Один кадр в норме укладывается в 40-140 с (см. execution/articles/
+# gen_images.py и практику), 180 с — щедрый запас под одну попытку. Худший
+# случай всей generate() с max_retries=2: 180×2 + backoff(5×1) между ними =
+# 365 с — та же величина, что и у худшего случая текстового вызова
+# (app/ai/text.py: REQUEST_TIMEOUT_SECONDS=120 × 3 попытки + паузы ≈366 с).
+# Раньше TIMEOUT=420 и max_retries=3 давали до ≈1275 с на одну картинку —
+# втрое больше всего бюджета статьи (ARTICLE_TIME_BUDGET_SECONDS в Task 18).
+TIMEOUT = 180
 
 
 class ImageError(RuntimeError):
@@ -52,7 +59,10 @@ def to_webp(raw: bytes, crop: str | None) -> tuple[bytes, tuple[int, int]]:
     if crop:
         image = crop_to_ratio(image, crop)
     if image.width > MAX_WIDTH:
-        image = image.resize((MAX_WIDTH, round(image.height * MAX_WIDTH / image.width)),
+        # int(), а не round(): та же функция округления, что и в
+        # crop_to_ratio выше, — единое правило на модуль, чтобы никто не
+        # «поправил» одну из них по вкусу и не рассинхронизировал результат.
+        image = image.resize((MAX_WIDTH, int(image.height * MAX_WIDTH / image.width)),
                              Image.LANCZOS)
     buffer = io.BytesIO()
     image.save(buffer, "WEBP", quality=WEBP_QUALITY, method=6)
@@ -60,7 +70,7 @@ def to_webp(raw: bytes, crop: str | None) -> tuple[bytes, tuple[int, int]]:
 
 
 class ImageGenerator:
-    def __init__(self, base_url: str, api_key: str, model: str, max_retries: int = 3,
+    def __init__(self, base_url: str, api_key: str, model: str, max_retries: int = 2,
                  backoff: float = 5.0):
         self.url = base_url.rstrip("/") + "/images"
         self.api_key = api_key
@@ -87,9 +97,18 @@ class ImageGenerator:
                 last_error = str(exc)[:200]
             else:
                 if response.ok:
-                    body = response.json()
-                    raw = base64.b64decode(body["data"][0]["b64_json"])
-                    data, image_size = to_webp(raw, crop)
+                    try:
+                        body = response.json()
+                        raw = base64.b64decode(body["data"][0]["b64_json"])
+                        data, image_size = to_webp(raw, crop)
+                    except Exception as exc:
+                        # Мусор в теле 200-го ответа не лечится повтором — тот
+                        # же аргумент, что и с неретраибельными ошибками в
+                        # app/ai/text.py: повторный запрос с высокой
+                        # вероятностью вернёт тот же мусор, а не другой ответ.
+                        raise ImageError(
+                            f"RouterAI images вернул 200, но тело не "
+                            f"разобрать ({type(exc).__name__}): {exc}") from exc
                     return ImageResult(
                         data=data, size=image_size,
                         cost=float(body.get("usage", {}).get("cost") or 0.0),

@@ -77,3 +77,62 @@ def test_generate_retries_then_fails(monkeypatch):
     with pytest.raises(ImageError, match="500"):
         generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
     assert len(calls) == 3
+
+
+# «200 OK, но тело не разобрать» — не лечится повтором (тот же провайдер с
+# высокой вероятностью вернёт тот же мусор), поэтому каждый из следующих
+# случаев обязан обернуться в ImageError и НЕ дёргать requests.post повторно,
+# даже если max_retries > 1.
+
+def _post_once_returning(monkeypatch, payload):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(1)
+        return FakeResponse(200, payload)
+
+    monkeypatch.setattr("app.ai.images.requests.post", fake_post)
+    monkeypatch.setattr("app.ai.images.time.sleep", lambda _s: None)
+    return calls
+
+
+def test_generate_wraps_missing_data_key_as_image_error(monkeypatch):
+    calls = _post_once_returning(monkeypatch, {"usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_non_image_payload_as_image_error(monkeypatch):
+    garbage_b64 = base64.b64encode(b"this is not an image at all").decode()
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": garbage_b64}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_invalid_base64_as_image_error(monkeypatch):
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": "!!!not-base64!!!"}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+
+
+def test_generate_wraps_truncated_image_as_image_error(monkeypatch):
+    full_png = png_bytes(800, 600)
+    truncated_b64 = base64.b64encode(full_png[: len(full_png) // 2]).decode()
+    calls = _post_once_returning(
+        monkeypatch, {"data": [{"b64_json": truncated_b64}], "usage": {"cost": 1.0}})
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="разобрать"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1

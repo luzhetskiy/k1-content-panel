@@ -4051,7 +4051,7 @@ git commit -m "fix: замечания ревью по клиенту сайта
 - Test: `execution/backend/tests/test_sites_reference.py`
 - Test: `execution/backend/tests/test_api_sites.py`
 
-- [ ] **Step 1: Написать падающий тест на синхронизацию**
+- [x] **Step 1: Написать падающий тест на синхронизацию**
 
 `execution/backend/tests/test_sites_reference.py`:
 
@@ -4145,12 +4145,12 @@ def test_sync_rejects_reference_without_images(db_session, site):
         sync_site_reference(db_session, site, FakeClient(reference_html="<p>только текст</p>"))
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_reference.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.sites.reference'`
 
-- [ ] **Step 3: Реализация синхронизации**
+- [x] **Step 3: Реализация синхронизации**
 
 `execution/backend/app/sites/reference.py`:
 
@@ -4218,12 +4218,12 @@ def sync_site_reference(db: Session, site: Site, client) -> None:
     db.commit()
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_reference.py -v`
 Expected: PASS — 9 passed
 
-- [ ] **Step 5: Написать падающий тест на API сайтов**
+- [x] **Step 5: Написать падающий тест на API сайтов**
 
 `execution/backend/tests/test_api_sites.py`:
 
@@ -4390,12 +4390,12 @@ def test_watermark_upload_stores_file(admin_client, site_payload, tmp_path, monk
     assert stored.exists()
 ```
 
-- [ ] **Step 6: Запустить тест, убедиться что падает**
+- [x] **Step 6: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_sites.py -v`
 Expected: FAIL — 404 на `/api/admin/sites`
 
-- [ ] **Step 7: Публичный список сайтов**
+- [x] **Step 7: Публичный список сайтов**
 
 `execution/backend/app/api/sites.py`:
 
@@ -4444,7 +4444,7 @@ def list_sites(db: Session = Depends(get_db),
     ]
 ```
 
-- [ ] **Step 8: Админский роутер сайтов**
+- [x] **Step 8: Админский роутер сайтов**
 
 `execution/backend/app/api/admin_sites.py`:
 
@@ -4640,7 +4640,7 @@ def upload_watermark(site_id: int, file: UploadFile = File(...),
     return {"ok": True, "watermark_path": site.watermark_path}
 ```
 
-- [ ] **Step 9: Подключить роутеры**
+- [x] **Step 9: Подключить роутеры**
 
 В `execution/backend/app/main.py` заменить импорт и подключение на:
 
@@ -4653,15 +4653,15 @@ app.include_router(sites.router)
 app.include_router(admin_sites.router)
 ```
 
-- [ ] **Step 10: Запустить тест, убедиться что проходит**
+- [x] **Step 10: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_sites.py tests/test_sites_reference.py -v`
 Expected: PASS — 23 passed
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
-git add execution/backend/app/api execution/backend/app/sites/reference.py execution/backend/tests/test_api_sites.py execution/backend/tests/test_sites_reference.py
+git add execution/backend/app/api execution/backend/app/sites/reference.py execution/backend/app/main.py execution/backend/tests/test_api_sites.py execution/backend/tests/test_sites_reference.py
 git commit -m "feat: API сайтов, синхронизация раздела и эталонной статьи"
 ```
 

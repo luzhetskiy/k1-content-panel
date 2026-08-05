@@ -4948,7 +4948,7 @@ git commit -m "feat: API сайтов, синхронизация раздела
 - Modify: `execution/backend/app/seed.py`
 - Test: `execution/backend/tests/test_ai_prompts.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_ai_prompts.py`:
 
@@ -5017,12 +5017,12 @@ def test_render_reports_syntax_error_as_text():
         render_prompt("{% for x in %}", {})
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_prompts.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.models.prompt_template'`
 
-- [ ] **Step 3: Модель**
+- [x] **Step 3: Модель**
 
 `execution/backend/app/models/prompt_template.py`:
 
@@ -5047,7 +5047,7 @@ class PromptTemplate(Base):
     text: Mapped[str] = mapped_column(Text, default="")
 ```
 
-- [ ] **Step 4: Разрешение и рендер**
+- [x] **Step 4: Разрешение и рендер**
 
 `execution/backend/app/ai/prompts.py`:
 
@@ -5096,7 +5096,7 @@ def render_prompt(template_text: str, variables: dict) -> str:
         raise PromptError(f"ошибка шаблона (синтаксис или доступ): {exc}") from exc
 ```
 
-- [ ] **Step 5: Дефолтные промпты**
+- [x] **Step 5: Дефолтные промпты**
 
 Добавь в конец `execution/backend/app/seed.py`:
 
@@ -5187,12 +5187,12 @@ def seed_prompts(db: Session) -> None:
     db.commit()
 ```
 
-- [ ] **Step 6: Запустить тест, убедиться что проходит**
+- [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_prompts.py -v`
 Expected: PASS — 9 passed
 
-- [ ] **Step 7: Миграция**
+- [x] **Step 7: Миграция**
 
 Добавь `PromptTemplate` в `app/models/__init__.py` (реестр моделей, см. Task 2,
 Step 3) — `alembic/env.py` и `tests/conftest.py` подхватят её через `import
@@ -5205,7 +5205,7 @@ docker compose run --rm backend alembic upgrade head
 ```
 Expected: `Running upgrade <prev> -> <hash>, prompt_templates`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add execution/backend/app/models/prompt_template.py execution/backend/app/ai/prompts.py execution/backend/app/seed.py execution/backend/alembic execution/backend/tests/test_ai_prompts.py

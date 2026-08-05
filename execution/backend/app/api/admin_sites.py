@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,22 @@ from app.sites.client import SiteAPIError, SiteClient
 from app.sites.reference import ReferenceError, sync_site_reference
 
 router = APIRouter(prefix="/api/admin/sites", tags=["admin-sites"])
+
+# Три попытки с растущей паузой — то же решение, что и для RouterAI
+# (TextClient._call, app/ai/text.py): повторяем 5xx и сетевые сбои, не тратим
+# попытки на 4xx, где повтор с тем же запросом гарантированно даёт тот же
+# результат (см. "Требование по ретраям" в плане Task 11).
+SYNC_MAX_RETRIES = 3
+SYNC_RETRY_BACKOFF = 0.5  # секунды; пауза перед следующей попыткой — backoff * 2**attempt
+
+
+def _sync_is_retryable(exc: SiteAPIError) -> bool:
+    """status_code is None — сетевой сбой или сайт вернул не JSON; >= 500 —
+    отказ на стороне сайта. Оба класса могут исчезнуть сами при повторе.
+    400/401/403/404/413 (неверный токен, нет родительской страницы, файл
+    слишком велик, некорректные данные) повторять бессмысленно — та же
+    граница, что и _NON_RETRYABLE для RouterAI в app/ai/text.py."""
+    return exc.status_code is None or exc.status_code >= 500
 
 
 class SiteIn(BaseModel):
@@ -163,16 +180,37 @@ def sync_site(site_id: int, db: Session = Depends(get_db),
     Ошибки возвращаются телом со `ok: false`, а не 4xx: это диагностика чужого
     сайта, а не отказ нашего API — фронту нужно показать текст, а не свалиться
     в общий обработчик ошибок.
+
+    Синхронизация трогает два шага (эталон и список страниц раздела) и должна
+    записаться в БД как одна операция: `sync_site_reference` вызывается с
+    `commit=False`, коммит — один, в конце, только когда оба шага прошли.
+    Иначе отказ на втором шаге оставлял бы эталон в БД уже обновлённым,
+    а ответ говорил бы "не получилось" — вводя администратора в заблуждение
+    о реальном состоянии сайта.
+
+    5xx и сетевые сбои (`SiteAPIError.status_code` — `None` или `>= 500`)
+    повторяются до `SYNC_MAX_RETRIES` раз; 4xx, `ReferenceError` (эталон без
+    картинок, не задан id и т.п.) и `SecretDecryptionError` (неверный
+    `ENCRYPTION_KEY`) — нет, повтор с тем же запросом даст тот же результат.
     """
     site = _get_or_404(db, site_id)
-    try:
-        client = open_client(db, site)
-        sync_site_reference(db, site, client)
-        pages = client.list_section_pages(site.articles_url_prefix)
-    except (SiteAPIError, ReferenceError, SecretDecryptionError) as exc:
-        return SyncResult(ok=False, detail=str(exc))
-    return SyncResult(ok=True, url_prefix=site.articles_url_prefix, pages=len(pages),
-                      reference_images=site.reference_images)
+    for attempt in range(SYNC_MAX_RETRIES):
+        try:
+            client = open_client(db, site)
+            sync_site_reference(db, site, client, commit=False)
+            pages = client.list_section_pages(site.articles_url_prefix)
+        except (ReferenceError, SecretDecryptionError) as exc:
+            db.rollback()
+            return SyncResult(ok=False, detail=str(exc))
+        except SiteAPIError as exc:
+            if not _sync_is_retryable(exc) or attempt == SYNC_MAX_RETRIES - 1:
+                db.rollback()
+                return SyncResult(ok=False, detail=str(exc))
+            time.sleep(SYNC_RETRY_BACKOFF * (2**attempt))
+            continue
+        db.commit()
+        return SyncResult(ok=True, url_prefix=site.articles_url_prefix, pages=len(pages),
+                          reference_images=site.reference_images)
 
 
 @router.post("/{site_id}/watermark")

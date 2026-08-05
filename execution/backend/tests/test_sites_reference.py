@@ -85,3 +85,23 @@ def test_sync_rejects_reference_without_images(db_session, site):
     это почти всегда ошибка выбора эталона, а не осознанное решение."""
     with pytest.raises(ReferenceError, match="ни одной картинки"):
         sync_site_reference(db_session, site, FakeClient(reference_html="<p>только текст</p>"))
+
+
+def test_sync_failure_does_not_clobber_previous_cache(db_session, site):
+    """Отказ синхронизации (эталон без картинок) не должен стирать кеш от
+    прошлой успешной синхронизации — иначе один плохой запуск оставляет сайт
+    вовсе без эталона, и статьи станет не по чему собирать."""
+    sync_site_reference(db_session, site, FakeClient(reference_html="<p>t</p><img><img>"))
+    old_prefix = site.articles_url_prefix
+    old_html = site.reference_html
+    old_images = site.reference_images
+    old_synced_at = site.reference_synced_at
+    assert old_images == 2
+
+    with pytest.raises(ReferenceError, match="ни одной картинки"):
+        sync_site_reference(db_session, site, FakeClient(reference_html="<p>только текст</p>"))
+
+    assert site.articles_url_prefix == old_prefix
+    assert site.reference_html == old_html
+    assert site.reference_images == old_images
+    assert site.reference_synced_at == old_synced_at

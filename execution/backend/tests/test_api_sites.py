@@ -158,3 +158,176 @@ def test_watermark_upload_stores_file(admin_client, site_payload, tmp_path, monk
     assert resp.status_code == 200
     stored = tmp_path / "watermarks" / f"{site_id}.png"
     assert stored.exists()
+
+
+# --- ретраи и атомарность (замечания ревью Task 11) ---
+
+
+def test_sync_retries_on_5xx_and_succeeds(admin_client, site_payload, monkeypatch):
+    """5xx на сайте — временная штука (перегрузка, деплой). Первая попытка
+    проваливается, вторая — та же самая — проходит."""
+    from app.sites.client import SiteAPIError
+
+    calls = {"list": 0}
+
+    def get_page(self, page_id):
+        if page_id == 25:
+            return {"id": 25, "url": "/poleznye-stati/"}
+        return {"id": page_id, "text": "<img><img>"}
+
+    def list_section_pages(self, prefix):
+        calls["list"] += 1
+        if calls["list"] == 1:
+            raise SiteAPIError("список страниц: HTTP 500: боль", status_code=500)
+        return [{"id": 1, "title": "A", "url": prefix + "a/"}]
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages", list_section_pages)
+    monkeypatch.setattr("app.api.admin_sites.time.sleep", lambda seconds: None)
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is True
+    assert calls["list"] == 2
+
+
+def test_sync_does_not_retry_on_404(admin_client, site_payload, monkeypatch):
+    """404 — не тот id страницы. Повтор с тем же запросом даст тот же 404,
+    поэтому счётчик вызовов обязан остаться на единице."""
+    from app.sites.client import SiteAPIError
+
+    calls = {"n": 0}
+
+    def get_page(self, page_id):
+        calls["n"] += 1
+        raise SiteAPIError("страница 25: HTTP 404: Not Found", status_code=404)
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.time.sleep", lambda seconds: None)
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is False
+    assert "404" in body["detail"]
+    assert calls["n"] == 1
+
+
+def test_sync_retries_on_network_error(admin_client, site_payload, monkeypatch):
+    """status_code=None — сетевой сбой или сайт вернул не JSON: та же
+    категория, что и 5xx, тоже повторяется."""
+    from app.sites.client import SiteAPIError
+
+    calls = {"n": 0}
+
+    def get_page(self, page_id):
+        if page_id == 25:
+            return {"id": 25, "url": "/poleznye-stati/"}
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SiteAPIError("страница 312: сайт вернул не JSON: <html>...")
+        return {"id": page_id, "text": "<img><img>"}
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages",
+                        lambda self, prefix: [])
+    monkeypatch.setattr("app.api.admin_sites.time.sleep", lambda seconds: None)
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is True
+    assert calls["n"] == 2
+
+
+def test_sync_gives_up_after_max_retries(admin_client, site_payload, monkeypatch):
+    """Повторяющийся 5xx исчерпывает попытки и завершается отказом, а не
+    бесконечным циклом."""
+    from app.sites.client import SiteAPIError
+
+    calls = {"n": 0}
+
+    def list_section_pages(self, prefix):
+        calls["n"] += 1
+        raise SiteAPIError("список страниц: HTTP 503: боль", status_code=503)
+
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.get_page",
+        lambda self, page_id: {"id": page_id, "url": "/poleznye-stati/", "text": "<img>"})
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages", list_section_pages)
+    monkeypatch.setattr("app.api.admin_sites.time.sleep", lambda seconds: None)
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is False
+    assert calls["n"] == 3
+
+
+def test_sync_failure_leaves_site_fields_unchanged(admin_client, db_session, site_payload,
+                                                    monkeypatch):
+    """Синхронизация — одна транзакция: если обход раздела не удался (после
+    того как эталон уже был бы готов записаться), в БД не должно появиться
+    ни эталона, ни префикса — иначе отчёт "не получилось" врёт о состоянии
+    сайта."""
+    from app.models.site import Site
+    from app.sites.client import SiteAPIError
+
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.get_page",
+        lambda self, page_id: {"id": page_id, "url": "/poleznye-stati/", "text": "<img><img>"})
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.list_section_pages",
+        lambda self, prefix: (_ for _ in ()).throw(
+            SiteAPIError("список страниц: HTTP 404: Not Found", status_code=404)))
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is False
+
+    db_session.expire_all()
+    site = db_session.get(Site, site_id)
+    assert site.articles_url_prefix == ""
+    assert site.reference_html == ""
+    assert site.reference_images == 0
+    assert site.reference_synced_at is None
+
+
+def test_sync_failure_preserves_previous_successful_cache(admin_client, db_session,
+                                                           site_payload, monkeypatch):
+    """Кеш эталона от прошлой успешной синхронизации не должен затираться,
+    если следующая синхронизация не удалась — иначе один сетевой сбой
+    оставляет сайт вовсе без эталона, и статьи станет не по чему собирать."""
+    from app.models.site import Site
+    from app.sites.client import SiteAPIError
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.get_page",
+        lambda self, page_id: {"id": page_id, "url": "/poleznye-stati/",
+                               "text": "<p>t</p><img><img>"})
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages",
+                        lambda self, prefix: [])
+    first = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert first["ok"] is True
+
+    db_session.expire_all()
+    site = db_session.get(Site, site_id)
+    old_prefix = site.articles_url_prefix
+    old_images = site.reference_images
+    old_html = site.reference_html
+    old_synced_at = site.reference_synced_at
+    assert old_images == 2
+
+    def boom(self, prefix):
+        raise SiteAPIError("список страниц: HTTP 404: Not Found", status_code=404)
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages", boom)
+    second = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert second["ok"] is False
+
+    db_session.expire_all()
+    site = db_session.get(Site, site_id)
+    assert site.articles_url_prefix == old_prefix
+    assert site.reference_images == old_images
+    assert site.reference_html == old_html
+    assert site.reference_synced_at == old_synced_at

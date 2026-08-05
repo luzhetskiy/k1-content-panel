@@ -33,9 +33,15 @@ def count_images(html: str) -> int:
     return len(_IMG.findall(_COMMENTS.sub("", html or "")))
 
 
-def sync_site_reference(db: Session, site: Site, client) -> None:
+def sync_site_reference(db: Session, site: Site, client, commit: bool = True) -> None:
     """Тянет раздел и эталон, заполняет кеш карточки. Бросает ReferenceError
-    с человеческим текстом — вызывающий показывает его администратору."""
+    с человеческим текстом — вызывающий показывает его администратору.
+
+    `commit=False` — для вызывающих, которым нужен один коммит на несколько
+    шагов (`sync_site` в app/api/admin_sites.py: эталон и список страниц
+    раздела пишутся одной транзакцией, чтобы отказ на втором шаге не оставлял
+    в БД наполовину обновлённую карточку). По умолчанию коммитит сама — так
+    же, как `SettingsService.set`/`set_secret` (app/settings/service.py)."""
     if not site.articles_parent_id:
         raise ReferenceError("не задан id родительской страницы раздела статей")
     if not site.reference_article_id:
@@ -58,4 +64,5 @@ def sync_site_reference(db: Session, site: Site, client) -> None:
     site.reference_html = html
     site.reference_images = images
     site.reference_synced_at = utcnow()
-    db.commit()
+    if commit:
+        db.commit()

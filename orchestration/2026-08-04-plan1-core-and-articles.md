@@ -1653,14 +1653,52 @@ def test_decrypt_with_other_key_raises():
         decrypt(encrypt("token-123", KEY), other)
 
 
+def test_encrypt_rejects_malformed_key():
+    """Обрезанный ключ или hex вместо base64 проходит проверку prod-compose
+    (${ENCRYPTION_KEY:?...} ловит только пустую строку), но не Fernet —
+    здесь это должно стать понятной ошибкой, а не голым ValueError."""
+    with pytest.raises(SecretDecryptionError, match="невалиден"):
+        encrypt("token-123", "not-a-valid-fernet-key")
+
+
+def test_decrypt_rejects_malformed_key():
+    ciphertext = encrypt("token-123", KEY)
+    with pytest.raises(SecretDecryptionError, match="невалиден"):
+        decrypt(ciphertext, "not-a-valid-fernet-key")
+
+
+def test_decrypt_error_messages_distinguish_bad_key_from_wrong_key():
+    """«Ключ невалиден по формату» и «значение зашифровано другим ключом» —
+    разные причины и разные действия админа, сообщения не должны совпадать."""
+    ciphertext = encrypt("token-123", KEY)
+    other_key = Fernet.generate_key().decode()
+
+    with pytest.raises(SecretDecryptionError, match="невалиден") as bad_format:
+        decrypt(ciphertext, "not-a-valid-fernet-key")
+    with pytest.raises(SecretDecryptionError, match="другим ключом") as wrong_key:
+        decrypt(ciphertext, other_key)
+
+    assert str(bad_format.value) != str(wrong_key.value)
+
+
 def test_mask_hides_middle():
     assert mask("abcdefghijklmnop") == "abc...mnop"
 
 
-def test_mask_short_value_is_fully_hidden():
-    """У 8-символьного значения «три первых плюс четыре последних» скрывает
-    ровно один символ — маскировать так нельзя."""
-    assert mask("short") == "***"
+def test_mask_hides_value_just_below_threshold():
+    """Порог MIN_MASKABLE_LEN = 12. У 11-символьного значения формула «три
+    первых плюс четыре последних» перекрывала бы 7 из 11 символов — почти
+    ничего не скрыто, поэтому ниже порога значение прячется целиком."""
+    assert mask("sk-abcdefgh") == "***"
+
+
+def test_mask_shows_head_and_tail_at_threshold():
+    """12 символов — ровно порог: голова и хвост уже не пересекаются."""
+    assert mask("abcdefghijkl") == "abc...ijkl"
+
+
+def test_mask_empty_value_is_fully_hidden():
+    assert mask("") == "***"
 
 
 def test_service_stores_plain_value(db_session):
@@ -1680,11 +1718,45 @@ def test_service_stores_secret_encrypted(db_session):
     assert service.get_secret("routerai_api_key") == "sk-real-key"
 
 
+def test_service_get_str_on_secret_key_raises(db_session):
+    """is_secret не читается боевым кодом Task 6 (секретность там определяет
+    отдельная константа SECRET_KEYS) — эта проверка защита от случайного
+    get_str() по секретному ключу где-то ещё, который иначе тихо отдал бы
+    шифротекст вида gAAAAABq... вызывающему."""
+    service = SettingsService(db_session, KEY)
+    service.set_secret("routerai_api_key", "sk-real-key")
+
+    with pytest.raises(SecretDecryptionError):
+        service.get_str("routerai_api_key")
+
+
+def test_service_set_after_set_secret_clears_is_secret(db_session):
+    """Переход секрет → обычное значение: set() обязан сбросить is_secret,
+    иначе следующий get_str() на этот же ключ упадёт (см. проверку выше),
+    хотя значение уже не секрет."""
+    from app.models.setting import Setting
+
+    service = SettingsService(db_session, KEY)
+    service.set_secret("routerai_api_key", "sk-real-key")
+    service.set("routerai_api_key", "not-a-secret-anymore")
+
+    row = db_session.get(Setting, "routerai_api_key")
+    assert row.is_secret is False
+    assert service.get_str("routerai_api_key") == "not-a-secret-anymore"
+
+
 def test_service_defaults(db_session):
     service = SettingsService(db_session, KEY)
     assert service.get_str("absent", "default") == "default"
     assert service.get_int("absent", 4) == 4
     assert service.get_bool("absent", True) is True
+
+
+def test_service_get_secret_returns_default_when_never_set(db_session):
+    """Путь, по которому Task 6 идёт при каждом GET настроек до того, как
+    админ впервые введёт ключ: строки в settings ещё нет вовсе."""
+    service = SettingsService(db_session, KEY)
+    assert service.get_secret("routerai_api_key", "d") == "d"
 
 
 def test_service_get_secret_with_other_key_raises(db_session):
@@ -1723,6 +1795,45 @@ def test_service_get_int_parses_stored_value(db_session):
     service = SettingsService(db_session, KEY)
     service.set("max_articles_per_day", "42")
     assert service.get_int("max_articles_per_day", 0) == 42
+
+
+def test_service_set_retries_once_on_concurrent_first_insert(db_session, monkeypatch):
+    """Гонка на первой записи ключа: наша сессия не видит строку (SELECT —
+    промах) и готовит INSERT, но кто-то другой успевает вставить и
+    закоммитить строку с тем же key первым — Task 6 зовёт seed_settings на
+    каждом GET, так что два админа на пустой БД сталкиваются здесь же.
+    commit() должен словить конфликт первичного ключа и повторить операцию
+    один раз как UPDATE, а не отдать вызывающему голый IntegrityError."""
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    real_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Симулируем конкурента: он вставляет и коммитит первым, реально
+            # занимая строку в БД, прежде чем наш собственный commit() (уже
+            # пытающийся вставить ту же строку) получит отказ по PK.
+            db_session.rollback()
+            db_session.execute(
+                text(
+                    "INSERT INTO settings (key, value, is_secret) "
+                    "VALUES ('max_articles_per_day', '1', 0)"
+                )
+            )
+            real_commit()
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+        real_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+
+    service = SettingsService(db_session, KEY)
+    service.set("max_articles_per_day", "42")
+
+    assert calls["n"] == 2
+    assert service.get_str("max_articles_per_day") == "42"
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -1749,13 +1860,26 @@ class SecretDecryptionError(RuntimeError):
     сменили, а настройки в БД остались зашифрованными старым."""
 
 
+def _fernet(key: str) -> Fernet:
+    try:
+        return Fernet(key.encode())
+    except ValueError as exc:
+        # Пустой ключ в проде исключён (${ENCRYPTION_KEY:?...} в compose), но
+        # обрезанный или не-base64 (например, вставили hex) — нет: он
+        # проходит проверку compose и падает именно здесь, ровно на том
+        # экране, куда админ идёт разбираться.
+        raise SecretDecryptionError(
+            "ENCRYPTION_KEY невалиден: ожидаются 32 url-safe base64-байта"
+        ) from exc
+
+
 def encrypt(value: str, key: str) -> str:
-    return Fernet(key.encode()).encrypt(value.encode()).decode()
+    return _fernet(key).encrypt(value.encode()).decode()
 
 
 def decrypt(value: str, key: str) -> str:
     try:
-        return Fernet(key.encode()).decrypt(value.encode()).decode()
+        return _fernet(key).decrypt(value.encode()).decode()
     except InvalidToken as exc:
         raise SecretDecryptionError("значение зашифровано другим ключом") from exc
 
@@ -1791,6 +1915,7 @@ class Setting(Base):
 `execution/backend/app/settings/service.py`:
 
 ```python
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.setting import Setting
@@ -1807,23 +1932,43 @@ class SettingsService:
         self.db = db
         self.key = encryption_key
 
+    def _row(self, name: str) -> Setting | None:
+        return self.db.get(Setting, name)
+
     def _raw(self, name: str) -> str | None:
-        row = self.db.get(Setting, name)
+        row = self._row(name)
         return row.value if row else None
 
-    def set(self, name: str, value: str) -> None:
-        row = self.db.get(Setting, name) or Setting(key=name)
-        row.value = value
-        row.is_secret = False
-        self.db.merge(row)
-        self.db.commit()
+    def _upsert(self, name: str, value: str, is_secret: bool, commit: bool) -> None:
+        row = self._row(name)
+        if row is not None:
+            row.value = value
+            row.is_secret = is_secret
+        else:
+            self.db.add(Setting(key=name, value=value, is_secret=is_secret))
+        if not commit:
+            return
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # Конкурентная первая запись: между нашим SELECT (промах) и
+            # INSERT кто-то другой уже вставил строку с этим key — не только
+            # фоновые воркеры, Task 6 зовёт seed_settings на каждом GET, так
+            # что два админа, открывшие страницу настроек на пустой БД,
+            # сталкиваются здесь же. К моменту повтора строка уже есть —
+            # оставшийся путь превращает его в UPDATE. Повторяем один раз;
+            # если и это не помогло — поднимаем настоящую причину.
+            self.db.rollback()
+            row = self._row(name)
+            row.value = value
+            row.is_secret = is_secret
+            self.db.commit()
 
-    def set_secret(self, name: str, value: str) -> None:
-        row = self.db.get(Setting, name) or Setting(key=name)
-        row.value = encrypt(value, self.key)
-        row.is_secret = True
-        self.db.merge(row)
-        self.db.commit()
+    def set(self, name: str, value: str, commit: bool = True) -> None:
+        self._upsert(name, value, is_secret=False, commit=commit)
+
+    def set_secret(self, name: str, value: str, commit: bool = True) -> None:
+        self._upsert(name, encrypt(value, self.key), is_secret=True, commit=commit)
 
     def get_secret(self, name: str, default: str = "") -> str:
         raw = self._raw(name)
@@ -1840,8 +1985,18 @@ class SettingsService:
             ) from None
 
     def get_str(self, name: str, default: str = "") -> str:
-        raw = self._raw(name)
-        return raw if raw is not None else default
+        row = self._row(name)
+        if row is None:
+            return default
+        if row.is_secret:
+            # is_secret не читается боевым кодом Task 6 (там своя константа
+            # SECRET_KEYS), но эта проверка закрывает класс утечек, если
+            # get_str когда-нибудь вызовут по секретному ключу по ошибке —
+            # без неё вызывающий тихо получил бы шифротекст.
+            raise SecretDecryptionError(
+                f"настройка {name!r} хранится зашифрованной — используйте get_secret()"
+            )
+        return row.value
 
     def get_int(self, name: str, default: int) -> int:
         raw = self._raw(name)
@@ -1855,7 +2010,7 @@ class SettingsService:
 - [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_settings.py -v`
-Expected: PASS — 16 passed
+Expected: PASS — 25 passed (после ревью и правок; изначально — 8 passed)
 
 - [x] **Step 7: Миграция**
 
@@ -1926,6 +2081,14 @@ def test_empty_secret_means_keep_current(admin_client, db_session):
 def test_update_plain_value(admin_client):
     admin_client.put("/api/admin/settings", json={"image_workers": "6"})
     assert admin_client.get("/api/admin/settings").json()["image_workers"] == "6"
+
+
+def test_invalid_int_setting_rejected(admin_client):
+    """image_workers валидируется на PUT, до записи — иначе опечатка проходит
+    с 200 и падает позже необработанным ValueError внутри celery-таски
+    (Task 8), где её уже никто не увидит."""
+    resp = admin_client.put("/api/admin/settings", json={"image_workers": ""})
+    assert resp.status_code == 422
 ```
 
 - [ ] **Step 2: Запустить тест, убедиться что падает**
@@ -1960,6 +2123,11 @@ DEFAULT_SETTINGS = {
 
 SECRET_KEYS = {"routerai_api_key"}
 
+# int-настройки валидируются на PUT до записи (см. admin_settings.py) —
+# иначе опечатка проходит с 200 и падает позже необработанным ValueError
+# внутри celery-таски (Task 8), где её уже никто не увидит.
+INT_KEYS = {"image_workers", "llm_max_retries"}
+
 
 def seed_settings(db: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
@@ -1973,13 +2141,13 @@ def seed_settings(db: Session) -> None:
 `execution/backend/app/api/admin_settings.py`:
 
 ```python
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_role
 from app.config import config
 from app.models.user import User
-from app.seed import DEFAULT_SETTINGS, SECRET_KEYS, seed_settings
+from app.seed import DEFAULT_SETTINGS, INT_KEYS, SECRET_KEYS, seed_settings
 from app.settings.crypto import SecretDecryptionError, mask
 from app.settings.service import SettingsService
 
@@ -2009,15 +2177,32 @@ def read_settings(db: Session = Depends(get_db),
 @router.put("")
 def update_settings(payload: dict, db: Session = Depends(get_db),
                     _user: User = Depends(require_role("admin"))) -> dict:
+    # int-настройки валидируются здесь, до записи — иначе опечатка проходит
+    # с 200 и падает позже необработанным ValueError внутри celery-таски
+    # (Task 8), где её уже никто не увидит.
+    errors = []
+    for key, value in payload.items():
+        if key in INT_KEYS:
+            try:
+                int(value)
+            except (TypeError, ValueError):
+                errors.append(f"настройка {key!r} должна быть целым числом")
+    if errors:
+        raise HTTPException(422, "; ".join(errors))
+
     service = _service(db)
     for key, value in payload.items():
         if key in SECRET_KEYS:
             # Пустая строка = «не менять»: фронт получает маску, а не значение,
             # и не может отправить секрет обратно неизменным.
             if value:
-                service.set_secret(key, str(value))
+                service.set_secret(key, str(value), commit=False)
         elif key in DEFAULT_SETTINGS:
-            service.set(key, str(value))
+            service.set(key, str(value), commit=False)
+    # Один коммит на весь payload: несколько ключей в одном PUT либо
+    # применяются все разом, либо ни один — иначе ошибка на середине списка
+    # оставляет половину настроек изменённой, а половину нет.
+    db.commit()
     return read_settings(db, _user)
 ```
 
@@ -2035,7 +2220,7 @@ app.include_router(admin_settings.router)
 - [ ] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
-Expected: PASS — 5 passed
+Expected: PASS — 6 passed
 
 - [ ] **Step 7: Commit**
 

@@ -10,13 +10,26 @@ class SecretDecryptionError(RuntimeError):
     сменили, а настройки в БД остались зашифрованными старым."""
 
 
+def _fernet(key: str) -> Fernet:
+    try:
+        return Fernet(key.encode())
+    except ValueError as exc:
+        # Пустой ключ в проде исключён (${ENCRYPTION_KEY:?...} в compose), но
+        # обрезанный или не-base64 (например, вставили hex) — нет: он
+        # проходит проверку compose и падает именно здесь, ровно на том
+        # экране, куда админ идёт разбираться.
+        raise SecretDecryptionError(
+            "ENCRYPTION_KEY невалиден: ожидаются 32 url-safe base64-байта"
+        ) from exc
+
+
 def encrypt(value: str, key: str) -> str:
-    return Fernet(key.encode()).encrypt(value.encode()).decode()
+    return _fernet(key).encrypt(value.encode()).decode()
 
 
 def decrypt(value: str, key: str) -> str:
     try:
-        return Fernet(key.encode()).decrypt(value.encode()).decode()
+        return _fernet(key).decrypt(value.encode()).decode()
     except InvalidToken as exc:
         raise SecretDecryptionError("значение зашифровано другим ключом") from exc
 

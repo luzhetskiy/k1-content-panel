@@ -10112,15 +10112,20 @@ def test_manager_can_be_deleted(admin_client, manager):
 
 
 def test_deleting_user_with_batch_sets_created_by_id_null(admin_client, manager, db_session):
-    """Обязательная находка (см. выше): черновичный test_manager_can_be_deleted
-    удаляет менеджера, у которого нет ни одной ArticleBatch/JobRun, — это не
-    ловит реальный дефект. До фикса (миграция
+    """Обязательная находка (см. orchestration-план, Task 19): черновичный
+    `test_manager_can_be_deleted` удаляет менеджера, у которого нет ни одной
+    ArticleBatch/JobRun, — это не ловит реальный дефект. До фикса (миграция
     450fdec97dd5_created_by_id_set_null_on_delete.py) внешний ключ
     article_batches.created_by_id -> users.id был объявлен без ON DELETE,
     Postgres применял NO ACTION по умолчанию, и удаление ЛЮБОГО пользователя,
     хоть раз создавшего партию статей, падало необработанным IntegrityError
-    → 500. Проверено вручную на живом Postgres — см. вывод psql выше по тексту
-    плана.
+    → 500. Проверено вручную на живом Postgres (docker compose up -d
+    postgres, миграции до головы, backend/verify_fk_tmp.py, файл удалён
+    после проверки):
+
+        psycopg.errors.ForeignKeyViolation: update or delete on table
+        "users" violates foreign key constraint
+        "article_batches_created_by_id_fkey" on table "article_batches"
 
     Этот тест создаёт именно такую партию перед удалением и проверяет не
     только код ответа, но и то, что created_by_id партии стал NULL —

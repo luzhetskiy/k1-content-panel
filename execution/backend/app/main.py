@@ -22,6 +22,7 @@ from app.api import (
     admin_prompts,
     admin_settings,
     admin_sites,
+    admin_users,
     article_batches,
     auth,
     jobs,
@@ -30,11 +31,10 @@ from app.api import (
 )
 from app.api.deps import get_db
 
-# admin_users создаётся в Task 19 — до тех пор не включаем его сюда.
 app = FastAPI(title="k1 content service")
 
 for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
-               article_batches, jobs, tasks_status):
+               admin_users, article_batches, jobs, tasks_status):
     app.include_router(module.router)
 
 

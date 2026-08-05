@@ -52,8 +52,15 @@ class JobRun(Base):
     celery_task_id: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(20), default="running")  # running|ok|failed
     log_text: Mapped[str] = mapped_column(Text, default="")
+    # SET NULL добавлен в Task 19 (раньше был без ondelete — NO ACTION по
+    # умолчанию на Postgres). Колонка и так была nullable, поэтому 500-й на
+    # удалении, как у ArticleBatch.created_by_id (см. app/models/article.py),
+    # здесь не было — но без явного ondelete первое же удаление пользователя,
+    # хоть раз запускавшего фоновую задачу, всё равно упало бы тем же
+    # IntegrityError. Симметрично с site_id чуть ниже по той же причине:
+    # журнал задач переживает удаление того, на что он ссылается.
     created_by_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id"), nullable=True)
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

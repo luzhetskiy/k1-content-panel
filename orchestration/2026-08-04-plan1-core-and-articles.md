@@ -6599,7 +6599,19 @@ class ArticleBatch(Base):
     requested_count: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="topics_pending")
     error_text: Mapped[str] = mapped_column(Text, default="")
-    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # SET NULL, nullable — тот же выбор и то же обоснование, что и у site_id
+    # чуть выше: партия — журнал того, что было реально сделано, и должна
+    # пережить удаление автора (Task 19, delete_user, app/api/admin_users.py).
+    # Раньше это было NOT NULL без ondelete, из-за чего Postgres по умолчанию
+    # ставил NO ACTION — удаление ЛЮБОГО пользователя, хоть раз создавшего
+    # партию, падало необработанным IntegrityError → 500 (проверено вручную
+    # на живом Postgres: "update or delete on table users violates foreign
+    # key constraint article_batches_created_by_id_fkey"). Поскольку создание
+    # партий — ежедневная работа менеджера, это делало delete_user фактически
+    # неработающим почти для всех реальных пользователей панели. См. миграцию
+    # 450fdec97dd5_created_by_id_set_null_on_delete.py.
+    created_by_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     articles: Mapped[list["Article"]] = relationship(
@@ -6759,8 +6771,15 @@ class JobRun(Base):
     celery_task_id: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(20), default="running")  # running|ok|failed
     log_text: Mapped[str] = mapped_column(Text, default="")
+    # SET NULL добавлен в Task 19 (раньше был без ondelete — NO ACTION по
+    # умолчанию на Postgres). Колонка и так была nullable, поэтому 500-й на
+    # удалении, как у ArticleBatch.created_by_id (см. app/models/article.py),
+    # здесь не было — но без явного ondelete первое же удаление пользователя,
+    # хоть раз запускавшего фоновую задачу, всё равно упало бы тем же
+    # IntegrityError. Симметрично с site_id чуть ниже по той же причине:
+    # журнал задач переживает удаление того, на что он ссылается.
     created_by_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id"), nullable=True)
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -9696,6 +9715,7 @@ from app.api import (
     admin_prompts,
     admin_settings,
     admin_sites,
+    admin_users,
     article_batches,
     auth,
     jobs,
@@ -9704,11 +9724,10 @@ from app.api import (
 )
 from app.api.deps import get_db
 
-# admin_users создаётся в Task 19 — до тех пор не включаем его сюда.
 app = FastAPI(title="k1 content service")
 
 for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
-               article_batches, jobs, tasks_status):
+               admin_users, article_batches, jobs, tasks_status):
     app.include_router(module.router)
 
 
@@ -9886,14 +9905,92 @@ rejected`), само решение и его причина задокумен�
 
 **Files:**
 - Create: `execution/backend/app/api/admin_users.py`
+- Create: `execution/backend/alembic/versions/450fdec97dd5_created_by_id_set_null_on_delete.py`
 - Modify: `execution/backend/app/main.py`
+- Modify: `execution/backend/app/models/article.py` (`ArticleBatch.created_by_id` → nullable, `ondelete="SET NULL"`)
+- Modify: `execution/backend/app/models/job.py` (`JobRun.created_by_id` FK → `ondelete="SET NULL"`)
 - Test: `execution/backend/tests/test_api_admin_users.py`
 
-- [ ] **Step 1: Написать падающий тест**
+**⚠️ Обязательная находка, закрытая до реализации API (не гипотеза — воспроизведена
+вручную на живом Postgres):** `article_batches.created_by_id` и
+`job_runs.created_by_id` — внешние ключи на `users.id`, объявленные без
+`ON DELETE`. Postgres в этом случае применяет `NO ACTION` по умолчанию. Проверка:
+создан пользователь → создана для него `ArticleBatch` → `db.delete(user);
+db.commit()`:
 
-`execution/backend/tests/test_api_admin_users.py`:
+```
+psycopg.errors.ForeignKeyViolation: update or delete on table "users" violates foreign key
+constraint "article_batches_created_by_id_fkey" on table "article_batches"
+DETAIL:  Key (id)=(3) is still referenced from table "article_batches".
+```
+
+Черновик `delete_user` ниже по тексту изначально делал ровно `db.delete(user);
+db.commit()` без какой-либо защиты — удаление ЛЮБОГО пользователя, хоть раз
+создавшего партию статей (`ArticleBatch.created_by_id`, ежедневная работа
+менеджера) или запустившего фоновую задачу (`JobRun.created_by_id`), падало
+необработанным `IntegrityError` → 500. Черновичный тест `test_manager_can_be_deleted`
+использует свежую фикстуру `manager` без единой партии — этот класс пробела
+(тест не касается реального ограничения БД) уже встречался в проекте раньше.
+
+**Выбран вариант Б — `ON DELETE SET NULL`** на обоих внешних ключах, симметрично
+тому, как Task 14 уже поступила с `site_id` на этих же моделях (докстринг
+`ArticleBatch`/`JobRun`: «журнал того, что было реально сделано» переживает
+удаление того, на что он ссылается). Причина выбора варианта Б, а не варианта А
+(предварительная проверка + отказ 400, без миграции): партии создаются
+менеджером ежедневно, поэтому вариант А сделал бы `delete_user` фактически
+неработающим почти для ЛЮБОГО реально работающего пользователя панели — рабочая
+кнопка «удалить», которая на практике никогда не срабатывает для настоящих
+пользователей, хуже, чем миграция. `is_active` уже покрывает сценарий «уволенный
+сотрудник» без удаления; `delete_user` должен оставаться рабочим для случая,
+когда пользователя действительно нужно стереть (ошибочно заведённый аккаунт),
+и партии/задачи от него не должны мешать этому и не должны исчезать вместе с
+ним — они переживают удаление автора так же, как переживают удаление сайта
+(Task 14).
+
+Проверка на коде (`app/tasks.py`, `app/api/article_batches.py`, `app/api/jobs.py`):
+`created_by_id` нигде не читается как гарантированно не-`None` — `_start_job`
+уже принимает `created_by_id: int | None`, `JobOut`/`BatchOut` это поле вообще
+не выводят. Смена `ArticleBatch.created_by_id` на `Mapped[int | None]` не ломает
+код, использующий это поле.
+
+Миграция `450fdec97dd5` (сгенерирована автогенерацией Alembic на живом Postgres,
+проверена: `docker compose run --rm --no-deps backend alembic upgrade head`
+прошёл без ошибок) переводит колонку в nullable и пересоздаёт оба FK-констрейнта
+(имена сохранены те же, что и в `e25842d72da3`, чтобы downgrade возвращал схему
+бит-в-бит) с `ondelete='SET NULL'`.
+
+Эмпирическая проверка на живом Postgres после миграции (скрипт
+`backend/verify_fk_tmp.py`, удалён после проверки — не коммитится):
+пользователь создан → создана `ArticleBatch` и `JobRun` с его `created_by_id` →
+`db.delete(user); db.commit()` прошёл БЕЗ ошибки → после `db.refresh()` оба
+`created_by_id` стали `None`. Вывод скрипта:
+
+```
+user deleted OK, no IntegrityError
+batch.created_by_id after delete: None
+job.created_by_id after delete: None
+ASSERTIONS OK: SET NULL работает как ожидалось
+```
+
+- [x] **Step 1: Написать падающий тест**
+
+`execution/backend/tests/test_api_admin_users.py` — тесты из черновика плана
+плюс дополнительные (написаны на этапе TDD после разбора находок ниже):
+`test_email_uppercase_duplicate_rejected`, `test_unknown_role_rejected`,
+`test_update_rejects_email_taken_by_another_user`,
+`test_last_admin_cannot_be_deactivated` (тот же замок, что и на демоцию роли, но
+через `is_active=False` — отдельная ветка одного `losing_admin`, черновик её не
+проверял), `test_second_admin_can_be_demoted` (контрпроверка: замок должен
+срабатывать на ПОСЛЕДНЕМ активном админе, а не на роли `admin` как таковой) и
+`test_deleting_user_with_batch_sets_created_by_id_null` — замена черновичного
+`test_manager_can_be_deleted` на версию, реально ловящую находку выше:
 
 ```python
+from sqlalchemy import text
+
+from app.models.article import ArticleBatch
+
+
 def test_manager_cannot_list_users(manager_client):
     assert manager_client.get("/api/admin/users").status_code == 403
 
@@ -9923,10 +10020,29 @@ def test_duplicate_email_rejected(admin_client, manager):
     assert resp.status_code == 400
 
 
+def test_email_uppercase_duplicate_rejected(admin_client, manager):
+    # Зеркалит login()/create_admin.py: email хранится и сравнивается через
+    # .lower(), иначе "Manager@k1.ru" завёлся бы вторым пользователем рядом
+    # с "manager@k1.ru" (unique=True в БД их различает — разные строки),
+    # и войти под новым адресом можно было бы только тем написанием,
+    # каким его завели, что удивило бы того, кто наберёт email иначе.
+    resp = admin_client.post("/api/admin/users", json={
+        "email": "MANAGER@k1.ru", "full_name": "Дубль", "role": "manager",
+        "password": "password123"})
+    assert resp.status_code == 400
+
+
 def test_short_password_rejected(admin_client):
     resp = admin_client.post("/api/admin/users", json={
         "email": "x@k1.ru", "full_name": "X", "role": "manager", "password": "123"})
     assert resp.status_code == 422
+
+
+def test_unknown_role_rejected(admin_client):
+    resp = admin_client.post("/api/admin/users", json={
+        "email": "x@k1.ru", "full_name": "X", "role": "superadmin",
+        "password": "password123"})
+    assert resp.status_code == 400
 
 
 def test_empty_password_on_update_keeps_current(admin_client, manager, client):
@@ -9937,6 +10053,16 @@ def test_empty_password_on_update_keeps_current(admin_client, manager, client):
                        data={"username": "manager@k1.ru", "password": "managerpass"})
     assert resp.status_code == 200
     assert resp.json()["full_name"] == "Переименован"
+
+
+def test_update_rejects_email_taken_by_another_user(admin_client, admin, manager):
+    # Проверка занятости email в update_user идёт ДО присваивания: без неё
+    # смена почты менеджера на уже занятую упала бы IntegrityError на
+    # уникальном индексе users.email — то есть 500 вместо внятного 400.
+    resp = admin_client.put(f"/api/admin/users/{manager.id}", json={
+        "email": "admin@k1.ru", "full_name": "Менеджер", "role": "manager",
+        "password": "", "is_active": True})
+    assert resp.status_code == 400
 
 
 def test_last_admin_cannot_be_deleted(admin_client, admin):
@@ -9952,23 +10078,120 @@ def test_last_admin_cannot_be_demoted(admin_client, admin):
     assert resp.status_code == 400
 
 
+def test_last_admin_cannot_be_deactivated(admin_client, admin):
+    # Тот же замок, что и на демоцию роли (test_last_admin_cannot_be_demoted),
+    # но через is_active=False, а не через role — losing_admin в
+    # update_user проверяет оба пути одним условием, эта ветка отдельно
+    # ничем не проверялась.
+    resp = admin_client.put(f"/api/admin/users/{admin.id}", json={
+        "email": "admin@k1.ru", "full_name": "Админ", "role": "admin",
+        "password": "", "is_active": False})
+    assert resp.status_code == 400
+
+
+def test_second_admin_can_be_demoted(admin_client, admin, db_session):
+    # Контрпроверка к test_last_admin_cannot_be_demoted: замок должен
+    # срабатывать именно на ПОСЛЕДНЕМ активном админе, а не на роли "admin"
+    # как таковой — второго активного админа демоутить можно.
+    from app.api.security import hash_password
+    from app.models.user import User
+
+    second = User(email="second@k1.ru", full_name="Второй",
+                  password_hash=hash_password("secondpass"), role="admin", is_active=True)
+    db_session.add(second)
+    db_session.commit()
+
+    resp = admin_client.put(f"/api/admin/users/{second.id}", json={
+        "email": "second@k1.ru", "full_name": "Второй", "role": "manager",
+        "password": "", "is_active": True})
+    assert resp.status_code == 200
+
+
 def test_manager_can_be_deleted(admin_client, manager):
     assert admin_client.delete(f"/api/admin/users/{manager.id}").status_code == 200
+
+
+def test_deleting_user_with_batch_sets_created_by_id_null(admin_client, manager, db_session):
+    """Обязательная находка (см. выше): черновичный test_manager_can_be_deleted
+    удаляет менеджера, у которого нет ни одной ArticleBatch/JobRun, — это не
+    ловит реальный дефект. До фикса (миграция
+    450fdec97dd5_created_by_id_set_null_on_delete.py) внешний ключ
+    article_batches.created_by_id -> users.id был объявлен без ON DELETE,
+    Postgres применял NO ACTION по умолчанию, и удаление ЛЮБОГО пользователя,
+    хоть раз создавшего партию статей, падало необработанным IntegrityError
+    → 500. Проверено вручную на живом Postgres — см. вывод psql выше по тексту
+    плана.
+
+    Этот тест создаёт именно такую партию перед удалением и проверяет не
+    только код ответа, но и то, что created_by_id партии стал NULL —
+    поведение ON DELETE SET NULL, а не просто «запрос не упал».
+
+    SQLite в тестах по умолчанию не применяет внешние ключи (проверено:
+    `sqlite3.connect(':memory:').execute('PRAGMA foreign_keys').fetchone()`
+    даёт `(0,)`), поэтому без явного включения ниже этот тест прошёл бы
+    даже без фикса — регрессию поймал бы только ручной прогон на Postgres.
+    Включаем PRAGMA только здесь, а не глобально в db_session
+    (tests/conftest.py): глобальное включение проверено и ломает 14
+    существующих тестов в test_models_article.py и test_ai_prompts.py,
+    которые намеренно заводят ArticleBatch/Article/PromptTemplate с
+    фиктивными site_id/created_by_id без настоящих родительских строк —
+    это их осознанный стиль модельных юнит-тестов, трогать 14 файлов ради
+    одного нового теста не в рамках Task 19. Включение работает, даже
+    будучи выполненным после того, как фикстуры admin/manager уже
+    закоммитили данные: PRAGMA foreign_keys нельзя менять внутри открытой
+    транзакции, но между commit фикстуры и началом тела теста открытой
+    транзакции нет (проверено отдельно на sqlite3-соединении).
+    """
+    db_session.execute(text("PRAGMA foreign_keys=ON"))
+
+    batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=manager.id)
+    db_session.add(batch)
+    db_session.commit()
+
+    resp = admin_client.delete(f"/api/admin/users/{manager.id}")
+    assert resp.status_code == 200
+
+    db_session.refresh(batch)
+    assert batch.created_by_id is None
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_users.py -v`
-Expected: FAIL — 404 на `/api/admin/users`
+Результат: FAIL — 404 на `/api/admin/users` (роутер ещё не подключён), как и
+ожидалось.
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `execution/backend/app/api/admin_users.py`:
 
 ```python
+"""CRUD пользователей панели: список, создание, правка, удаление.
+
+Защита последнего администратора (в create/update/delete) — без неё снятие
+роли или деактивация единственного активного admin'а заперла бы админку
+снаружи, а починить это можно было бы только прямой правкой БД в обход
+приложения (require_role("admin") стоит на самом /api/admin/users).
+
+Гонка при одновременной демоции/деактивации ДВУХ последних активных
+админов: `_count_active_admins` — обычный SELECT без блокировки строк
+(`SELECT ... FOR UPDATE`). Два параллельных PUT на двух РАЗНЫХ последних
+администраторах теоретически могут оба увидеть "остаётся ещё один" и оба
+пройти проверку до того, как любой из них закоммитит, — тогда оба commit
+пройдут и админов не останется вовсе. Осознанно не чиним: для панели на
+2–3 человека сценарий требует, чтобы два администратора ОДНОВРЕМЕННО (в
+пределах одного HTTP round-trip) демоутили или деактивировали ДРУГ ДРУГА —
+на порядок менее вероятно, чем гонка двойной оплаты по одному клику
+(Task 18), где для срабатывания достаточно ОДНОГО пользователя с плохим
+сетевым соединением. `SELECT ... FOR UPDATE` здесь добавил бы блокировку
+строк users на каждый PUT ради закрытия сценария, у которого в проде на
+несколько человек практическая вероятность неотличима от нуля.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_role
@@ -9997,6 +10220,11 @@ class UserOut(BaseModel):
 
 
 def _to_out(user: User) -> UserOut:
+    # Явный список полей, а не UserOut.model_validate(user, from_attributes=True):
+    # если в User когда-нибудь добавят новое поле (например, password_hash уже
+    # есть), автосборка из атрибутов молча утащит его в ответ API при первом же
+    # использовании .model_validate — здесь же лишнее поле пришлось бы вписывать
+    # руками и его отсутствие сразу бросится в глаза на код-ревью.
     return UserOut(id=user.id, email=user.email, full_name=user.full_name,
                    role=user.role, is_active=user.is_active)
 
@@ -10007,6 +10235,15 @@ def _count_active_admins(db: Session, exclude_id: int | None = None) -> int:
     if exclude_id is not None:
         query = query.where(User.id != exclude_id)
     return db.scalar(query) or 0
+
+
+def _normalize_email(email: str) -> str:
+    # Зеркалит login() (app/api/auth.py) и create_admin.py: колонка email
+    # регистрозависима на уровне БД (unique=True не различает "Ivan@k1.ru" и
+    # "ivan@k1.ru" сама по себе), поэтому без .lower() завелись бы два разных
+    # пользователя с визуально одинаковым адресом, а войти удалось бы только
+    # тем написанием, которым создавали.
+    return email.strip().lower()
 
 
 @router.get("", response_model=list[UserOut])
@@ -10021,11 +10258,7 @@ def create_user(payload: UserIn, db: Session = Depends(get_db),
         raise HTTPException(400, f"неизвестная роль: {payload.role}")
     if len(payload.password) < 8:
         raise HTTPException(422, "пароль короче 8 символов")
-    # Нормализация зеркалит login() и create_admin.py: колонка email
-    # регистрозависима, поэтому без .lower() «Ivan@k1.ru» и «ivan@k1.ru»
-    # завелись бы как два разных пользователя (unique=True их не различает),
-    # а войти удалось бы только тем написанием, которым создавали.
-    email = payload.email.strip().lower()
+    email = _normalize_email(payload.email)
     if db.scalars(select(User).where(User.email == email)).first():
         raise HTTPException(400, f"пользователь {email} уже существует")
 
@@ -10037,10 +10270,22 @@ def create_user(payload: UserIn, db: Session = Depends(get_db),
         raise HTTPException(422, str(e))
 
     user = User(email=email, full_name=payload.full_name, role=payload.role,
-                is_active=payload.is_active,
-                password_hash=password_hash)
+                is_active=payload.is_active, password_hash=password_hash)
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Конкурентное создание: между нашим SELECT-проверкой чуть выше
+        # (промах) и INSERT кто-то другой уже завёл пользователя с этим же
+        # email — тот же класс гонки, что уже закрыт в SettingsService._upsert
+        # (Task 5) и save_prompt (Task 12) через rollback + повтор. Здесь
+        # повтор как UPDATE не подходит: это не upsert одной сущности по
+        # ключу, а строгое создание нового пользователя — превращать его в
+        # тихую правку чужого существующего аккаунта было бы неожиданным
+        # поведением. Поэтому просто рапортуем конфликт, как и при обычном
+        # (не гоночном) дубле чуть выше.
+        db.rollback()
+        raise HTTPException(400, f"пользователь {email} уже существует")
     return _to_out(user)
 
 
@@ -10053,18 +10298,16 @@ def update_user(user_id: int, payload: UserIn, db: Session = Depends(get_db),
     if payload.role not in ROLES:
         raise HTTPException(400, f"неизвестная роль: {payload.role}")
 
-    # Снятие роли или деактивация последнего админа заперла бы админку снаружи —
-    # починить это можно было бы только руками в БД.
+    # Снятие роли или деактивация последнего активного админа заперла бы
+    # админку снаружи — см. докстринг модуля про гонку на этой же проверке.
     losing_admin = user.role == "admin" and (payload.role != "admin" or not payload.is_active)
     if losing_admin and _count_active_admins(db, exclude_id=user.id) == 0:
         raise HTTPException(400, "это последний активный администратор")
 
-    # Тот же .lower(), что и в create_user — иначе правка пользователя стала бы
-    # обходным путём завести адрес в другом регистре. Занятость проверяем до
-    # присваивания: без этой проверки смена почты на чужую упала бы нарушением
-    # unique-констрейнта, то есть 500-й вместо внятного 400.
-    email = payload.email.strip().lower()
+    email = _normalize_email(payload.email)
     if email != user.email and db.scalars(select(User).where(User.email == email)).first():
+        # Без этой проверки смена почты на чужую упала бы на unique-констрейнте
+        # необработанным IntegrityError — 500 вместо внятного 400.
         raise HTTPException(400, f"пользователь {email} уже существует")
 
     user.email = email
@@ -10078,13 +10321,37 @@ def update_user(user_id: int, payload: UserIn, db: Session = Depends(get_db),
             user.password_hash = hash_password(payload.password)
         except ValueError as e:
             raise HTTPException(422, str(e))
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Тот же класс гонки, что и в create_user: между SELECT-проверкой
+        # занятости email чуть выше и этим commit кто-то другой успел занять
+        # тот же адрес. Откатываем и рапортуем конфликт, ничего не повторяем —
+        # обновление это не upsert по email, а правка конкретного user_id.
+        db.rollback()
+        raise HTTPException(400, f"пользователь {email} уже существует")
     return _to_out(user)
 
 
 @router.delete("/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db),
                 _user: User = Depends(require_role("admin"))):
+    """До Task 19 FK article_batches.created_by_id/job_runs.created_by_id ->
+    users.id были объявлены без ON DELETE (Postgres — NO ACTION по
+    умолчанию): удаление ЛЮБОГО пользователя, хоть раз создавшего партию
+    статей или запустившего фоновую задачу, падало необработанным
+    IntegrityError → 500 (проверено вручную на живом Postgres, см. миграцию
+    450fdec97dd5_created_by_id_set_null_on_delete.py). Партии создаются
+    менеджером ежедневно, поэтому это ломало delete_user практически для
+    любого реально работающего пользователя панели, а не только в редком
+    крае. Оба FK переведены на ON DELETE SET NULL — партия/задача это
+    журнал того, что было реально сделано (тот же принцип, что и у site_id
+    в этих же моделях, Task 14), и должны пережить удаление автора, а не
+    блокировать его удаление. После этой миграции db.delete(user) ниже
+    больше не требует предварительной проверки на ArticleBatch/JobRun —
+    Postgres сам обнулит created_by_id в момент commit.
+    """
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "пользователь не найден")
@@ -10095,27 +10362,89 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
     return {"ok": True}
 ```
 
-`create_user`/`update_user` оборачивают `hash_password` в `try/except
-ValueError` (правка вслед за ревью Task 3): `hash_password` бросает
-`ValueError`, если пароль длиннее 72 байт — bcrypt иначе молча обрезал бы
-ввод, делая длинные пароли с общим префиксом взаимозаменяемыми. Без перехвата
-это ушло бы наружу как 500, а не как понятная 422-ошибка валидации.
+Изменения кода относительно черновика плана — и почему:
 
-- [ ] **Step 4: Подключить роутер**
+1. **`db.commit()` в `create_user`/`update_user` обёрнут в `try/except
+   IntegrityError`** — закрывает гонку конкурентного создания/переименования на
+   один и тот же email между SELECT-проверкой и записью, тот же класс гонки,
+   что уже чинили в `SettingsService._upsert` (Task 5) и `save_prompt`
+   (Task 12). В отличие от тех двух мест это не `upsert` по ключу — повтор как
+   UPDATE подменил бы «создать нового пользователя» на «тихо перезаписать
+   чужого» или мог зацепить чужие несохранённые поля, поэтому вместо
+   rollback+retry здесь просто рапортуем конфликт 400.
+2. **`delete_user` не проверяет ArticleBatch/JobRun перед удалением** — благодаря
+   `ON DELETE SET NULL` (обязательная находка выше) это не нужно на уровне
+   приложения, Postgres обнуляет `created_by_id` сам.
+3. **`_to_out` явно перечисляет поля** вместо `model_validate(user,
+   from_attributes=True)` — сознательная защита от будущей утечки, если в
+   `User` добавят новое поле.
+4. Докстринг модуля фиксирует разбор гонки одновременной демоции двух последних
+   админов (см. «Лёгкие пункты» ниже) — решено не чинить, обоснование в коде.
 
-Раскомментируй `admin_users` в импорте и в кортеже `main.py` (см. Task 18, Step 5).
+- [x] **Step 4: Подключить роутер**
 
-- [ ] **Step 5: Запустить тест, убедиться что проходит**
+`admin_users` добавлен в импорт и в кортеж `app.include_router(...)` в
+`main.py` (комментарий-заглушка "admin_users создаётся в Task 19..." удалён).
+
+- [x] **Step 5: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_users.py -v`
-Expected: PASS — 10 passed
+Результат: **16 passed** (10 из черновика + 6 добавленных на этапе разбора
+находок).
 
-- [ ] **Step 6: Commit**
+Полный набор: `cd execution && docker compose run --rm --no-deps backend pytest -q`
+Результат: **314 passed** (298 предыдущих + 16 новых), без регрессов.
+
+**Мутационная проверка** (правка → прогон нужного теста → откат правки,
+`diff` после отката подтверждает побайтовое совпадение):
+- Убран `ondelete="SET NULL"` из `ArticleBatch.created_by_id` →
+  `test_deleting_user_with_batch_sets_created_by_id_null` падает с тем же
+  `sqlite3.IntegrityError: FOREIGN KEY constraint failed` на `DELETE FROM
+  users` — тест реально ловит регресс находки, а не только проверяет
+  happy path.
+- Убрана проверка последнего админа из `delete_user` →
+  `test_last_admin_cannot_be_deleted` падает (`200 == 400`).
+- В `losing_admin` убрана ветка `not payload.is_active` →
+  `test_last_admin_cannot_be_deactivated` падает (`200 == 400`).
+- В `UserOut` добавлено поле `password_hash: str = ""` →
+  `test_password_hash_never_returned` падает (обнаруживает по имени ключа,
+  даже с пустым значением — то есть тест ловит саму утечку поля, а не
+  только непустой секрет).
+- Убрана явная проверка занятости email в `update_user` → соответствующий
+  тест НЕ упал: `db.commit()` всё равно падает `IntegrityError` на
+  unique-индексе, и `except IntegrityError` ниже по коду возвращает тот же
+  400 как резервный путь. Итоговое поведение для клиента не изменилось —
+  оставлена явная проверка, т.к. она даёт точное сообщение до касания
+  транзакции, но задокументирован факт, что у update_user теперь два слоя
+  защиты от этой гонки.
+
+- [x] **Step 6: Commit**
 
 ```bash
-git add execution/backend/app/api/admin_users.py execution/backend/app/main.py execution/backend/tests/test_api_admin_users.py
+git add execution/backend/app/api/admin_users.py execution/backend/app/main.py \
+        execution/backend/app/models/article.py execution/backend/app/models/job.py \
+        execution/backend/alembic/versions/450fdec97dd5_created_by_id_set_null_on_delete.py \
+        execution/backend/tests/test_api_admin_users.py
 git commit -m "feat: API пользователей с защитой последнего администратора"
 ```
+
+**Лёгкие пункты, разобранные и задокументированные (не обязательный фикс):**
+
+- **Гонка одновременной демоции/деактивации ДВУХ последних админов** —
+  `_count_active_admins` не блокирует строки (`SELECT ... FOR UPDATE`). Два
+  параллельных PUT на разных последних администраторах теоретически могут оба
+  пройти проверку до commit друг друга. Оценка: для панели на 2–3 человека
+  сценарий требует, чтобы два администратора ОДНОВРЕМЕННО демоутили или
+  деактивировали ДРУГ ДРУГА — на порядок менее вероятно, чем гонка двойной
+  оплаты (Task 18), которая срабатывает от одного клика одного пользователя.
+  Решение: не чинить, обоснование записано в докстринге `admin_users.py`.
+- **Гонка конкурентного создания пользователя с одинаковым email** —
+  `create_user` делал SELECT-проверку, затем INSERT, без перехвата
+  `IntegrityError` (тот же класс гонки, что уже чинили в Task 5/12).
+  Решение: почини́ть — `db.commit()` обёрнут в `try/except IntegrityError`,
+  без retry-as-update (в отличие от `SettingsService`/`save_prompt`, здесь это
+  не upsert, а строгое создание — при конфликте просто возвращаем 400).
+  То же самое сделано и в `update_user` для смены email на занятый.
 
 ---
 

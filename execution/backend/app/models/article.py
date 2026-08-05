@@ -42,7 +42,19 @@ class ArticleBatch(Base):
     requested_count: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="topics_pending")
     error_text: Mapped[str] = mapped_column(Text, default="")
-    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # SET NULL, nullable — тот же выбор и то же обоснование, что и у site_id
+    # чуть выше: партия — журнал того, что было реально сделано, и должна
+    # пережить удаление автора (Task 19, delete_user, app/api/admin_users.py).
+    # Раньше это было NOT NULL без ondelete, из-за чего Postgres по умолчанию
+    # ставил NO ACTION — удаление ЛЮБОГО пользователя, хоть раз создавшего
+    # партию, падало необработанным IntegrityError → 500 (проверено вручную
+    # на живом Postgres: "update or delete on table users violates foreign
+    # key constraint article_batches_created_by_id_fkey"). Поскольку создание
+    # партий — ежедневная работа менеджера, это делало delete_user фактически
+    # неработающим почти для всех реальных пользователей панели. См. миграцию
+    # 450fdec97dd5_created_by_id_set_null_on_delete.py.
+    created_by_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     articles: Mapped[list["Article"]] = relationship(

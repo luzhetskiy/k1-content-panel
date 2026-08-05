@@ -92,7 +92,7 @@ def save_prompt(payload: PromptIn, db: Session = Depends(get_db),
         # текст означает пустой платный запрос в модель.
         raise HTTPException(400, "глобальный промпт не может быть пустым")
     try:
-        check_template(payload.text)
+        check_template(payload.text, payload.key)
     except PromptError as exc:
         raise HTTPException(400, str(exc)) from exc
 

@@ -295,3 +295,37 @@ def test_variables_default_is_not_shared_between_requests(admin_client, seeded, 
     first = PromptTestIn(text="a")
     first.variables["x"] = 1
     assert PromptTestIn(text="b").variables == {}
+
+
+def test_misspelled_variable_is_rejected_on_save(admin_client, seeded, db_session):
+    """Опечатка в имени переменной проходит проверку синтаксиса, но на рендере
+    падает — а рендер случится в Celery-задаче, посреди партии, после того как
+    за предыдущие статьи уже заплачено."""
+    from app.ai.prompts import resolve_prompt
+    from app.seed import DEFAULT_PROMPTS
+
+    resp = admin_client.put("/api/admin/prompts", json={
+        "key": "topics", "site_id": None,
+        "text": "Придумай {{ count }} тем про {{ site_desription }}.",
+    })
+    assert resp.status_code == 400
+    assert "site_desription" in resp.json()["detail"]
+    assert resolve_prompt(db_session, "topics", None) == DEFAULT_PROMPTS["topics"]
+
+
+def test_valid_variables_are_accepted_on_save(admin_client, seeded, db_session):
+    resp = admin_client.put("/api/admin/prompts", json={
+        "key": "topics", "site_id": None,
+        "text": "Придумай {{ count }} тем про {{ site_description }} в тоне {{ tone_of_voice }}.",
+    })
+    assert resp.status_code == 200
+
+
+def test_test_endpoint_does_not_restrict_variable_names(admin_client, seeded, monkeypatch):
+    """На «Тесте» переменные задаёт сам админ, ключа промпта там нет — набор
+    имён не ограничен, иначе нельзя прогнать произвольный черновик."""
+    _stub(monkeypatch, complete_text=lambda prompt: TextResult("ответ", 1, 1, 0.0))
+    resp = admin_client.post("/api/admin/prompts/test", json={
+        "text": "{{ произвольное_имя }}", "variables": {"произвольное_имя": "значение"}})
+    assert resp.status_code == 200
+    assert resp.json()["rendered"] == "значение"

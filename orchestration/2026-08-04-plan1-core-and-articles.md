@@ -4955,7 +4955,8 @@ git commit -m "feat: API сайтов, синхронизация раздела
 ```python
 import pytest
 
-from app.ai.prompts import PROMPT_KEYS, PromptError, render_prompt, resolve_prompt
+from app.ai.prompts import (PROMPT_KEYS, PROMPT_VARIABLES, PromptError, check_template,
+                            render_prompt, resolve_prompt)
 from app.models.prompt_template import PromptTemplate
 from app.seed import seed_prompts
 
@@ -5049,6 +5050,11 @@ def test_default_prompts_render_with_real_contexts(db_session):
                           "image_style": "стиль"},
     }
     for key in PROMPT_KEYS:
+        # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из
+        # админки. Если он разойдётся с реальным контекстом, админка начнёт
+        # отклонять правильные правки или пропускать опечатки, а падать это
+        # будет в Celery. Сверяем здесь, где контекст выписан явно.
+        assert set(contexts[key]) == PROMPT_VARIABLES[key], key
         template = resolve_prompt(db_session, key, None)
         rendered = render_prompt(template, contexts[key])
         assert rendered.strip()
@@ -5091,6 +5097,42 @@ def test_duplicate_global_prompt_is_rejected(db_session):
     db_session.add(PromptTemplate(key="topics", site_id=None, text="второй"))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_default_prompts_pass_their_own_check(db_session):
+    """Дефолтные шаблоны обязаны проходить ту же проверку, что и шаблоны из
+    админки. Иначе первый же админ, открывший дефолт и нажавший «Сохранить»
+    без единой правки, получит 400."""
+    seed_prompts(db_session)
+    for key in PROMPT_KEYS:
+        check_template(resolve_prompt(db_session, key, None), key)
+
+
+def test_check_template_names_the_misspelled_variable():
+    """{{ site_desription }} синтаксически безупречен — на рендере с
+    StrictUndefined это отказ, но ждать боевого прогона незачем."""
+    with pytest.raises(PromptError) as exc:
+        check_template("Пиши про {{ site_desription }}.", "topics")
+    assert "site_desription" in str(exc.value)
+    # Список доступных имён в тексте ошибки: без него админ видит «неизвестная
+    # переменная» и идёт искать правильное написание в исходники.
+    assert "site_description" in str(exc.value)
+
+
+def test_check_template_allows_loop_variables():
+    """Переменная цикла объявлена самим шаблоном и неизвестной не считается."""
+    check_template("{% for title in existing_titles %}- {{ title }}\n{% endfor %}", "topics")
+
+
+def test_check_template_without_key_checks_only_syntax():
+    """Прогон на экране «Тест» ключа не знает: там переменные задаёт админ."""
+    check_template("{{ что_угодно }}")
+    with pytest.raises(PromptError, match="синтаксис"):
+        check_template("{% for x in %}")
+
+
+def test_prompt_variables_cover_every_key():
+    assert set(PROMPT_VARIABLES) == set(PROMPT_KEYS)
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -5141,7 +5183,7 @@ class PromptTemplate(Base):
 ```python
 """Разрешение промпта (сайт → глобальный дефолт) и безопасный рендер Jinja2."""
 
-from jinja2 import StrictUndefined, TemplateError
+from jinja2 import StrictUndefined, TemplateError, meta
 from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -5149,6 +5191,24 @@ from sqlalchemy.orm import Session
 from app.models.prompt_template import PromptTemplate
 
 PROMPT_KEYS = ("topics", "article_body", "cover", "content_image")
+
+# Набор переменных, который каждому промпту реально передаёт боевой код
+# (app/tasks.py и app/articles/builder.py). Объявлен здесь, а не разбросан по
+# местам вызова, ради двух проверок сразу: check_template отклоняет опечатку в
+# имени переменной при сохранении шаблона в админке, а
+# test_default_prompts_render_with_real_contexts сверяет этот список с
+# контекстами, которые собирает вызывающий код. Без первой проверки опечатка
+# вида {{ site_desription }} сохраняется с ответом 200 (синтаксис-то верный) и
+# всплывает только на рендере в Celery-задаче — то есть посреди партии, после
+# того как за предыдущие статьи уже заплачено.
+PROMPT_VARIABLES: dict[str, frozenset[str]] = {
+    "topics": frozenset({"count", "site_name", "site_description", "tone_of_voice",
+                         "existing_titles"}),
+    "article_body": frozenset({"topic", "site_name", "site_description", "tone_of_voice",
+                               "reference_html", "image_count", "image_paths"}),
+    "cover": frozenset({"topic", "cover_style"}),
+    "content_image": frozenset({"topic", "paragraph", "image_style"}),
+}
 
 # undefined=StrictUndefined: с дефолтным Undefined опечатка в имени переменной
 # ({{ conut }} вместо {{ count }}) молча превращается в пустую строку — шаблон
@@ -5189,17 +5249,34 @@ def resolve_prompt(db: Session, key: str, site_id: int | None) -> str:
     return default.text
 
 
-def check_template(template_text: str) -> None:
-    """Проверка синтаксиса без рендера — для сохранения шаблона в админке
-    (Task 13), где значения переменных ещё неизвестны. Без неё сломанный
-    шаблон ложится в БД с ответом 200 и взрывается позже, внутри Celery-задачи
-    генерации статьи, где ошибку уже никто не свяжет с правкой промпта.
-    Опечатки в именах переменных здесь не ловятся принципиально: их видно
-    только на рендере (StrictUndefined), то есть на кнопке «Тест»."""
+def check_template(template_text: str, key: str | None = None) -> None:
+    """Проверка шаблона без рендера — для сохранения в админке (Task 13), где
+    значения переменных ещё неизвестны. Без неё сломанный шаблон ложится в БД
+    с ответом 200 и взрывается позже, внутри Celery-задачи генерации статьи,
+    где ошибку уже никто не свяжет с правкой промпта.
+
+    При известном `key` проверяются и имена переменных: `{{ site_desription }}`
+    синтаксически безупречен, но на рендере с StrictUndefined это отказ. Ждать
+    его до боевого прогона незачем — набор переменных для каждого ключа
+    известен заранее (PROMPT_VARIABLES), так что опечатка называется по имени
+    прямо в форме редактирования.
+
+    Переменные цикла (`{% for title in existing_titles %}`) в список
+    неизвестных не попадают: find_undeclared_variables считает объявленным всё,
+    что шаблон присваивает сам."""
     try:
-        _env.from_string(template_text)
+        ast = _env.parse(template_text)
     except TemplateError as exc:
         raise PromptError(f"ошибка шаблона (синтаксис): {exc}") from exc
+
+    allowed = PROMPT_VARIABLES.get(key or "")
+    if allowed is None:
+        return
+    unknown = sorted(meta.find_undeclared_variables(ast) - allowed)
+    if unknown:
+        raise PromptError(
+            f"неизвестные переменные: {', '.join(unknown)}. "
+            f"Для промпта {key!r} доступны: {', '.join(sorted(allowed))}")
 
 
 def render_prompt(template_text: str, variables: dict) -> str:
@@ -5320,14 +5397,14 @@ def seed_prompts(db: Session) -> None:
         db.commit()
 ```
 
-**Правка Task 13:** `seed_prompts` и `check_template` выше приведены уже с
-исправлениями, найденными при исполнении Task 13 (обработка гонки на GET и
-проверка синтаксиса при сохранении). Сам Task 12 закоммичен без них.
+**Правка Task 13:** `seed_prompts`, `check_template` и `PROMPT_VARIABLES` выше
+приведены уже с исправлениями, найденными при исполнении Task 13 (обработка
+гонки на GET, проверка шаблона при сохранении). Сам Task 12 закоммичен без них.
 
 - [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_prompts.py -v`
-Expected: PASS — 9 passed
+Expected: PASS — 21 passed (9 в самом Task 12, остальные добавлены в Task 13)
 
 - [x] **Step 7: Миграция**
 
@@ -5360,8 +5437,8 @@ git commit -m "feat: шаблоны промптов с переопределе
 - Create: `execution/backend/app/ai/factory.py`
 - Create: `execution/backend/app/api/admin_prompts.py`
 - Modify: `execution/backend/app/main.py`
-- Modify: `execution/backend/app/ai/prompts.py` — добавлена `check_template`
-  (блок приведён в Task 12, Step 4)
+- Modify: `execution/backend/app/ai/prompts.py` — добавлены `check_template`
+  и `PROMPT_VARIABLES` (блок приведён в Task 12, Step 4)
 - Modify: `execution/backend/app/seed.py` — `seed_prompts` переживает гонку
   (блок приведён в Task 12, Step 5)
 - Test: `execution/backend/tests/test_api_admin_prompts.py`
@@ -5412,6 +5489,22 @@ git commit -m "feat: шаблоны промптов с переопределе
    невнятным «Invalid URL».
 10. **Пустой отрендеренный промпт не уходит в модель** — платный запрос ни о
     чём с заведомо мусорным ответом.
+11. **`PUT` обязан проверять имена переменных, а не только синтаксис.**
+    `{{ site_desription }}` — валидный Jinja, `check_template` по синтаксису
+    его пропускает, а на рендере со `StrictUndefined` (Task 12) это отказ.
+    Первый рендер случится в Celery-задаче, посреди партии, когда за
+    предыдущие статьи уже заплачено. Набор переменных для каждого ключа
+    известен заранее, поэтому объявлен в `PROMPT_VARIABLES` и проверяется на
+    сохранении: `check_template(text, key)` называет опечатку по имени и
+    перечисляет доступные имена. Переменные цикла
+    (`{% for title in existing_titles %}`) неизвестными не считаются —
+    `find_undeclared_variables` относит к объявленным всё, что шаблон
+    присваивает сам. На экране «Тест» ключа нет и набор имён не ограничен:
+    там переменные задаёт сам админ, иначе нельзя прогнать черновик.
+    `PROMPT_VARIABLES` — единственное объявление этого набора: тот же список
+    сверяется в `test_default_prompts_render_with_real_contexts` (Task 12) с
+    контекстами, которые собирает боевой код, поэтому расхождение с Task 15/16
+    падает тестом, а не тихо запрещает админу правильную правку.
 
 - [x] **Step 1: Написать падающий тест**
 
@@ -5715,6 +5808,40 @@ def test_variables_default_is_not_shared_between_requests(admin_client, seeded, 
     first = PromptTestIn(text="a")
     first.variables["x"] = 1
     assert PromptTestIn(text="b").variables == {}
+
+
+def test_misspelled_variable_is_rejected_on_save(admin_client, seeded, db_session):
+    """Опечатка в имени переменной проходит проверку синтаксиса, но на рендере
+    падает — а рендер случится в Celery-задаче, посреди партии, после того как
+    за предыдущие статьи уже заплачено."""
+    from app.ai.prompts import resolve_prompt
+    from app.seed import DEFAULT_PROMPTS
+
+    resp = admin_client.put("/api/admin/prompts", json={
+        "key": "topics", "site_id": None,
+        "text": "Придумай {{ count }} тем про {{ site_desription }}.",
+    })
+    assert resp.status_code == 400
+    assert "site_desription" in resp.json()["detail"]
+    assert resolve_prompt(db_session, "topics", None) == DEFAULT_PROMPTS["topics"]
+
+
+def test_valid_variables_are_accepted_on_save(admin_client, seeded, db_session):
+    resp = admin_client.put("/api/admin/prompts", json={
+        "key": "topics", "site_id": None,
+        "text": "Придумай {{ count }} тем про {{ site_description }} в тоне {{ tone_of_voice }}.",
+    })
+    assert resp.status_code == 200
+
+
+def test_test_endpoint_does_not_restrict_variable_names(admin_client, seeded, monkeypatch):
+    """На «Тесте» переменные задаёт сам админ, ключа промпта там нет — набор
+    имён не ограничен, иначе нельзя прогнать произвольный черновик."""
+    _stub(monkeypatch, complete_text=lambda prompt: TextResult("ответ", 1, 1, 0.0))
+    resp = admin_client.post("/api/admin/prompts/test", json={
+        "text": "{{ произвольное_имя }}", "variables": {"произвольное_имя": "значение"}})
+    assert resp.status_code == 200
+    assert resp.json()["rendered"] == "значение"
 ```
 
 `execution/backend/tests/test_ai_factory.py`:
@@ -6096,7 +6223,7 @@ def save_prompt(payload: PromptIn, db: Session = Depends(get_db),
         # текст означает пустой платный запрос в модель.
         raise HTTPException(400, "глобальный промпт не может быть пустым")
     try:
-        check_template(payload.text)
+        check_template(payload.text, payload.key)
     except PromptError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -6169,13 +6296,15 @@ app.include_router(admin_prompts.router)
 
 - [x] **Step 6: Правки в app/ai/prompts.py и app/seed.py**
 
-`check_template` и обработка гонки в `seed_prompts` — блоки приведены целиком
-в Task 12 (Step 4 и Step 5), там же причины.
+`check_template` с `PROMPT_VARIABLES` и обработка гонки в `seed_prompts` —
+блоки приведены целиком в Task 12 (Step 4 и Step 5), там же причины. Там же
+обновлён `tests/test_ai_prompts.py`: проверки `check_template` по ключу и
+сверка `PROMPT_VARIABLES` с боевыми контекстами.
 
 - [x] **Step 7: Запустить тесты, убедиться что проходят**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest -q`
-Expected: PASS — 223 passed (189 до задачи + 34 новых)
+Expected: PASS — 231 passed (189 до задачи + 42 новых)
 
 - [x] **Step 8: Commit**
 

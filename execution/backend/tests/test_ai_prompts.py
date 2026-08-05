@@ -1,6 +1,7 @@
 import pytest
 
-from app.ai.prompts import PROMPT_KEYS, PromptError, render_prompt, resolve_prompt
+from app.ai.prompts import (PROMPT_KEYS, PROMPT_VARIABLES, PromptError, check_template,
+                            render_prompt, resolve_prompt)
 from app.models.prompt_template import PromptTemplate
 from app.seed import seed_prompts
 
@@ -94,6 +95,11 @@ def test_default_prompts_render_with_real_contexts(db_session):
                           "image_style": "стиль"},
     }
     for key in PROMPT_KEYS:
+        # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из
+        # админки. Если он разойдётся с реальным контекстом, админка начнёт
+        # отклонять правильные правки или пропускать опечатки, а падать это
+        # будет в Celery. Сверяем здесь, где контекст выписан явно.
+        assert set(contexts[key]) == PROMPT_VARIABLES[key], key
         template = resolve_prompt(db_session, key, None)
         rendered = render_prompt(template, contexts[key])
         assert rendered.strip()
@@ -136,3 +142,39 @@ def test_duplicate_global_prompt_is_rejected(db_session):
     db_session.add(PromptTemplate(key="topics", site_id=None, text="второй"))
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_default_prompts_pass_their_own_check(db_session):
+    """Дефолтные шаблоны обязаны проходить ту же проверку, что и шаблоны из
+    админки. Иначе первый же админ, открывший дефолт и нажавший «Сохранить»
+    без единой правки, получит 400."""
+    seed_prompts(db_session)
+    for key in PROMPT_KEYS:
+        check_template(resolve_prompt(db_session, key, None), key)
+
+
+def test_check_template_names_the_misspelled_variable():
+    """{{ site_desription }} синтаксически безупречен — на рендере с
+    StrictUndefined это отказ, но ждать боевого прогона незачем."""
+    with pytest.raises(PromptError) as exc:
+        check_template("Пиши про {{ site_desription }}.", "topics")
+    assert "site_desription" in str(exc.value)
+    # Список доступных имён в тексте ошибки: без него админ видит «неизвестная
+    # переменная» и идёт искать правильное написание в исходники.
+    assert "site_description" in str(exc.value)
+
+
+def test_check_template_allows_loop_variables():
+    """Переменная цикла объявлена самим шаблоном и неизвестной не считается."""
+    check_template("{% for title in existing_titles %}- {{ title }}\n{% endfor %}", "topics")
+
+
+def test_check_template_without_key_checks_only_syntax():
+    """Прогон на экране «Тест» ключа не знает: там переменные задаёт админ."""
+    check_template("{{ что_угодно }}")
+    with pytest.raises(PromptError, match="синтаксис"):
+        check_template("{% for x in %}")
+
+
+def test_prompt_variables_cover_every_key():
+    assert set(PROMPT_VARIABLES) == set(PROMPT_KEYS)

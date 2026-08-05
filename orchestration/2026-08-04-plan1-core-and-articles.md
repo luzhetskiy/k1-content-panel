@@ -8516,8 +8516,7 @@ celery_app.conf.timezone = "Europe/Samara"
 # images), например soft = 1462 + 366×reference_images, hard = soft + 180 —
 # по формуле выше, а НЕ вызывать `retry_article.delay(...)` без параметров
 # (черновик Task 18 в плане на момент этой находки делал именно так — это
-# зафиксировано как дефект черновика и исправлено текстом плана, см. Task 18
-# ниже: `_retry_time_limits` и `/articles/{id}/retry` теперь на apply_async).
+# зафиксировано как дефект черновика и исправлено текстом плана).
 #
 # Мягкий лимит меньше жёсткого на 3 минуты: этого хватает, чтобы обработчик
 # SoftTimeLimitExceeded (см. tasks.py) записал status="failed" в JobRun и
@@ -8625,10 +8624,6 @@ def generate_topics_sync(db, batch_id: int) -> None:
         prompt = render_prompt(template, {
             "count": batch.requested_count,
             "site_name": site.name,
-            # site_description и tone_of_voice шаблон topics использует, но
-            # раньше их сюда не передавали — с дефолтным Undefined они молча
-            # рендерились пустотой, и тематика сайта не доезжала до модели.
-            # Ровно против этого промаха поля и заведены (см. app/models/site.py).
             "site_description": site.site_description,
             "tone_of_voice": site.tone_of_voice,
             "existing_titles": existing,
@@ -8677,12 +8672,10 @@ def run_batch_sync(db, batch_id: int) -> None:
     batch = db.get(ArticleBatch, batch_id)
     site = db.get(Site, batch.site_id) if batch.site_id is not None else None
     if site is None:
-        # Находка №2 ревью Task 17: site_id nullable, ON DELETE SET NULL
-        # (Task 14) — сайт партии могли удалить между постановкой задачи в
-        # очередь и её реальным запуском. Проверка стоит до
-        # `batch.status = "running"`, чтобы партия не проходила через
-        # бессмысленный промежуточный статус "running" на пути к "failed",
-        # когда заранее известно, что собирать нечем.
+        # Находка №2 ревью Task 17: см. тот же аргумент в generate_topics_sync
+        # выше. Проверка стоит до `batch.status = "running"`, чтобы партия не
+        # проходила через бессмысленный промежуточный статус "running" на пути
+        # к "failed", когда заранее известно, что собирать нечем.
         batch.status = "failed"
         batch.error_text = "сайт этой партии удалён — сборка статей невозможна"
         db.commit()
@@ -8706,8 +8699,8 @@ def run_batch_sync(db, batch_id: int) -> None:
         for article in batch.articles:
             if article.status == "published":
                 continue
-            # Падение одной статьи не должно отменять остальные: билдер сам пишет
-            # причину в error_text и оставляет статью в failed.
+            # Падение одной статьи не должно отменять остальные: билдер сам
+            # пишет причину в error_text и оставляет статью в failed.
             build_for(db, article, site, site_client, job.id)
             db.commit()
     except SoftTimeLimitExceeded:
@@ -8725,8 +8718,8 @@ def run_batch_sync(db, batch_id: int) -> None:
     except (AIConfigError, SecretDecryptionError) as exc:
         # Находка №1 ревью Task 17: AIConfigError долетает сюда либо из
         # open_site_client (SecretDecryptionError) выше, либо изнутри
-        # build_for() (Task 16, app/articles/builder.py) — она собирает
-        # клиентов RouterAI ДО входа в собственный try, см. её докстринг.
+        # build_for → build_for() (Task 16, app/articles/builder.py) собирает
+        # клиентов RouterAI ДО входа в собственный try — см. её докстринг.
         # Это ошибка конфигурации панели, ОДНА И ТА ЖЕ для всех статей партии
         # (ключ либо задан, либо нет), а не отказ, специфичный для конкретной
         # статьи — поэтому она обрывает партию целиком, а не просто эту

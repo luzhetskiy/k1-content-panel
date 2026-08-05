@@ -3522,7 +3522,7 @@ git commit -m "feat: модель сайта"
 - Create: `execution/backend/app/sites/client.py`
 - Test: `execution/backend/tests/test_sites_client.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_sites_client.py`:
 
@@ -3652,12 +3652,12 @@ def test_error_response_raises(monkeypatch):
             title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_client.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.sites'`
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `execution/backend/app/sites/__init__.py` — пустой файл.
 
@@ -3807,12 +3807,12 @@ class SiteClient:
         return f"/media/{upload_to}{filename}"
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_client.py -v`
 Expected: PASS — 9 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add execution/backend/app/sites execution/backend/tests/test_sites_client.py

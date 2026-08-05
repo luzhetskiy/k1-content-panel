@@ -1,6 +1,6 @@
 """Разрешение промпта (сайт → глобальный дефолт) и безопасный рендер Jinja2."""
 
-from jinja2 import TemplateError
+from jinja2 import StrictUndefined, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,7 +9,22 @@ from app.models.prompt_template import PromptTemplate
 
 PROMPT_KEYS = ("topics", "article_body", "cover", "content_image")
 
-_env = SandboxedEnvironment(autoescape=False, trim_blocks=False, lstrip_blocks=False)
+# undefined=StrictUndefined: с дефолтным Undefined опечатка в имени переменной
+# ({{ conut }} вместо {{ count }}) молча превращается в пустую строку — шаблон
+# рендерится «успешно», часть инструкции исчезает, и урезанный промпт уходит в
+# платный запрос к модели. Обнаружить это можно только по качеству статей,
+# то есть сильно позже и без связи с правкой промпта. Так уже было: шаблон
+# topics обращался к site_description и tone_of_voice, а вызывающий код их не
+# передавал — тематика сайта тихо не доезжала до модели.
+#
+# Обратная сторона: при StrictUndefined условие {% if x %} для необязательной
+# переменной тоже падает. Правильная форма — {% if x is defined %}.
+#
+# В контекст рендера передаются только плоские значения (строки, числа, списки
+# строк). ORM-объекты передавать нельзя: песочница ограничивает доступ к
+# «небезопасным» атрибутам, но обычные атрибуты объекта из шаблона доступны.
+_env = SandboxedEnvironment(autoescape=False, trim_blocks=False, lstrip_blocks=False,
+                            undefined=StrictUndefined)
 
 
 class PromptError(RuntimeError):

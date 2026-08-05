@@ -5015,6 +5015,82 @@ def test_render_blocks_dangerous_attribute_access():
 def test_render_reports_syntax_error_as_text():
     with pytest.raises(PromptError, match="синтаксис"):
         render_prompt("{% for x in %}", {})
+
+
+def test_render_reports_unknown_variable_by_name():
+    """Опечатка в имени переменной обязана падать, а не молча подставлять
+    пустоту: урезанный промпт уходит в платный запрос, и обнаружить это можно
+    только по качеству статей, много позже правки шаблона."""
+    with pytest.raises(PromptError, match="conut"):
+        render_prompt("Придумай {{ conut }} тем.", {"count": 5})
+
+
+def test_render_allows_optional_variable_via_is_defined():
+    """Обратная сторона StrictUndefined: для необязательной переменной
+    правильная форма — `is defined`, а не голое `{% if x %}`."""
+    out = render_prompt("{% if extra is defined %}{{ extra }}{% endif %}ок", {})
+    assert out == "ок"
+
+
+def test_default_prompts_render_with_real_contexts(db_session):
+    """Каждый дефолтный промпт прогоняется с тем набором переменных, который
+    реально передаётся в бою (см. app/tasks.py и app/articles/builder.py).
+    Ловит расхождение между шаблоном и вызывающим кодом — именно оно тихо
+    отключало тематику сайта в промпте тем."""
+    seed_prompts(db_session)
+    contexts = {
+        "topics": {"count": 5, "site_name": "X", "site_description": "описание",
+                   "tone_of_voice": "тон", "existing_titles": ["А", "Б"]},
+        "article_body": {"topic": "тема", "site_name": "X", "site_description": "описание",
+                         "tone_of_voice": "тон", "reference_html": "<p>x</p>",
+                         "image_count": 2, "image_paths": ["/a.webp", "/b.webp"]},
+        "cover": {"topic": "тема", "cover_style": "стиль"},
+        "content_image": {"topic": "тема", "paragraph": "иллюстрация 1 из 2",
+                          "image_style": "стиль"},
+    }
+    for key in PROMPT_KEYS:
+        template = resolve_prompt(db_session, key, None)
+        rendered = render_prompt(template, contexts[key])
+        assert rendered.strip()
+
+
+def test_empty_site_override_falls_back_to_global(db_session):
+    """Промпт сайта из одних пробелов — это «не задан», а не «задан пустым»."""
+    seed_prompts(db_session)
+    db_session.add(PromptTemplate(key="topics", site_id=1, text="   \n  "))
+    db_session.commit()
+    assert resolve_prompt(db_session, "topics", 1) == resolve_prompt(db_session, "topics", None)
+
+
+def test_duplicate_key_for_same_site_is_rejected(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    db_session.add(PromptTemplate(key="topics", site_id=1, text="a"))
+    db_session.commit()
+    db_session.add(PromptTemplate(key="topics", site_id=1, text="b"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_same_key_for_different_sites_is_allowed(db_session):
+    db_session.add(PromptTemplate(key="topics", site_id=1, text="a"))
+    db_session.add(PromptTemplate(key="topics", site_id=2, text="b"))
+    db_session.commit()
+    assert db_session.query(PromptTemplate).filter_by(key="topics").count() == 2
+
+
+def test_duplicate_global_prompt_is_rejected(db_session):
+    """UniqueConstraint(key, site_id) глобальные шаблоны не различает: в SQL
+    NULL не равен сам себе, и две строки с site_id=NULL проходят (проверено на
+    живом Postgres). Их разводит отдельный частичный индекс — иначе
+    resolve_prompt брал бы первую попавшуюся из дублей."""
+    from sqlalchemy.exc import IntegrityError
+
+    db_session.add(PromptTemplate(key="topics", site_id=None, text="первый"))
+    db_session.commit()
+    db_session.add(PromptTemplate(key="topics", site_id=None, text="второй"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -5027,7 +5103,8 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.models.prompt_temp
 `execution/backend/app/models/prompt_template.py`:
 
 ```python
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -5038,7 +5115,17 @@ class PromptTemplate(Base):
     для конкретного сайта."""
 
     __tablename__ = "prompt_templates"
-    __table_args__ = (UniqueConstraint("key", "site_id", name="uq_prompt_key_site"),)
+    __table_args__ = (
+        UniqueConstraint("key", "site_id", name="uq_prompt_key_site"),
+        # Отдельный частичный индекс на глобальные шаблоны: UniqueConstraint выше
+        # их НЕ различает, потому что в SQL NULL не равен сам себе — проверено,
+        # две строки с одним key и site_id=NULL вставляются в Postgres успешно.
+        # Разрешение промпта берёт первую попавшуюся, то есть какой из дублей
+        # уедет в модель, зависело бы от порядка строк.
+        Index("uq_prompt_key_global", "key", unique=True,
+              postgresql_where=text("site_id IS NULL"),
+              sqlite_where=text("site_id IS NULL")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     key: Mapped[str] = mapped_column(String(50))
@@ -5054,7 +5141,7 @@ class PromptTemplate(Base):
 ```python
 """Разрешение промпта (сайт → глобальный дефолт) и безопасный рендер Jinja2."""
 
-from jinja2 import TemplateError
+from jinja2 import StrictUndefined, TemplateError
 from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -5063,7 +5150,22 @@ from app.models.prompt_template import PromptTemplate
 
 PROMPT_KEYS = ("topics", "article_body", "cover", "content_image")
 
-_env = SandboxedEnvironment(autoescape=False, trim_blocks=False, lstrip_blocks=False)
+# undefined=StrictUndefined: с дефолтным Undefined опечатка в имени переменной
+# ({{ conut }} вместо {{ count }}) молча превращается в пустую строку — шаблон
+# рендерится «успешно», часть инструкции исчезает, и урезанный промпт уходит в
+# платный запрос к модели. Обнаружить это можно только по качеству статей,
+# то есть сильно позже и без связи с правкой промпта. Так уже было: шаблон
+# topics обращался к site_description и tone_of_voice, а вызывающий код их не
+# передавал — тематика сайта тихо не доезжала до модели.
+#
+# Обратная сторона: при StrictUndefined условие {% if x %} для необязательной
+# переменной тоже падает. Правильная форма — {% if x is defined %}.
+#
+# В контекст рендера передаются только плоские значения (строки, числа, списки
+# строк). ORM-объекты передавать нельзя: песочница ограничивает доступ к
+# «небезопасным» атрибутам, но обычные атрибуты объекта из шаблона доступны.
+_env = SandboxedEnvironment(autoescape=False, trim_blocks=False, lstrip_blocks=False,
+                            undefined=StrictUndefined)
 
 
 class PromptError(RuntimeError):
@@ -6681,6 +6783,12 @@ def generate_topics_sync(db, batch_id: int) -> None:
         prompt = render_prompt(template, {
             "count": batch.requested_count,
             "site_name": site.name,
+            # site_description и tone_of_voice шаблон topics использует, но
+            # раньше их сюда не передавали — с дефолтным Undefined они молча
+            # рендерились пустотой, и тематика сайта не доезжала до модели.
+            # Ровно против этого промаха поля и заведены (см. app/models/site.py).
+            "site_description": site.site_description,
+            "tone_of_voice": site.tone_of_voice,
             "existing_titles": existing,
         })
         result = build_text_client(db).complete_json(prompt)

@@ -1,3 +1,7 @@
+import pytest
+from sqlalchemy import Integer
+from sqlalchemy.exc import IntegrityError
+
 from app.models.site import Site
 
 
@@ -43,3 +47,41 @@ def test_site_builder_teaser_taxonomy():
     site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e",
                 teaser_category_id=3, teaser_city_id=2, teaser_location_id=1)
     assert (site.teaser_category_id, site.teaser_city_id, site.teaser_location_id) == (3, 2, 1)
+
+
+def test_reference_images_is_integer():
+    """Число картинок равно числу <img> в эталоне — строка здесь молча
+    сломала бы арифметику при сборке статьи."""
+    assert isinstance(Site.__table__.c.reference_images.type, Integer)
+
+
+def test_domain_is_unique(db_session):
+    db_session.add(Site(name="A", domain="dup.ru", base_url="https://dup.ru",
+                         api_token_enc="e"))
+    db_session.commit()
+
+    db_session.add(Site(name="B", domain="dup.ru", base_url="https://dup.ru",
+                         api_token_enc="e"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_domain_is_normalized_on_assignment():
+    """DNS регистр не различает, а колонка — различает: без нормализации
+    example.ru и Example.ru завелись бы как два разных сайта."""
+    site = Site(name="X", domain="  Example.RU  ", base_url="https://example.ru",
+                api_token_enc="e")
+    assert site.domain == "example.ru"
+
+
+def test_normalized_domain_collides_with_existing(db_session):
+    """Нормализация в модели — на любом пути записи, а не только там, где о ней
+    вспомнили: разный регистр не должен давать два сайта на один домен."""
+    db_session.add(Site(name="A", domain="example.ru", base_url="https://example.ru",
+                         api_token_enc="e"))
+    db_session.commit()
+
+    db_session.add(Site(name="B", domain="Example.ru", base_url="https://example.ru",
+                         api_token_enc="e"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()

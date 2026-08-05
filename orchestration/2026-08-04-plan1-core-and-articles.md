@@ -3315,6 +3315,10 @@ git commit -m "fix: замечания ревью по картинкам — о
 `execution/backend/tests/test_models_site.py`:
 
 ```python
+import pytest
+from sqlalchemy import Integer
+from sqlalchemy.exc import IntegrityError
+
 from app.models.site import Site
 
 
@@ -3360,6 +3364,44 @@ def test_site_builder_teaser_taxonomy():
     site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e",
                 teaser_category_id=3, teaser_city_id=2, teaser_location_id=1)
     assert (site.teaser_category_id, site.teaser_city_id, site.teaser_location_id) == (3, 2, 1)
+
+
+def test_reference_images_is_integer():
+    """Число картинок равно числу <img> в эталоне — строка здесь молча
+    сломала бы арифметику при сборке статьи."""
+    assert isinstance(Site.__table__.c.reference_images.type, Integer)
+
+
+def test_domain_is_unique(db_session):
+    db_session.add(Site(name="A", domain="dup.ru", base_url="https://dup.ru",
+                         api_token_enc="e"))
+    db_session.commit()
+
+    db_session.add(Site(name="B", domain="dup.ru", base_url="https://dup.ru",
+                         api_token_enc="e"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+def test_domain_is_normalized_on_assignment():
+    """DNS регистр не различает, а колонка — различает: без нормализации
+    example.ru и Example.ru завелись бы как два разных сайта."""
+    site = Site(name="X", domain="  Example.RU  ", base_url="https://example.ru",
+                api_token_enc="e")
+    assert site.domain == "example.ru"
+
+
+def test_normalized_domain_collides_with_existing(db_session):
+    """Нормализация в модели — на любом пути записи, а не только там, где о ней
+    вспомнили: разный регистр не должен давать два сайта на один домен."""
+    db_session.add(Site(name="A", domain="example.ru", base_url="https://example.ru",
+                         api_token_enc="e"))
+    db_session.commit()
+
+    db_session.add(Site(name="B", domain="Example.ru", base_url="https://example.ru",
+                         api_token_enc="e"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -3375,7 +3417,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.models.site'`
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db import Base
 
@@ -3391,6 +3433,17 @@ class Site(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     domain: Mapped[str] = mapped_column(String(200), unique=True)
+
+    @validates("domain")
+    def _normalize_domain(self, _key: str, value: str) -> str:
+        # DNS регистр не различает, а колонка — различает: без нормализации
+        # example.ru и Example.ru завелись бы как два разных сайта с разными
+        # токенами и эталонами, указывающие на один физический домен.
+        # Нормализация в модели, а не в вызывающих: точек записи будет
+        # несколько (Task 11 создаёт сайт, Task 24 правит), и любая из них
+        # иначе может пройти мимо.
+        return (value or "").strip().lower()
+
     base_url: Mapped[str] = mapped_column(String(300))
     api_token_enc: Mapped[str] = mapped_column(Text)          # Fernet
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -3433,7 +3486,7 @@ class Site(Base):
 - [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_site.py -v`
-Expected: PASS — 5 passed
+Expected: PASS — 9 passed
 
 - [x] **Step 5: Миграция**
 
@@ -4280,8 +4333,14 @@ def list_sites(db: Session = Depends(get_db),
 @router.post("", response_model=SiteOut)
 def create_site(payload: SiteIn, db: Session = Depends(get_db),
                 _user: User = Depends(require_role("admin"))):
-    if db.scalars(select(Site).where(Site.domain == payload.domain)).first():
-        raise HTTPException(400, f"сайт {payload.domain} уже заведён")
+    # Site.domain нормализуется валидатором модели (Task 9) при записи, поэтому
+    # в базе лежит уже lower/strip. Сравнивать нужно с тем же приведением —
+    # иначе "Example.ru" при существующем "example.ru" проскочит эту проверку
+    # и упадёт на самом commit() необработанным IntegrityError вместо
+    # человеческого 400.
+    domain = payload.domain.strip().lower()
+    if db.scalars(select(Site).where(Site.domain == domain)).first():
+        raise HTTPException(400, f"сайт {domain} уже заведён")
     if not payload.api_token:
         raise HTTPException(400, "токен обязателен при создании сайта")
     site = Site(api_token_enc="")

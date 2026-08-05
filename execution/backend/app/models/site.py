@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db import Base
 
@@ -17,6 +17,17 @@ class Site(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     domain: Mapped[str] = mapped_column(String(200), unique=True)
+
+    @validates("domain")
+    def _normalize_domain(self, _key: str, value: str) -> str:
+        # DNS регистр не различает, а колонка — различает: без нормализации
+        # example.ru и Example.ru завелись бы как два разных сайта с разными
+        # токенами и эталонами, указывающие на один физический домен.
+        # Нормализация в модели, а не в вызывающих: точек записи будет
+        # несколько (Task 11 создаёт сайт, Task 24 правит), и любая из них
+        # иначе может пройти мимо.
+        return (value or "").strip().lower()
+
     base_url: Mapped[str] = mapped_column(String(300))
     api_token_enc: Mapped[str] = mapped_column(Text)          # Fernet
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

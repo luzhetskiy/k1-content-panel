@@ -3310,7 +3310,7 @@ git commit -m "fix: замечания ревью по картинкам — о
 - Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `Site`)
 - Test: `execution/backend/tests/test_models_site.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_models_site.py`:
 
@@ -3362,12 +3362,12 @@ def test_site_builder_teaser_taxonomy():
     assert (site.teaser_category_id, site.teaser_city_id, site.teaser_location_id) == (3, 2, 1)
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_site.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.models.site'`
 
-- [ ] **Step 3: Реализация**
+- [x] **Step 3: Реализация**
 
 `execution/backend/app/models/site.py`:
 
@@ -3430,12 +3430,12 @@ class Site(Base):
     teaser_location_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_site.py -v`
 Expected: PASS — 5 passed
 
-- [ ] **Step 5: Миграция**
+- [x] **Step 5: Миграция**
 
 Добавь `Site` в `app/models/__init__.py` (реестр моделей, см. Task 2, Step 3) —
 `alembic/env.py` и `tests/conftest.py` подхватят её через `import app.models` без
@@ -3448,10 +3448,12 @@ docker compose run --rm backend alembic upgrade head
 ```
 Expected: `Running upgrade <prev> -> <hash>, sites`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add execution/backend/app/models/site.py execution/backend/alembic execution/backend/tests/test_models_site.py
+git add execution/backend/app/models/site.py execution/backend/app/models/__init__.py \
+        execution/backend/alembic execution/backend/tests/test_models_site.py \
+        orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: модель сайта"
 ```
 

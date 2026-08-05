@@ -8937,7 +8937,7 @@ content_images`, `app/articles/builder.py`) текстовых промптов 
 - Modify: `execution/backend/app/main.py`
 - Test: `execution/backend/tests/test_api_batches.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_api_batches.py`:
 
@@ -9041,7 +9041,6 @@ def test_topics_can_be_edited_before_run(manager_client, db_session, site_id, no
                                    json={"site_id": site_id, "count": 2}).json()["id"]
     db_session.add(Article(batch_id=batch_id, site_id=site_id, topic="Старая тема"))
     db_session.commit()
-    db_session.query(type(db_session.get(Article, 1))).count()
 
     resp = manager_client.put(f"/api/article-batches/{batch_id}/topics",
                               json={"topics": ["Новая А", "Новая Б"]})
@@ -9080,7 +9079,14 @@ def test_run_starts_task(manager_client, db_session, site_id, no_celery):
 
     resp = manager_client.post(f"/api/article-batches/{batch_id}/run")
     assert resp.status_code == 200
-    assert ("run", batch_id) in no_celery
+    # Дефект черновика теста (найден при прогоне Task 18): фикстура no_celery
+    # кладёт в sent 3-элементные кортежи ("run", batch_id, kwargs) — kwargs
+    # нужен для будущей проверки лимитов времени (см. TODO выше), — а не
+    # 2-элементные. `("run", batch_id) in no_celery` не совпадёт никогда ни
+    # при каком поведении кода: 2-кортеж не равен 3-кортежу. Проверено:
+    # с этой строкой тест падает даже на правильно работающем run().
+    # Сравниваем по первым двум элементам, не трогая форму фикстуры.
+    assert any(entry[:2] == ("run", batch_id) for entry in no_celery)
 
 
 def test_jobs_list_shows_cost(manager_client, db_session, site_id):
@@ -9096,14 +9102,122 @@ def test_jobs_list_shows_cost(manager_client, db_session, site_id):
     body = manager_client.get("/api/jobs").json()
     assert body[0]["kind"] == "run_batch"
     assert body[0]["cost"] == pytest.approx(6.0)
+
+
+# --- находка №1 ревью Task 18: save_topics не должна стирать историю уже
+# опубликованных статей. Партия становится "failed" не только когда генерация
+# тем провалилась (тогда Article нет вообще), но и когда run_batch_sync
+# обрывается посреди сборки — часть статей к этому моменту уже реально
+# status="published" с заполненными remote_page_id/remote_url. ---
+
+def test_save_topics_rejects_batch_with_published_article(manager_client, db_session,
+                                                           site_id, no_celery):
+    from app.models.article import Article, ArticleBatch
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 2}).json()["id"]
+    db_session.add_all([
+        Article(batch_id=batch_id, site_id=site_id, topic="Уже вышла",
+               status="published", remote_page_id=42, remote_url="https://x.ru/a/"),
+        Article(batch_id=batch_id, site_id=site_id, topic="Не вышла", status="failed"),
+    ])
+    batch = db_session.get(ArticleBatch, batch_id)
+    batch.status = "failed"
+    db_session.commit()
+
+    resp = manager_client.put(f"/api/article-batches/{batch_id}/topics",
+                              json={"topics": ["Новая тема"]})
+
+    assert resp.status_code == 400
+    # Опубликованная статья должна остаться нетронутой в БД — это и есть
+    # журнал того, что реально появилось на сайте (Task 14).
+    db_session.expire_all()
+    remaining = db_session.get(ArticleBatch, batch_id).articles
+    assert {a.topic for a in remaining} == {"Уже вышла", "Не вышла"}
+    published = next(a for a in remaining if a.status == "published")
+    assert published.remote_page_id == 42
+    assert published.remote_url == "https://x.ru/a/"
+
+
+# --- находка №2 ревью Task 18: run() и retry() должны переводить статус
+# синхронно, до постановки задачи в очередь, — иначе повторный вызов до
+# реального старта задачи в Celery проскакивает мимо проверки и ставит в
+# очередь вторую задачу на ту же работу (двойная оплата LLM/картинок). ---
+
+def test_run_twice_dispatches_run_batch_once(manager_client, db_session, site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    db_session.add(Article(batch_id=batch_id, site_id=site_id, topic="Тема"))
+    db_session.commit()
+
+    first = manager_client.post(f"/api/article-batches/{batch_id}/run")
+    second = manager_client.post(f"/api/article-batches/{batch_id}/run")
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    run_dispatches = [entry for entry in no_celery if entry[0] == "run"]
+    assert len(run_dispatches) == 1
+
+
+def test_retry_rejects_article_already_generating(manager_client, db_session,
+                                                   site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема", status="failed")
+    db_session.add(article)
+    db_session.commit()
+
+    first = manager_client.post(f"/api/articles/{article.id}/retry")
+    second = manager_client.post(f"/api/articles/{article.id}/retry")
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    retry_dispatches = [entry for entry in no_celery if entry[0] == "retry"]
+    assert len(retry_dispatches) == 1
+
+
+# --- находка №3 ревью Task 18: LlmUsage.cost — float, сумма нескольких
+# значений накапливает двоичную погрешность. round(x, 2) обязателен на
+# стороне ответа API (docstring app/models/job.py). pytest.approx в
+# test_jobs_list_shows_cost этого не поймал бы — нужны конкретные числа. ---
+
+def test_jobs_cost_is_rounded_for_display(manager_client, db_session, site_id):
+    from app.models.job import JobRun, LlmUsage
+
+    # sum([0.1, 0.2]) в Python — 0.30000000000000004, не 0.3: классический
+    # пример погрешности двоичного float. Без round(x, 2) в ответе API ушло
+    # бы длинное число вместо чистого 0.3.
+    assert sum([0.1, 0.2]) != 0.3
+    job = JobRun(kind="run_batch", site_id=site_id, params_json={}, status="ok")
+    db_session.add(job)
+    db_session.commit()
+    db_session.add_all([LlmUsage(job_run_id=job.id, kind="text", cost=0.1),
+                        LlmUsage(job_run_id=job.id, kind="text", cost=0.2)])
+    db_session.commit()
+
+    body = manager_client.get("/api/jobs").json()
+    assert body[0]["cost"] == 0.3
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+Примечание: черновик этого теста в тексте плана содержал мусорную строку
+`db_session.query(type(db_session.get(Article, 1))).count()` внутри
+`test_topics_can_be_edited_before_run` (debug-остаток без использования
+результата) — она не переносилась в реализацию с самого начала, как и
+предупреждал текст задачи.
+
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_batches.py -v`
-Expected: FAIL — 404 на `/api/article-batches`
+Фактически: `ModuleNotFoundError: No module named 'app.api.article_batches'`
+(3 ошибки импорта, `test_batch_requires_auth` — 404 вместо 401,
+`test_jobs_list_shows_cost` — `KeyError: 0` на пустом списке `/api/jobs`) —
+падение по ожидаемой причине (роутеры ещё не существуют), не по опечатке.
 
-- [ ] **Step 3: Роутер партий**
+- [x] **Step 3: Роутер партий**
 
 `execution/backend/app/api/article_batches.py`:
 
@@ -9183,8 +9297,20 @@ def list_batches(db: Session = Depends(get_db),
 @router.post("/article-batches", response_model=BatchOut)
 def create_batch(payload: BatchIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    if db.get(Site, payload.site_id) is None:
+    site = db.get(Site, payload.site_id)
+    if site is None:
         raise HTTPException(404, "сайт не найден")
+    # Находка №4 ревью Task 18: GET /api/sites (Task 9/11) уже фильтрует
+    # is_active — обычный UI-пикер не предложит неактивный сайт. Но этот
+    # эндпоинт принимает site_id напрямую, и прямой POST в обход пикера
+    # (например, из старой открытой вкладки браузера, где сайт был активен
+    # на момент открытия формы) создал бы партию для сайта, с которым,
+    # возможно, уже не работают. Решение: отклонять явно, а не молчать —
+    # деактивация сайта осмысленно должна останавливать создание новых работ
+    # по нему, симметрично тому, как она уже останавливает его показ в
+    # выпадающем списке.
+    if not site.is_active:
+        raise HTTPException(400, "сайт деактивирован — создание партий недоступно")
     batch = ArticleBatch(site_id=payload.site_id, requested_count=payload.count,
                          created_by_id=user.id)
     db.add(batch)
@@ -9285,6 +9411,35 @@ def save_topics(batch_id: int, payload: TopicsIn, db: Session = Depends(get_db),
     batch = _get_or_404(db, batch_id)
     if batch.status not in EDITABLE_STATUSES:
         raise HTTPException(400, "темы уже отправлены в работу — правка невозможна")
+    # Находка №1 ревью Task 18: EDITABLE_STATUSES включает "failed", а партия
+    # становится "failed" не только когда генерация тем не удалась (тогда у
+    # неё гарантированно нет ни одной Article), но и когда run_batch_sync
+    # (Task 17) обрывается посреди сборки — по SoftTimeLimitExceeded или по
+    # AIConfigError/SecretDecryptionError — и часть статей к этому моменту
+    # уже реально status="published" (черновик реально создан на сайте,
+    # remote_page_id/remote_url заполнены). Код ниже безусловно удалял бы
+    # ВСЕ batch.articles и создавал новые с нуля — то есть стёр бы из своей
+    # БД запись об уже реально опубликованных страницах, не тронув сами
+    # страницы на сайте. Это ровно то, что Task 14 сознательно защищала
+    # (ON DELETE SET NULL, докстринг «партия и её статьи — это журнал того,
+    # что было реально опубликовано»).
+    #
+    # Решение: полный отказ 400, если в партии есть хоть одна опубликованная
+    # статья — не частичное удаление с сохранением опубликованных. Причина
+    # выбора именно этого варианта, а не «удалить только неопубликованные,
+    # добавить новые темы поверх»: если часть статей партии уже опубликована,
+    # значит партия реально была запущена и частично прошла — «согласование
+    # тем» в этот момент больше не осмысленная операция (темы уже отработаны
+    # для опубликованных статей, а для неопубликованных исправление — это
+    # retry конкретной статьи, /api/articles/{id}/retry, а не замена списка
+    # тем всей партии). Полный отказ с понятным текстом проще для пользователя
+    # панели, чем частичная операция, результат которой (что осталось, что
+    # исчезло) сложно предсказать по одному отклику.
+    if any(a.status == "published" for a in batch.articles):
+        raise HTTPException(
+            400,
+            "в партии уже есть опубликованные статьи — правка тем невозможна, "
+            "используйте повтор отдельной статьи")
 
     # Согласованный список заменяет предложенный целиком: менеджер мог
     # переписать формулировки, а не только вычеркнуть лишнее.
@@ -9307,6 +9462,38 @@ def run(batch_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, "в партии нет тем")
     if batch.status == "running":
         raise HTTPException(400, "партия уже выполняется")
+    # Находка №2 ревью Task 18: раньше в "running" партию переводила только
+    # run_batch_sync (app/tasks.py) — АСИНХРОННО, когда Celery реально начнёт
+    # исполнять задачу. Между apply_async(...) ниже и фактическим стартом
+    # задачи (обычно доли секунды, но может быть больше при загруженной
+    # очереди) batch.status оставался прежним — если run() вызвать повторно
+    # в этом окне (двойной клик, повторный запрос из-за таймаута фронта),
+    # проверка выше пропускала второй вызов, и в очередь уходили ДВЕ задачи
+    # run_batch на одну партию: два воркера одновременно шли по одному и тому
+    # же batch.articles и оплачивали LLM/картинки дважды для части статей.
+    # Проверено эмпирически (см. test_run_twice_dispatches_once в
+    # test_api_batches.py): без строк ниже два подряд идущих run() дают два
+    # элемента ("run", ...) в списке диспетчеризаций.
+    #
+    # Фикс: перевод в "running" происходит здесь же, синхронно, в той же
+    # транзакции, что и проверка выше, — до постановки задачи в очередь.
+    # Второй вызов после этого коммита увидит status == "running" и получит
+    # 400 ещё до apply_async. Строка `batch.status = "running"` в начале
+    # run_batch_sync (app/tasks.py) убрана этим же изменением — Celery-задача
+    # запускается только через этот эндпоинт, и к моменту её реального
+    # старта партия уже находится в "running"; отдельное присваивание там
+    # стало мёртвым кодом, а не защитой (см. коммит и обоснование там же).
+    #
+    # Остаточный риск: это не SELECT ... FOR UPDATE, поэтому теоретическая
+    # гонка двух ПОДЛИННО одновременных запросов на разных потоках/процессах
+    # (не последовательных HTTP-вызовов, а буквально одновременного чтения
+    # старого статуса до commit друг друга) не исключена на 100% под
+    # Postgres. Но она сужена с «сколько угодно долго, пока задача не
+    # стартует в очереди» до «доли миллисекунды между чтением и записью в
+    # рамках одного HTTP-запроса» — а именно такую гонку (двойной клик,
+    # повторный запрос) и требовалось закрыть.
+    batch.status = "running"
+    db.commit()
     # Лимит времени вычисляется здесь, а не берётся из глобальной настройки
     # Celery: партия идёт последовательно, и её длительность пропорциональна
     # числу статей. Глухой статический лимит обрывал бы работу на середине —
@@ -9322,8 +9509,30 @@ def retry(article_id: int, db: Session = Depends(get_db),
     article = db.get(Article, article_id)
     if article is None:
         raise HTTPException(404, "статья не найдена")
-    if article.status == "published":
-        raise HTTPException(400, "статья уже выложена черновиком")
+    # Находка №2 ревью Task 18 (та же природа гонки, что и у run() выше,
+    # применённая к одиночной статье). ArticleBuilder.build() (Task 16,
+    # app/articles/builder.py) сама переводит статью в status="generating"
+    # первым делом — но делает это ВНУТРИ Celery-задачи, то есть асинхронно
+    # относительно момента, когда этот эндпоинт вызвал apply_async(...) и
+    # вернул ответ. Окно гонки у retry уже, чем у run() (одна статья, а не
+    # партия из N — двойная оплата ограничена стоимостью одной статьи, а не
+    # умножается на размер партии), но оно есть: два быстрых клика «повторить»
+    # по одной и той же упавшей статье до старта первой задачи в очереди
+    # проходили бы оба мимо проверки на "published" и ставили бы в очередь
+    # ДВЕ задачи retry_article на одну статью.
+    #
+    # Решено чинить симметрично run(): переводить статью в "generating" здесь
+    # же, синхронно, до apply_async. Стоимость фикса нулевая (то же
+    # присваивание, что и так происходит секундами позже внутри build()), а
+    # выгода не ограничивается двойным кликом — так же отклоняется retry
+    # статьи, которая в этот момент уже собирается в рамках выполняющейся
+    # run_batch (см. test_retry_rejects_article_already_generating).
+    if article.status in ("published", "generating"):
+        detail = ("статья уже выложена черновиком" if article.status == "published"
+                  else "статья уже собирается — повторный запуск не требуется")
+        raise HTTPException(400, detail)
+    article.status = "generating"
+    db.commit()
     # apply_async с вычисленными лимитами, а не delay() — находка №4 ревью
     # Task 17 (app/celery_app.py, _retry_time_limits выше): retry_article
     # вызывает build_for → ArticleBuilder.build() целиком, и реальный худший
@@ -9339,7 +9548,7 @@ def retry(article_id: int, db: Session = Depends(get_db),
     return {"ok": True}
 ```
 
-- [ ] **Step 4: Роутеры журнала и статуса задач**
+- [x] **Step 4: Роутеры журнала и статуса задач**
 
 `execution/backend/app/api/jobs.py`:
 
@@ -9390,8 +9599,17 @@ def list_jobs(limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
         result.append(JobOut(
             id=job.id, kind=job.kind, site_name=site.name if site else "—",
             status=job.status, log_text=job.log_text,
-            # 0 может означать «провайдер не сообщил стоимость», а не «бесплатно».
-            cost=sum(u.cost for u in job.usage),
+            # Находка №3 ревью Task 18: LlmUsage.cost — float (docstring
+            # app/models/job.py прямо предупреждает об этом заранее и требует
+            # округления именно здесь). Сумма нескольких float даёт
+            # накопленную ошибку двоичного представления — проверено
+            # эмпирически (см. test_jobs_cost_is_rounded_for_display в
+            # test_api_batches.py): sum([0.1, 0.2]) == 0.30000000000000004,
+            # не 0.3. Без round() такой хвост ушёл бы прямо в ответ API.
+            # round(x, 2) — это округление для отображения, а не изменение
+            # того, что хранится в БД (там остаётся как пришло от провайдера,
+            # см. docstring app/models/job.py).
+            cost=round(sum(u.cost for u in job.usage), 2),
             tokens_total=sum(u.tokens_prompt + u.tokens_completion for u in job.usage),
             started_at=job.started_at, finished_at=job.finished_at,
         ))
@@ -9426,55 +9644,220 @@ def task_status(task_id: str, _user: User = Depends(get_current_user)):
     return TaskStatus(state=result.state, result=result.result if result.ready() else None)
 ```
 
-- [ ] **Step 5: Подключить роутеры**
+- [x] **Step 5: Подключить роутеры**
 
-Финальный `execution/backend/app/main.py`:
+Финальный `execution/backend/app/main.py` (реальный код Task 13 уже содержал
+`/api/health` с живой проверкой БД, `db.execute(text("select 1"))` — эта
+проверка сохранена, версия с заглушкой из черновика плана не применялась):
 
 ```python
-from fastapi import FastAPI
+"""Сборка FastAPI-приложения.
+
+Два намеренных решения, зафиксированных здесь, чтобы их не «починили» при
+будущей правке:
+
+1. CORS отсутствует осознанно, не по недосмотру. И в разработке (Vite
+   проксирует `/api` на бэкенд), и в проде (nginx, Task 26) фронт и API
+   обслуживаются с одного origin — добавление `CORSMiddleware` было бы
+   регрессом, открывающим API для чтения с чужих origin.
+2. `/docs`, `/redoc`, `/openapi.json` включены по умолчанию FastAPI и не
+   отключены. Сегодня это безопасно: nginx (Task 26) проксирует наружу
+   только `location /api/`, а корневой `/` отдаёт статику SPA — сам FastAPI
+   снаружи недостижим. Если этот блок nginx когда-нибудь расширят до
+   `location /`, вся схема API станет публично перечислимой через `/docs`.
+"""
+
+from fastapi import Depends, FastAPI
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.api import (
     admin_prompts,
     admin_settings,
     admin_sites,
-    admin_users,
     article_batches,
     auth,
     jobs,
     sites,
     tasks_status,
 )
+from app.api.deps import get_db
 
+# admin_users создаётся в Task 19 — до тех пор не включаем его сюда.
 app = FastAPI(title="k1 content service")
 
-for module in (auth, sites, admin_sites, admin_settings, admin_prompts, admin_users,
+for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
                article_batches, jobs, tasks_status):
     app.include_router(module.router)
 
 
 @app.get("/api/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    # Дымовая проверка после выкладки (DEPLOY.md, Task 26) полагается на этот
+    # эндпоинт как на единственный сигнал "сервис работает". Статический
+    # {"status": "ok"} отвечал бы так же и при лежащем Postgres — реальный
+    # запрос к БД превращает проверку из "жив ли uvicorn" в "работает ли
+    # сервис".
+    db.execute(text("select 1"))
     return {"status": "ok"}
 ```
 
-`admin_users` создаётся в задаче 19 — до тех пор не включай его в кортеж и в импорт.
+`admin_users` создаётся в задаче 19 — до тех пор не включён ни в кортеж, ни в импорт.
 
-- [ ] **Step 6: Запустить тест, убедиться что проходит**
+- [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_batches.py -v`
-Expected: PASS — 10 passed
+Фактически: **15 passed** (11 из черновика Step 1 + 4 новых теста на находки
+№1–3, см. ниже) — план заявлял «10 passed» для черновика без этих тестов;
+после починки дефекта в `test_run_starts_task` (см. находки ниже) все 11
+базовых тоже зелёные.
 
-- [ ] **Step 7: Прогнать весь бэкенд**
+- [x] **Step 7: Прогнать весь бэкенд**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest -q`
-Expected: PASS — все тесты зелёные
+Фактически: **298 passed** (283 было до Task 18 + 15 новых в
+`test_api_batches.py`), регрессий нет.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
-git add execution/backend/app/api execution/backend/tests/test_api_batches.py
+git add execution/backend/app/api execution/backend/tests/test_api_batches.py \
+        execution/backend/app/main.py execution/backend/app/tasks.py \
+        orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: API партий статей, повтора и журнала задач"
 ```
+
+#### Находки ревью Task 18
+
+**№1 — `save_topics` могла стереть историю уже опубликованных статей.**
+`EDITABLE_STATUSES` включает `"failed"`, а партия становится `"failed"` не
+только когда генерация тем не удалась (тогда `Article` нет вообще), но и
+когда `run_batch_sync` (Task 17) обрывается посреди сборки — по
+`SoftTimeLimitExceeded` или по `AIConfigError`/`SecretDecryptionError` — и
+часть статей к этому моменту уже реально `status="published"` с заполненными
+`remote_page_id`/`remote_url` (черновик реально создан на сайте). Черновик
+`save_topics` безусловно удалял ВСЕ `batch.articles` и создавал новые с нуля
+из присланного списка тем — то есть стирал бы из своей БД запись об уже
+реально опубликованных страницах, не трогая сами страницы на сайте. Это
+ровно то, что Task 14 сознательно защищала (`ON DELETE SET NULL`, докстринг
+«партия и её статьи — это журнал того, что было реально опубликовано»).
+Проверено сценарием из задания: партия `status="failed"` с одной статьёй
+`status="published"` (`remote_page_id=42`, `remote_url` заполнен) и одной
+`status="failed"` — до фикса `PUT .../topics` с новым списком тем удалял бы
+обе строки Article и создавал одну новую с чистого листа, стирая
+`remote_page_id`/`remote_url` опубликованной статьи из БД без затрагивания
+самой страницы на сайте.
+
+Решение (вариант из задания «полный отказ 400», а не «удалить только
+неопубликованные, добавить темы поверх»): если в партии есть хоть одна
+`status="published"` статья, `save_topics` отвечает 400 «в партии уже есть
+опубликованные статьи — правка тем невозможна, используйте повтор отдельной
+статьи», не трогая ни одной строки `Article`. Причина выбора именно этого
+варианта: если часть статей партии уже опубликована, партия реально
+запущена и частично прошла — «согласование тем» в этот момент больше не
+осмысленная операция (для опубликованных статей темы уже отработаны, а для
+неопубликованных исправление — это `retry` конкретной статьи через
+`/api/articles/{id}/retry`, а не замена списка тем всей партии). Полный
+отказ с понятным текстом проще для пользователя панели, чем частичная
+операция с непредсказуемым по одному отклику результатом.
+
+Покрыто тестом `test_save_topics_rejects_batch_with_published_article`:
+создаёт партию с опубликованной и проваленной статьёй, отправляет `PUT
+.../topics`, проверяет 400 и что обе исходные статьи (включая
+`remote_page_id`/`remote_url` опубликованной) остались в БД нетронутыми.
+Мутационно проверено: временное удаление guard-блока `if any(a.status ==
+"published" ...)` вернуло старое поведение — тест упал на `assert
+resp.status_code == 400` (`assert 200 == 400`), то есть без фикса запрос
+проходит и стирает историю. После восстановления блока — тест снова зелёный.
+
+**№2 — двойной запуск `run_batch`/`retry_article` при повторном/быстром
+клике.** `run()` проверяла `if batch.status == "running": raise 400`, но
+саму партию в `"running"` переводила не она, а `run_batch_sync` (Task 17,
+`app/tasks.py`) — АСИНХРОННО, только когда Celery реально начнёт выполнять
+задачу. Между `apply_async(...)` и фактическим стартом задачи в очереди
+`batch.status` оставался прежним (`"topics_review"`); повторный вызов `run()`
+в этом окне проходил проверку и ставил в очередь вторую задачу `run_batch` —
+двойная оплата LLM/картинок для части статей. Проверено эмпирически: тест
+`test_run_twice_dispatches_run_batch_once` вызывает `run()` дважды подряд
+без ручного изменения `batch.status` между вызовами — до фикса оба вызова
+возвращали 200 и оба дописывали `("run", ...)` в список диспетчеризаций
+фикстуры `no_celery` (мутационно: временный откат — удаление строк
+`batch.status = "running"; db.commit()` перед `apply_async` в `run()` —
+вернул именно это: `second.status_code == 200` вместо ожидаемого 400).
+
+Починено: `run()` переводит `batch.status = "running"` синхронно, в той же
+транзакции, что и проверка, до `apply_async`. Строка `batch.status =
+"running"; db.commit()` в начале `run_batch_sync` (`app/tasks.py`) убрана —
+она стала мёртвым кодом (к моменту реального старта Celery-задачи партия уже
+`"running"` благодаря эндпоинту), а не защитой; весь набор `test_tasks.py`
+(в котором ни один тест не проверял именно это промежуточное присваивание —
+все тесты сами выставляют `batch.status = "topics_review"` перед прямым
+вызовом `run_batch_sync`) прогнан после правки — все 16 тестов зелёные,
+регрессий нет.
+
+Та же природа гонки применена к `retry()`: `ArticleBuilder.build()` (Task 16)
+сама переводит статью в `status="generating"` первым делом, но делает это
+внутри Celery-задачи — асинхронно относительно ответа эндпоинта. Решено
+чинить симметрично `run()` (а не фиксировать как принятый меньший риск):
+`retry()` переводит `article.status = "generating"` синхронно до
+`apply_async`, и отклоняет повтор, если статья уже `"published"` или уже
+`"generating"`. Стоимость фикса нулевая (то же присваивание, что и так
+происходит секундами позже внутри `build()`), а выгода не ограничена
+двойным кликом: так же отклоняется `retry` статьи, которая в этот момент
+уже реально собирается в рамках выполняющейся `run_batch`. Покрыто тестом
+`test_retry_rejects_article_already_generating` (два быстрых вызова `retry()`
+подряд — второй получает 400, `retry_article.apply_async` вызывается ровно
+один раз); мутационно проверено тем же приёмом (откат guard/присваивания
+вернул `second.status_code == 200`).
+
+Остаточный риск, зафиксированный в комментарии кода: это не `SELECT ... FOR
+UPDATE`, поэтому гонка двух буквально одновременных запросов на разных
+потоках/процессах (не последовательных HTTP-вызовов) под Postgres не
+исключена на 100%. Но окно сужено с «сколько угодно долго, пока задача не
+стартует в очереди» до «доли миллисекунды между чтением и записью в рамках
+одного HTTP-запроса» — именно эта гонка (двойной клик, повторный запрос из
+фронта) и требовалась по заданию.
+
+**№3 — `LlmUsage.cost` суммировался без округления.** Докстринг
+`LlmUsage.cost` (`app/models/job.py`, Task 14) прямо предупреждал: «округление
+обязано делаться на стороне отображения (`round(x, 2)` в Task 18/25)».
+Черновик `list_jobs` отдавал `cost=sum(u.cost for u in job.usage)` без
+округления. Проверено эмпирически (не на числах из `test_jobs_list_shows_cost`,
+где `pytest.approx` замаскировал бы разницу, а на классическом примере
+двоичной погрешности): `sum([0.1, 0.2])` в Python — `0.30000000000000004`, не
+`0.3`. Тест `test_jobs_cost_is_rounded_for_display` заводит `LlmUsage` с
+`cost=0.1` и `cost=0.2` и проверяет `body[0]["cost"] == 0.3` (без `approx`).
+Починено: `cost=round(sum(u.cost for u in job.usage), 2)`. Мутационно
+проверено: временный откат к `sum(...)` без `round()` вернул в ответе API
+`0.30000000000000004`, тест упал на `assert 0.30000000000000004 == 0.3`.
+
+**№4 — `create_batch` не проверяла `Site.is_active`.** `GET /api/sites`
+(Task 9/11) уже фильтрует `where(Site.is_active.is_(True))` — обычный
+UI-пикер сайта (`ArticlesPage.tsx`, Task 22) не предложит неактивный сайт.
+Но `create_batch` принимала `site_id` напрямую и не проверяла `is_active`:
+прямой POST с `site_id` деактивированного сайта (например, из старой открытой
+вкладки браузера) создавал бы партию для сайта, с которым, возможно, уже не
+работают. Решение: добавлена проверка — `if not site.is_active: raise
+HTTPException(400, "сайт деактивирован — создание партий недоступно")`,
+симметрично тому, как `is_active` уже останавливает показ сайта в
+выпадающем списке. Отдельный regression-тест не заводился (проверка
+однострочная и того же вида, что уже покрыт паттерн `test_unknown_site_
+rejected`), само решение и его причина задокументированы прямо в коде
+эндпоинта.
+
+**Дополнительно проверено, не потребовало исправления:**
+- Утечка секретов в HTTP-ответ через `error_text`/`log_text`: `AIConfigError`/
+  `SecretDecryptionError` (`app/settings/crypto.py`, `app/ai/factory.py`)
+  формируются из фиксированных строк («ENCRYPTION_KEY невалиден: ...»,
+  «значение зашифровано другим ключом», «ключ RouterAI не задан — ...») без
+  подстановки самого секрета. `SiteAPIError` включает `response.text[:300]` —
+  это ответ ЦЕЛЕВОГО сайта, не наш секрет; риск того же типа, что уже
+  рассмотрен и принят в Task 16/17, новых мест агрегации не появилось —
+  здесь эти строки просто попадают в HTTP-ответ панели, а не только в лог.
+- Отсутствующая проверка существования: `retry()` — `article is None` → 404;
+  `save_topics`/`run` идут через `_get_or_404`, оба покрыты (несуществующий
+  `batch_id` не имеет отдельного пути в обход `_get_or_404` — оба эндпоинта
+  вызывают её первой строкой).
 
 ---
 

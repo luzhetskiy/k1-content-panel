@@ -18,16 +18,24 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api import admin_prompts, admin_settings, admin_sites, auth, sites
+from app.api import (
+    admin_prompts,
+    admin_settings,
+    admin_sites,
+    article_batches,
+    auth,
+    jobs,
+    sites,
+    tasks_status,
+)
 from app.api.deps import get_db
 
+# admin_users создаётся в Task 19 — до тех пор не включаем его сюда.
 app = FastAPI(title="k1 content service")
 
-app.include_router(auth.router)
-app.include_router(admin_settings.router)
-app.include_router(sites.router)
-app.include_router(admin_sites.router)
-app.include_router(admin_prompts.router)
+for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
+               article_batches, jobs, tasks_status):
+    app.include_router(module.router)
 
 
 @app.get("/api/health")

@@ -53,3 +53,41 @@ def test_service_defaults(db_session):
     assert service.get_str("absent", "default") == "default"
     assert service.get_int("absent", 4) == 4
     assert service.get_bool("absent", True) is True
+
+
+def test_service_get_secret_with_other_key_raises(db_session):
+    """Ветка в сервисе (не только в crypto.decrypt): при смене ENCRYPTION_KEY
+    get_secret обязан упасть с понятным сообщением, а не молча вернуть
+    default — иначе клиент RouterAI из Task 7 получит невнятный 401 вместо
+    причины. Сообщение должно называть конкретную настройку — их два десятка."""
+    service = SettingsService(db_session, KEY)
+    service.set_secret("routerai_api_key", "sk-real-key")
+
+    other_key = Fernet.generate_key().decode()
+    other_service = SettingsService(db_session, other_key)
+
+    with pytest.raises(SecretDecryptionError, match="routerai_api_key"):
+        other_service.get_secret("routerai_api_key")
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("yes", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+    ],
+)
+def test_service_get_bool_parses_stored_value(db_session, stored, expected):
+    service = SettingsService(db_session, KEY)
+    service.set("flag", stored)
+    assert service.get_bool("flag", not expected) is expected
+
+
+def test_service_get_int_parses_stored_value(db_session):
+    service = SettingsService(db_session, KEY)
+    service.set("max_articles_per_day", "42")
+    assert service.get_int("max_articles_per_day", 0) == 42

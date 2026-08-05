@@ -48,6 +48,19 @@ def resolve_prompt(db: Session, key: str, site_id: int | None) -> str:
     return default.text
 
 
+def check_template(template_text: str) -> None:
+    """Проверка синтаксиса без рендера — для сохранения шаблона в админке
+    (Task 13), где значения переменных ещё неизвестны. Без неё сломанный
+    шаблон ложится в БД с ответом 200 и взрывается позже, внутри Celery-задачи
+    генерации статьи, где ошибку уже никто не свяжет с правкой промпта.
+    Опечатки в именах переменных здесь не ловятся принципиально: их видно
+    только на рендере (StrictUndefined), то есть на кнопке «Тест»."""
+    try:
+        _env.from_string(template_text)
+    except TemplateError as exc:
+        raise PromptError(f"ошибка шаблона (синтаксис): {exc}") from exc
+
+
 def render_prompt(template_text: str, variables: dict) -> str:
     try:
         return _env.from_string(template_text).render(**variables)

@@ -5189,6 +5189,19 @@ def resolve_prompt(db: Session, key: str, site_id: int | None) -> str:
     return default.text
 
 
+def check_template(template_text: str) -> None:
+    """Проверка синтаксиса без рендера — для сохранения шаблона в админке
+    (Task 13), где значения переменных ещё неизвестны. Без неё сломанный
+    шаблон ложится в БД с ответом 200 и взрывается позже, внутри Celery-задачи
+    генерации статьи, где ошибку уже никто не свяжет с правкой промпта.
+    Опечатки в именах переменных здесь не ловятся принципиально: их видно
+    только на рендере (StrictUndefined), то есть на кнопке «Тест»."""
+    try:
+        _env.from_string(template_text)
+    except TemplateError as exc:
+        raise PromptError(f"ошибка шаблона (синтаксис): {exc}") from exc
+
+
 def render_prompt(template_text: str, variables: dict) -> str:
     try:
         return _env.from_string(template_text).render(**variables)
@@ -5277,8 +5290,7 @@ DEFAULT_PROMPTS = {
 }
 
 
-def seed_prompts(db: Session) -> None:
-    """Идемпотентна: отредактированный в админке промпт не перезаписывается."""
+def _add_missing_prompts(db: Session) -> None:
     existing = {
         row.key for row in
         db.query(PromptTemplate).filter(PromptTemplate.site_id.is_(None)).all()
@@ -5286,8 +5298,31 @@ def seed_prompts(db: Session) -> None:
     for key in PROMPT_KEYS:
         if key not in existing:
             db.add(PromptTemplate(key=key, site_id=None, text=DEFAULT_PROMPTS[key]))
-    db.commit()
+
+
+def seed_prompts(db: Session) -> None:
+    """Идемпотентна: отредактированный в админке промпт не перезаписывается."""
+    _add_missing_prompts(db)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Тот же конкурентный сценарий, что и в seed_settings выше: Task 13
+        # зовёт seed_prompts на каждом GET /api/admin/prompts, поэтому два
+        # админа, открывшие экран промптов на пустой БД, оба проходят
+        # SELECT-фазу (видят пусто) раньше, чем кто-то из них коммитит.
+        # Второй ловит конфликт частичного уникального индекса
+        # uq_prompt_key_global (Task 12) — проверено на живом Postgres 16:
+        # без этой ветки его GET отвечает 500. После rollback вставленное
+        # конкурентом видно, поэтому повторный проход добавляет только
+        # действительно недостающее.
+        db.rollback()
+        _add_missing_prompts(db)
+        db.commit()
 ```
+
+**Правка Task 13:** `seed_prompts` и `check_template` выше приведены уже с
+исправлениями, найденными при исполнении Task 13 (обработка гонки на GET и
+проверка синтаксиса при сохранении). Сам Task 12 закоммичен без них.
 
 - [x] **Step 6: Запустить тест, убедиться что проходит**
 
@@ -5325,9 +5360,60 @@ git commit -m "feat: шаблоны промптов с переопределе
 - Create: `execution/backend/app/ai/factory.py`
 - Create: `execution/backend/app/api/admin_prompts.py`
 - Modify: `execution/backend/app/main.py`
+- Modify: `execution/backend/app/ai/prompts.py` — добавлена `check_template`
+  (блок приведён в Task 12, Step 4)
+- Modify: `execution/backend/app/seed.py` — `seed_prompts` переживает гонку
+  (блок приведён в Task 12, Step 5)
 - Test: `execution/backend/tests/test_api_admin_prompts.py`
+- Test: `execution/backend/tests/test_ai_factory.py`
 
-- [ ] **Step 1: Написать падающий тест**
+**Требования, добавленные при исполнении задачи.** Первые три подтверждены на
+живом Postgres 16 (не рассуждением: разовый скрипт с двумя сессиями), все —
+мутационными проверками:
+
+1. **`seed_prompts` обязана переживать конкурентный первый GET.** Экран зовёт
+   её на каждом чтении (как экран настроек — `seed_settings`), поэтому два
+   админа на пустой БД проходят SELECT-фазу одновременно, и второй получает
+   `duplicate key value violates unique constraint "uq_prompt_key_global"` —
+   500 на ровном месте. Обработка та же, что в `seed_settings`: rollback,
+   повторный проход по недостающим ключам, один коммит.
+2. **`PUT` обязан проверять существование сайта.** Без проверки строка с
+   висячим `site_id` на Postgres валит коммит
+   (`violates foreign key constraint "prompt_templates_site_id_fkey"`) — 500
+   вместо 404, а на SQLite (внешние ключи выключены) молча ложится в БД.
+3. **`PUT` обязан переживать конкурентную первую запись того же ключа** —
+   `IntegrityError`, rollback, повтор как UPDATE (тот же приём, что в
+   `SettingsService._upsert`, Task 5).
+4. **`PUT` обязан проверять синтаксис шаблона** (`check_template`). Иначе
+   сломанный шаблон сохраняется с 200 и взрывается позже, внутри
+   Celery-задачи генерации статьи, где ошибку уже никто не свяжет с правкой
+   промпта. Экран «Тест» тут не защита: сохранить можно и не нажав его.
+5. **`PUT` обязан отклонять пустой глобальный шаблон.** Для переопределения
+   сайта пустой текст осмыслен (`resolve_prompt` возвращается к глобальному),
+   для самого глобального — это пустой платный запрос в модель.
+6. **Ошибки конфигурации RouterAI — 400, а не 500 и не 502.** Незаполненный
+   `routerai_api_key` (`get_secret` отдаёт `""`, а openai-клиент бракует
+   только `None` — проверено на openai 1.59.6) и секрет, зашифрованный другим
+   `ENCRYPTION_KEY` (`SecretDecryptionError`), оба чинятся в админке, а не на
+   стороне провайдера. Фабрика переводит их в один тип `AIConfigError`.
+7. **Прогон делается одной попыткой.** `llm_max_retries = 3` держал бы
+   синхронный HTTP-запрос до ≈366 с (120 с таймаута × 3 + паузы backoff, см.
+   `app/ai/text.py`), всё это время занимая и поток, и сессию БД. Ретраи нужны
+   фоновым задачам, где повтор некому нажать.
+8. **Число попыток ограничено сверху и снизу.** `llm_max_retries` проверяется
+   в админке только как «целое число»: `0` превратил бы `TextClient._call` в
+   цикл без единой итерации, а завышенное значение выносит статью за
+   `ARTICLE_TIME_BUDGET_SECONDS` (Task 18). Потолки разные: у картинок
+   `TIMEOUT = 180`, и третья попытка — это 555 с вместо посчитанных в
+   `app/ai/images.py` 365 с на пачку.
+9. **Дефолты берутся из `DEFAULT_SETTINGS`, а не из литералов в фабрике**, и
+   пустая строка (админ стёр поле в форме) считается отсутствием значения:
+   openai-клиент принимает `base_url=""` молча и падает потом на запросе
+   невнятным «Invalid URL».
+10. **Пустой отрендеренный промпт не уходит в модель** — платный запрос ни о
+    чём с заведомо мусорным ответом.
+
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_api_admin_prompts.py`:
 
@@ -5336,7 +5422,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai.text import TextResult
+from app.ai.text import LLMError, TextResult
 
 
 @pytest.fixture
@@ -5344,6 +5430,22 @@ def seeded(db_session):
     from app.seed import seed_prompts
 
     seed_prompts(db_session)
+
+
+@pytest.fixture
+def site(db_session):
+    from app.models.site import Site
+
+    site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e")
+    db_session.add(site)
+    db_session.commit()
+    return site
+
+
+def _stub(monkeypatch, **client):
+    """Подменяет фабрику клиента: тесты API не ходят в платную модель."""
+    monkeypatch.setattr("app.api.admin_prompts.build_text_client",
+                        lambda db, **kwargs: SimpleNamespace(**client))
 
 
 def test_manager_cannot_read_prompts(manager_client, seeded):
@@ -5356,13 +5458,8 @@ def test_admin_lists_global_prompts(admin_client, seeded):
     assert keys == {"topics", "article_body", "cover", "content_image"}
 
 
-def test_admin_saves_site_override(admin_client, seeded, db_session):
-    from app.models.site import Site
+def test_admin_saves_site_override(admin_client, seeded, db_session, site):
     from app.ai.prompts import resolve_prompt
-
-    site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e")
-    db_session.add(site)
-    db_session.commit()
 
     resp = admin_client.put("/api/admin/prompts",
                             json={"key": "topics", "site_id": site.id, "text": "свой промпт"})
@@ -5370,11 +5467,144 @@ def test_admin_saves_site_override(admin_client, seeded, db_session):
     assert resolve_prompt(db_session, "topics", site.id) == "свой промпт"
 
 
+def test_saving_twice_updates_the_same_row(admin_client, seeded, db_session, site):
+    """Второй PUT обязан обновлять строку, а не добавлять вторую: пара
+    (key, site_id) уникальна, и без поиска существующей строки этот запрос
+    падал бы IntegrityError-ом с 500 вместо 200."""
+    from app.ai.prompts import resolve_prompt
+
+    admin_client.put("/api/admin/prompts",
+                     json={"key": "topics", "site_id": site.id, "text": "первый"})
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "topics", "site_id": site.id, "text": "второй"})
+    assert resp.status_code == 200
+    assert resolve_prompt(db_session, "topics", site.id) == "второй"
+    assert len(admin_client.get("/api/admin/prompts").json()) == 5
+
+
+def test_saving_global_prompt_replaces_default(admin_client, seeded, db_session):
+    from app.ai.prompts import resolve_prompt
+
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "cover", "site_id": None, "text": "новый глобальный"})
+    assert resp.status_code == 200
+    assert resolve_prompt(db_session, "cover", None) == "новый глобальный"
+    assert len(admin_client.get("/api/admin/prompts").json()) == 4
+
+
+def test_unknown_key_rejected(admin_client, seeded):
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "выдуманный", "text": "привет"})
+    assert resp.status_code == 400
+    assert "выдуманный" in resp.json()["detail"]
+
+
+def test_unknown_site_rejected(admin_client, seeded):
+    """Без этой проверки строка с несуществующим site_id либо ложится в БД
+    (SQLite, внешние ключи выключены), либо валит commit необработанным
+    IntegrityError — 500 вместо внятного 404."""
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "topics", "site_id": 999, "text": "текст"})
+    assert resp.status_code == 404
+
+
+def test_broken_template_is_rejected_on_save(admin_client, seeded):
+    """Сломанный шаблон, сохранённый без проверки, взрывается позже — внутри
+    Celery-задачи генерации статьи, где ошибку уже никто не свяжет с правкой
+    промпта. Кнопка «Тест» тут не защита: сохранить можно и не нажав её."""
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "topics", "text": "{% for x in %}"})
+    assert resp.status_code == 400
+    assert "синтаксис" in resp.json()["detail"]
+
+
+def test_empty_global_prompt_is_rejected(admin_client, seeded, db_session):
+    """resolve_prompt отдаёт глобальный шаблон как есть, без проверки на
+    пустоту (пустой текст — «использовать глобальный» — осмыслен только для
+    переопределения сайта). Пустой глобальный шаблон означал бы пустой
+    платный запрос в модель."""
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "topics", "site_id": None, "text": "   "})
+    assert resp.status_code == 400
+
+
+def test_empty_site_override_falls_back_to_global(admin_client, seeded, db_session, site):
+    from app.ai.prompts import resolve_prompt
+    from app.seed import DEFAULT_PROMPTS
+
+    admin_client.put("/api/admin/prompts",
+                     json={"key": "topics", "site_id": site.id, "text": "свой"})
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "topics", "site_id": site.id, "text": ""})
+    assert resp.status_code == 200
+    assert resolve_prompt(db_session, "topics", site.id) == DEFAULT_PROMPTS["topics"]
+
+
+def test_concurrent_first_save_recovers(admin_client, seeded, db_session, site, monkeypatch):
+    """Два админа сохраняют переопределение одного и того же ключа: оба
+    проходят SELECT (строки нет) раньше, чем кто-то из них коммитит. Тот же
+    класс гонки, что чинили в Task 5 для SettingsService._upsert."""
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.exc import IntegrityError
+
+    real_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db_session.rollback()
+            db_session.execute(
+                sql_text("INSERT INTO prompt_templates (key, site_id, text) "
+                         "VALUES ('cover', :site_id, 'от конкурента')"),
+                {"site_id": site.id})
+            real_commit()
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+        real_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+    resp = admin_client.put("/api/admin/prompts",
+                            json={"key": "cover", "site_id": site.id, "text": "наш"})
+    assert resp.status_code == 200
+    assert calls["n"] == 2
+    monkeypatch.undo()
+    from app.ai.prompts import resolve_prompt
+    assert resolve_prompt(db_session, "cover", site.id) == "наш"
+
+
+def test_concurrent_first_seed_recovers(admin_client, db_session, monkeypatch):
+    """GET сеет дефолты на каждом обращении (как и экран настроек), поэтому
+    два админа на пустой БД сталкиваются на уникальном индексе
+    uq_prompt_key_global. Проверено на живом Postgres 16: без обработки
+    IntegrityError второй GET отвечает 500."""
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.exc import IntegrityError
+
+    real_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db_session.rollback()
+            db_session.execute(
+                sql_text("INSERT INTO prompt_templates (key, site_id, text) "
+                         "VALUES ('topics', NULL, 'от конкурента')"))
+            real_commit()
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+        real_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+    resp = admin_client.get("/api/admin/prompts")
+    assert resp.status_code == 200
+    assert calls["n"] == 2
+    keys = [item["key"] for item in resp.json()]
+    assert sorted(keys) == ["article_body", "content_image", "cover", "topics"]
+
+
 def test_test_endpoint_returns_rendered_prompt_and_answer(admin_client, seeded, monkeypatch):
-    monkeypatch.setattr(
-        "app.api.admin_prompts.build_text_client",
-        lambda db: SimpleNamespace(
-            complete_text=lambda prompt: TextResult("ответ модели", 10, 20, 0.3)))
+    _stub(monkeypatch,
+          complete_text=lambda prompt: TextResult("ответ модели", 10, 20, 0.3))
 
     resp = admin_client.post("/api/admin/prompts/test", json={
         "text": "Придумай {{ count }} тем для {{ site_name }}.",
@@ -5395,18 +5625,244 @@ def test_test_endpoint_reports_template_error(admin_client, seeded):
     assert "синтаксис" in resp.json()["detail"]
 
 
+def test_test_endpoint_reports_unknown_variable(admin_client, seeded):
+    """StrictUndefined (Task 12): опечатка в имени переменной обязана быть
+    видна на экране «Тест», а не тихо вырезать кусок инструкции."""
+    resp = admin_client.post("/api/admin/prompts/test",
+                             json={"text": "тем: {{ conut }}", "variables": {"count": 3}})
+    assert resp.status_code == 400
+    assert "conut" in resp.json()["detail"]
+
+
 def test_test_endpoint_requires_admin(manager_client, seeded):
     resp = manager_client.post("/api/admin/prompts/test",
                                json={"text": "привет", "variables": {}})
     assert resp.status_code == 403
+
+
+def test_test_endpoint_does_not_call_model_on_empty_render(admin_client, seeded, monkeypatch):
+    """Пустой отрендеренный промпт — это платный запрос ни о чём и заведомо
+    мусорный ответ."""
+    def boom(db, **kwargs):
+        raise AssertionError("клиент не должен собираться для пустого промпта")
+
+    monkeypatch.setattr("app.api.admin_prompts.build_text_client", boom)
+    resp = admin_client.post("/api/admin/prompts/test",
+                             json={"text": "{{ x }}", "variables": {"x": "  "}})
+    assert resp.status_code == 400
+
+
+def test_test_endpoint_reports_llm_failure(admin_client, seeded, monkeypatch):
+    def failing(prompt):
+        raise LLMError("RouterAI отклонил ключ API (401)")
+
+    _stub(monkeypatch, complete_text=failing)
+    resp = admin_client.post("/api/admin/prompts/test",
+                             json={"text": "привет", "variables": {}})
+    assert resp.status_code == 502
+    assert "401" in resp.json()["detail"]
+
+
+def test_test_endpoint_reports_missing_api_key(admin_client, seeded):
+    """Ключ RouterAI не заполнен: админ обязан увидеть 400 с названием
+    настройки, а не 502 после похода в RouterAI за 401."""
+    resp = admin_client.post("/api/admin/prompts/test",
+                             json={"text": "привет", "variables": {}})
+    assert resp.status_code == 400
+    assert "routerai_api_key" in resp.json()["detail"]
+
+
+def test_test_endpoint_reports_wrong_encryption_key(admin_client, seeded, db_session):
+    from cryptography.fernet import Fernet
+
+    from app.config import config
+    from app.settings.service import SettingsService
+
+    SettingsService(db_session, config.encryption_key).set_secret("routerai_api_key", "sk-x")
+    original = config.encryption_key
+    config.encryption_key = Fernet.generate_key().decode()
+    try:
+        resp = admin_client.post("/api/admin/prompts/test",
+                                 json={"text": "привет", "variables": {}})
+    finally:
+        config.encryption_key = original
+    assert resp.status_code == 400
+    assert "ENCRYPTION_KEY" in resp.json()["detail"]
+
+
+def test_test_endpoint_bounds_waiting_time(admin_client, seeded, monkeypatch):
+    """Синхронный эндпоинт с llm_max_retries=3 держал бы админа до ≈366 с
+    (120 с таймаута × 3 попытки + паузы backoff, см. app/ai/text.py).
+    Прогон делается одной попыткой: админ сидит перед экраном и нажмёт
+    «Тест» ещё раз сам."""
+    seen = {}
+
+    def spy(db, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(complete_text=lambda prompt: TextResult("ок", 1, 1, 0.0))
+
+    monkeypatch.setattr("app.api.admin_prompts.build_text_client", spy)
+    admin_client.post("/api/admin/prompts/test", json={"text": "привет", "variables": {}})
+    assert seen["max_retries"] == 1
+
+
+def test_variables_default_is_not_shared_between_requests(admin_client, seeded, monkeypatch):
+    """pydantic v2 копирует изменяемый дефолт на каждый экземпляр (проверено
+    на pydantic 2.10.4), поэтому variables={} безопасен — тест фиксирует это
+    как требование, а не как счастливую случайность."""
+    from app.api.admin_prompts import PromptTestIn
+
+    first = PromptTestIn(text="a")
+    first.variables["x"] = 1
+    assert PromptTestIn(text="b").variables == {}
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+`execution/backend/tests/test_ai_factory.py`:
 
-Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_prompts.py -v`
-Expected: FAIL — 404 на `/api/admin/prompts`
+```python
+"""Фабрика клиентов RouterAI: дефолты, границы числа попыток и понятные
+ошибки конфигурации вместо 401 от провайдера."""
 
-- [ ] **Step 3: Фабрика клиентов**
+import pytest
+
+from app.ai.factory import (
+    IMAGE_MAX_RETRIES,
+    TEXT_MAX_RETRIES,
+    AIConfigError,
+    build_image_generator,
+    build_text_client,
+    image_params,
+)
+from app.config import config
+from app.settings.service import SettingsService
+
+
+@pytest.fixture
+def service(db_session):
+    from app.seed import seed_settings
+
+    seed_settings(db_session)
+    settings = SettingsService(db_session, config.encryption_key)
+    settings.set_secret("routerai_api_key", "sk-test")
+    return settings
+
+
+def test_text_client_reads_settings(db_session, service):
+    service.set("text_model", "anthropic/claude-opus-5")
+    client = build_text_client(db_session)
+    assert client.model == "anthropic/claude-opus-5"
+    assert client.client.api_key == "sk-test"
+    assert str(client.client.base_url).startswith("https://routerai.ru/api/v1")
+
+
+def test_image_generator_reads_settings(db_session, service):
+    service.set("image_model", "openai/gpt-image-3")
+    generator = build_image_generator(db_session)
+    assert generator.model == "openai/gpt-image-3"
+    assert generator.api_key == "sk-test"
+    assert generator.url == "https://routerai.ru/api/v1/images"
+
+
+def test_missing_api_key_is_named_before_the_request(db_session):
+    """openai-клиент принимает api_key="" молча (проверено: openai 1.59.6
+    бракует только None) и уходит в запрос ради 401 — дорогой по времени
+    способ узнать, что поле просто не заполнено."""
+    from app.seed import seed_settings
+
+    seed_settings(db_session)
+    with pytest.raises(AIConfigError) as exc:
+        build_text_client(db_session)
+    assert "routerai_api_key" in str(exc.value)
+    with pytest.raises(AIConfigError):
+        build_image_generator(db_session)
+
+
+def test_wrong_encryption_key_becomes_config_error(db_session, service):
+    """SettingsService бросает SecretDecryptionError; вызывающим (API и
+    Celery) удобнее один тип ошибки конфигурации с готовым текстом."""
+    from cryptography.fernet import Fernet
+
+    original = config.encryption_key
+    config.encryption_key = Fernet.generate_key().decode()
+    try:
+        with pytest.raises(AIConfigError) as exc:
+            build_text_client(db_session)
+    finally:
+        config.encryption_key = original
+    assert "ENCRYPTION_KEY" in str(exc.value)
+
+
+def test_retries_setting_is_applied(db_session, service):
+    service.set("llm_max_retries", "2")
+    assert build_text_client(db_session).max_retries == 2
+    assert build_image_generator(db_session).max_retries == 2
+
+
+def test_retries_are_bounded_by_time_budget(db_session, service):
+    """llm_max_retries проверяется в админке только как «целое число».
+    0 превратил бы _call в цикл без единой итерации (мгновенный «LLM
+    недоступна после 0 попыток»), а завышенное значение выносит одну статью
+    за ARTICLE_TIME_BUDGET_SECONDS = 900 с."""
+    service.set("llm_max_retries", "99")
+    assert build_text_client(db_session).max_retries == TEXT_MAX_RETRIES
+    assert build_image_generator(db_session).max_retries == IMAGE_MAX_RETRIES
+
+    service.set("llm_max_retries", "0")
+    assert build_text_client(db_session).max_retries == 1
+    assert build_image_generator(db_session).max_retries == 1
+
+
+def test_image_retries_stay_within_documented_budget():
+    """Худший случай пачки картинок посчитан в app/ai/images.py при двух
+    попытках: 180 с × 2 + пауза 5 с = 365 с. Общий llm_max_retries = 3 дал бы
+    555 с и вместе с текстовыми вызовами вышел бы за бюджет статьи."""
+    from app.ai.images import TIMEOUT
+
+    assert TIMEOUT * IMAGE_MAX_RETRIES + 5 * sum(range(1, IMAGE_MAX_RETRIES)) <= 365
+
+
+def test_broken_retries_setting_falls_back_to_default(db_session, service):
+    """Значение могли править прямо в БД, минуя валидацию админки."""
+    service.set("llm_max_retries", "три")
+    assert build_text_client(db_session).max_retries == TEXT_MAX_RETRIES
+
+
+def test_explicit_max_retries_wins(db_session, service):
+    assert build_text_client(db_session, max_retries=1).max_retries == 1
+
+
+def test_empty_setting_falls_back_to_default(db_session, service):
+    """Админ стёр поле в форме: openai-клиент принимает base_url="" молча и
+    падает уже на запросе невнятным «Invalid URL»."""
+    service.set("routerai_base_url", "")
+    service.set("text_model", "")
+    client = build_text_client(db_session)
+    assert str(client.client.base_url).startswith("https://routerai.ru/api/v1")
+    assert client.model == "anthropic/claude-sonnet-4-6"
+
+
+def test_image_params_keys_match_builder(db_session, service):
+    """Ключи потребляет ArticleBuilder (Task 16): size, quality, workers."""
+    assert set(image_params(db_session)) == {"size", "quality", "workers"}
+    assert image_params(db_session) == {"size": "1536x1024", "quality": "medium",
+                                        "workers": 4}
+
+
+def test_image_workers_bounded(db_session, service):
+    """ThreadPoolExecutor(max_workers=0) — необработанный ValueError внутри
+    Celery-задачи; границы берутся из INT_RANGES, а не из литералов здесь."""
+    service.set("image_workers", "0")
+    assert image_params(db_session)["workers"] == 1
+    service.set("image_workers", "40")
+    assert image_params(db_session)["workers"] == 8
+```
+
+- [x] **Step 2: Запустить тест, убедиться что падает**
+
+Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_prompts.py tests/test_ai_factory.py -v`
+Expected: FAIL — `No module named 'app.ai.factory'`, дальше 404 на `/api/admin/prompts`
+
+- [x] **Step 3: Фабрика клиентов**
 
 `execution/backend/app/ai/factory.py`:
 
@@ -5414,70 +5870,164 @@ Expected: FAIL — 404 на `/api/admin/prompts`
 """Сборка клиентов RouterAI из настроек в БД. Одна точка — чтобы задачи Celery
 и API-эндпоинты не читали настройки каждый по-своему."""
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.ai.images import ImageGenerator
 from app.ai.text import TextClient, build_client
 from app.config import config
+from app.seed import DEFAULT_SETTINGS, INT_RANGES
+from app.settings.crypto import SecretDecryptionError
 from app.settings.service import SettingsService
+
+logger = logging.getLogger(__name__)
+
+# Верхняя граница числа попыток на один вызов. llm_max_retries приходит из
+# админки, где проверяется только «целое число» (INT_KEYS в app/seed.py), а
+# длительность вызова упирается в бюджет статьи (ARTICLE_TIME_BUDGET_SECONDS
+# = 900 с, Task 18):
+#   текст:    REQUEST_TIMEOUT_SECONDS=120 × 3 + паузы backoff(2, 4) = 366 с;
+#   картинки: TIMEOUT=180 × 2 + пауза 5 с = 365 с на пачку (генерируются
+#             параллельно, см. app/ai/images.py — там этот расчёт и записан).
+# Отсюда разные потолки: третья попытка картинки — это 555 с вместо 365 и,
+# вместе с текстовыми вызовами той же статьи, гарантированный выход за
+# бюджет. Нижняя граница — 1: при 0 цикл в TextClient._call не делает ни
+# одной итерации и сразу отдаёт «LLM недоступна после 0 попыток».
+TEXT_MAX_RETRIES = 3
+IMAGE_MAX_RETRIES = 2
+
+# Пауза между попытками текстового вызова. Держим здесь, а не в TextClient:
+# дефолт класса (0.0) удобен тестам, боевое значение — вызывающему.
+TEXT_BACKOFF_SECONDS = 2.0
+
+
+class AIConfigError(RuntimeError):
+    """Настройки не позволяют собрать клиента: нет ключа или он зашифрован
+    другим ENCRYPTION_KEY. Отдельно от LLMError намеренно — это ошибка
+    конфигурации панели (чинится в админке, HTTP 400), а не отказ RouterAI
+    (HTTP 502)."""
 
 
 def _service(db: Session) -> SettingsService:
     return SettingsService(db, config.encryption_key)
 
 
-def build_text_client(db: Session) -> TextClient:
+def _setting(service: SettingsService, key: str) -> str:
+    """Дефолт берётся из DEFAULT_SETTINGS, а не из литерала на месте вызова:
+    иначе один и тот же дефолт живёт в двух местах и расходится при первой же
+    смене модели. Пустая строка (админ стёр поле в форме) — тоже дефолт:
+    openai-клиент принимает base_url="" молча (проверено на openai 1.59.6),
+    а падает потом на запросе невнятным «Invalid URL»."""
+    return service.get_str(key, DEFAULT_SETTINGS[key]) or DEFAULT_SETTINGS[key]
+
+
+def _api_key(service: SettingsService) -> str:
+    try:
+        key = service.get_secret("routerai_api_key")
+    except SecretDecryptionError as exc:
+        raise AIConfigError(str(exc)) from exc
+    if not key:
+        # openai-клиент бракует только api_key=None (проверено на openai
+        # 1.59.6), а с пустой строкой уходит в запрос ради 401 — дорогой по
+        # времени способ узнать, что поле просто не заполнено.
+        raise AIConfigError(
+            "ключ RouterAI не задан — заполните routerai_api_key в настройках")
+    return key
+
+
+def _retries(service: SettingsService, limit: int, override: int | None = None) -> int:
+    if override is not None:
+        return max(1, min(limit, override))
+    default = int(DEFAULT_SETTINGS["llm_max_retries"])
+    try:
+        raw = service.get_int("llm_max_retries", default)
+    except ValueError:
+        # Через админку не пройдёт (INT_KEYS), но значение могли править
+        # прямо в БД. Необработанный ValueError здесь означал бы 500 на
+        # ровном месте — и в API, и в Celery-задаче.
+        logger.warning("llm_max_retries не число — используем %s", default)
+        return default
+    value = max(1, min(limit, raw))
+    if value != raw:
+        logger.warning("llm_max_retries=%s вне диапазона 1..%s — используем %s",
+                       raw, limit, value)
+    return value
+
+
+def build_text_client(db: Session, max_retries: int | None = None) -> TextClient:
+    """max_retries переопределяется вызывающим для интерактивных прогонов
+    (экран «Промпты», Task 13): три попытки — это до 366 с ожидания в
+    синхронном HTTP-запросе."""
     service = _service(db)
-    client = build_client(
-        service.get_str("routerai_base_url", "https://routerai.ru/api/v1"),
-        service.get_secret("routerai_api_key"),
-    )
+    client = build_client(_setting(service, "routerai_base_url"), _api_key(service))
     return TextClient(
         client,
-        model=service.get_str("text_model", "anthropic/claude-sonnet-4-6"),
-        max_retries=service.get_int("llm_max_retries", 3),
-        backoff=2.0,
+        model=_setting(service, "text_model"),
+        max_retries=_retries(service, TEXT_MAX_RETRIES, max_retries),
+        backoff=TEXT_BACKOFF_SECONDS,
     )
 
 
 def build_image_generator(db: Session) -> ImageGenerator:
     service = _service(db)
     return ImageGenerator(
-        base_url=service.get_str("routerai_base_url", "https://routerai.ru/api/v1"),
-        api_key=service.get_secret("routerai_api_key"),
-        model=service.get_str("image_model", "openai/gpt-image-2"),
-        max_retries=service.get_int("llm_max_retries", 3),
+        base_url=_setting(service, "routerai_base_url"),
+        api_key=_api_key(service),
+        model=_setting(service, "image_model"),
+        max_retries=_retries(service, IMAGE_MAX_RETRIES),
     )
 
 
 def image_params(db: Session) -> dict:
+    """Ключи потребляет ArticleBuilder (Task 16): size, quality, workers."""
     service = _service(db)
+    low, high = INT_RANGES["image_workers"]
+    try:
+        workers = service.get_int("image_workers", int(DEFAULT_SETTINGS["image_workers"]))
+    except ValueError:
+        workers = int(DEFAULT_SETTINGS["image_workers"])
     return {
-        "size": service.get_str("image_size", "1536x1024"),
-        "quality": service.get_str("image_quality", "medium"),
-        "workers": service.get_int("image_workers", 4),
+        "size": _setting(service, "image_size"),
+        "quality": _setting(service, "image_quality"),
+        # Границы — те же, что проверяет админка (INT_RANGES), а не литералы
+        # здесь: ThreadPoolExecutor(max_workers=0) валит Celery-задачу
+        # необработанным ValueError, а значение могли править прямо в БД.
+        "workers": max(low, min(high, workers)),
     }
 ```
 
-- [ ] **Step 4: Роутер промптов**
+- [x] **Step 4: Роутер промптов**
 
 `execution/backend/app/api/admin_prompts.py`:
 
 ```python
+"""Экран «Промпты»: глобальные шаблоны, переопределения по сайту и прогон
+шаблона на живой модели без сохранения результата."""
+
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.ai.factory import build_text_client
-from app.ai.prompts import PROMPT_KEYS, PromptError, render_prompt
+from app.ai.factory import AIConfigError, build_text_client
+from app.ai.prompts import PROMPT_KEYS, PromptError, check_template, render_prompt
 from app.ai.text import LLMError
 from app.api.deps import get_db, require_role
 from app.models.prompt_template import PromptTemplate
+from app.models.site import Site
 from app.models.user import User
 from app.seed import seed_prompts
 
 router = APIRouter(prefix="/api/admin/prompts", tags=["admin-prompts"])
+
+# Одна попытка вместо llm_max_retries: три попытки — это до 366 с ожидания
+# (120 с таймаута × 3 + паузы backoff, см. app/ai/text.py) в синхронном
+# HTTP-запросе, который всё это время держит и поток, и сессию БД. Ретраи
+# нужны фоновым задачам, где повтор некому нажать; здесь админ сидит перед
+# экраном и нажмёт «Тест» сам.
+TEST_MAX_RETRIES = 1
 
 
 class PromptOut(BaseModel):
@@ -5495,7 +6045,10 @@ class PromptIn(BaseModel):
 
 class PromptTestIn(BaseModel):
     text: str
-    variables: dict = {}
+    # default_factory, а не {}: pydantic v2 копирует изменяемый дефолт на
+    # каждый экземпляр (проверено на pydantic 2.10.4), но полагаться на это
+    # поведение библиотеки в общем на запрос объекте не хочется.
+    variables: dict = Field(default_factory=dict)
 
 
 class PromptTestOut(BaseModel):
@@ -5503,6 +6056,16 @@ class PromptTestOut(BaseModel):
     answer: str
     tokens_total: int
     cost: float
+
+
+def _find(db: Session, key: str, site_id: int | None) -> PromptTemplate | None:
+    # `== None` тут не ошибка и не требует ветки с .is_(None): SQLAlchemy
+    # рендерит сравнение с None как `IS NULL` (проверено печатью запроса на
+    # sqlalchemy 2.x), поэтому один и тот же вызов находит и глобальный
+    # шаблон, и переопределение сайта.
+    return db.scalars(
+        select(PromptTemplate).where(PromptTemplate.key == key,
+                                     PromptTemplate.site_id == site_id)).first()
 
 
 @router.get("", response_model=list[PromptOut])
@@ -5517,18 +6080,45 @@ def list_prompts(db: Session = Depends(get_db),
 @router.put("", response_model=PromptOut)
 def save_prompt(payload: PromptIn, db: Session = Depends(get_db),
                 _user: User = Depends(require_role("admin"))):
+    """Проверки здесь, а не «потом разберёмся»: у сломанного промпта следующая
+    точка обнаружения — Celery-задача генерации статьи, где ошибку уже никто
+    не свяжет с правкой шаблона. Экран «Тест» тут не защита: сохранить можно
+    и не нажав его."""
     if payload.key not in PROMPT_KEYS:
         raise HTTPException(400, f"неизвестный ключ промпта: {payload.key}")
-    row = db.scalars(
-        select(PromptTemplate).where(PromptTemplate.key == payload.key,
-                                     PromptTemplate.site_id.is_(payload.site_id)
-                                     if payload.site_id is None
-                                     else PromptTemplate.site_id == payload.site_id)).first()
+    if payload.site_id is not None and db.get(Site, payload.site_id) is None:
+        # Иначе строка с висячим site_id либо ложится в БД (SQLite, внешние
+        # ключи выключены), либо валит commit необработанным IntegrityError.
+        raise HTTPException(404, "сайт не найден")
+    if payload.site_id is None and not payload.text.strip():
+        # Для переопределения сайта пустой текст осмыслен — resolve_prompt
+        # возвращается к глобальному шаблону. Для самого глобального пустой
+        # текст означает пустой платный запрос в модель.
+        raise HTTPException(400, "глобальный промпт не может быть пустым")
+    try:
+        check_template(payload.text)
+    except PromptError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    row = _find(db, payload.key, payload.site_id)
     if row is None:
         row = PromptTemplate(key=payload.key, site_id=payload.site_id)
         db.add(row)
     row.text = payload.text
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Конкурентная первая запись того же ключа: между нашим SELECT
+        # (промах) и INSERT строку успел вставить другой админ — тот же класс
+        # гонки, что чинили в Task 5 для SettingsService._upsert. К моменту
+        # повтора строка уже есть, поэтому оставшийся путь — UPDATE. Если её
+        # всё же нет, причина конфликта другая, и прятать её нельзя.
+        db.rollback()
+        row = _find(db, payload.key, payload.site_id)
+        if row is None:
+            raise
+        row.text = payload.text
+        db.commit()
     return PromptOut(id=row.id, key=row.key, site_id=row.site_id, text=row.text)
 
 
@@ -5540,12 +6130,21 @@ def test_prompt(payload: PromptTestIn, db: Session = Depends(get_db),
     try:
         rendered = render_prompt(payload.text, payload.variables)
     except PromptError as exc:
-        raise HTTPException(400, str(exc))
+        raise HTTPException(400, str(exc)) from exc
+    if not rendered.strip():
+        # Пустой промпт — платный запрос ни о чём с заведомо мусорным ответом.
+        raise HTTPException(400, "шаблон отрендерился в пустую строку")
 
     try:
-        result = build_text_client(db).complete_text(rendered)
+        client = build_text_client(db, max_retries=TEST_MAX_RETRIES)
+    except AIConfigError as exc:
+        # Ошибка настроек панели, а не отказ провайдера: 400, чтобы админ
+        # чинил её у себя, а не искал проблему на стороне RouterAI.
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        result = client.complete_text(rendered)
     except LLMError as exc:
-        raise HTTPException(502, f"RouterAI: {exc}")
+        raise HTTPException(502, f"RouterAI: {exc}") from exc
 
     return PromptTestOut(
         rendered=rendered, answer=result.text,
@@ -5554,7 +6153,7 @@ def test_prompt(payload: PromptTestIn, db: Session = Depends(get_db),
     )
 ```
 
-- [ ] **Step 5: Подключить роутер**
+- [x] **Step 5: Подключить роутер**
 
 В `execution/backend/app/main.py`:
 
@@ -5568,15 +6167,20 @@ app.include_router(admin_sites.router)
 app.include_router(admin_prompts.router)
 ```
 
-- [ ] **Step 6: Запустить тест, убедиться что проходит**
+- [x] **Step 6: Правки в app/ai/prompts.py и app/seed.py**
 
-Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_prompts.py -v`
-Expected: PASS — 6 passed
+`check_template` и обработка гонки в `seed_prompts` — блоки приведены целиком
+в Task 12 (Step 4 и Step 5), там же причины.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Запустить тесты, убедиться что проходят**
+
+Run: `cd execution && docker compose run --rm --no-deps backend pytest -q`
+Expected: PASS — 223 passed (189 до задачи + 34 новых)
+
+- [x] **Step 8: Commit**
 
 ```bash
-git add execution/backend/app/ai/factory.py execution/backend/app/api/admin_prompts.py execution/backend/app/main.py execution/backend/tests/test_api_admin_prompts.py
+git add execution/backend/app/ai/factory.py execution/backend/app/ai/prompts.py execution/backend/app/api/admin_prompts.py execution/backend/app/seed.py execution/backend/app/main.py execution/backend/tests/test_api_admin_prompts.py execution/backend/tests/test_ai_factory.py
 git commit -m "feat: API промптов с тестовым прогоном"
 ```
 

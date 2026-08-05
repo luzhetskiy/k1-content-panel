@@ -136,8 +136,7 @@ DEFAULT_PROMPTS = {
 }
 
 
-def seed_prompts(db: Session) -> None:
-    """Идемпотентна: отредактированный в админке промпт не перезаписывается."""
+def _add_missing_prompts(db: Session) -> None:
     existing = {
         row.key for row in
         db.query(PromptTemplate).filter(PromptTemplate.site_id.is_(None)).all()
@@ -145,4 +144,23 @@ def seed_prompts(db: Session) -> None:
     for key in PROMPT_KEYS:
         if key not in existing:
             db.add(PromptTemplate(key=key, site_id=None, text=DEFAULT_PROMPTS[key]))
-    db.commit()
+
+
+def seed_prompts(db: Session) -> None:
+    """Идемпотентна: отредактированный в админке промпт не перезаписывается."""
+    _add_missing_prompts(db)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Тот же конкурентный сценарий, что и в seed_settings выше: Task 13
+        # зовёт seed_prompts на каждом GET /api/admin/prompts, поэтому два
+        # админа, открывшие экран промптов на пустой БД, оба проходят
+        # SELECT-фазу (видят пусто) раньше, чем кто-то из них коммитит.
+        # Второй ловит конфликт частичного уникального индекса
+        # uq_prompt_key_global (Task 12) — проверено на живом Postgres 16:
+        # без этой ветки его GET отвечает 500. После rollback вставленное
+        # конкурентом видно, поэтому повторный проход добавляет только
+        # действительно недостающее.
+        db.rollback()
+        _add_missing_prompts(db)
+        db.commit()

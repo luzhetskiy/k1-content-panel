@@ -7174,7 +7174,7 @@ git commit -m "feat: отсев дублей тем статей"
 - Create: `execution/backend/app/articles/builder.py`
 - Test: `execution/backend/tests/test_articles_builder.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_articles_builder.py`:
 
@@ -7184,7 +7184,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai.images import ImageResult
+from app.ai.images import ImageError, ImageResult
 from app.ai.text import JsonResult, TextResult
 from app.articles.builder import ArticleBuilder, image_filename, image_paths_for
 
@@ -7414,14 +7414,194 @@ def test_model_returning_non_json_marks_article_failed(db_session, prepared):
     builder.build()
     assert prepared.article.status == "failed"
     assert "не JSON" in prepared.article.error_text
+
+
+# --- Обязательные находки ревью Task 16 ---
+
+
+class SequencedTextClient(FakeTextClient):
+    """complete_text нумерует свои вызовы в тексте результата — так дальний
+    FakeImageGenerator по содержимому prompt узнаёт, для какой по счёту
+    иллюстрации (= какой позиции) он вызван, не завися от того, в каком
+    порядке потоки ThreadPoolExecutor реально стартуют."""
+
+    def __init__(self, body):
+        super().__init__(body)
+        self._text_calls = 0
+
+    def complete_text(self, prompt):
+        self.prompts.append(prompt)
+        self._text_calls += 1
+        return TextResult(f"промпт-{self._text_calls}", 10, 20, 0.05)
+
+
+class PartialFailureImageGenerator:
+    """Один запрос (по номеру в prompt) падает с ImageError, остальные —
+    успешны. model задан явно для находки №3 (путаница модели в LlmUsage)."""
+
+    model = "openai/gpt-image-2"
+
+    def __init__(self, fail_on: str):
+        self.calls = []
+        self.fail_on = fail_on
+
+    def generate(self, prompt, size, quality, crop):
+        self.calls.append(prompt)
+        if prompt.endswith(self.fail_on):
+            raise ImageError("сорвался провайдер: 500")
+        return ImageResult(data=b"webp-bytes", size=(1600, 1066), cost=5.4, seconds=1)
+
+
+def test_content_image_partial_failure_still_records_successful_siblings(db_session, prepared):
+    """Находка №1 ревью Task 16: если одна из параллельных генераций
+    контентных картинок падает, уже успешно (и оплачено) сгенерированные
+    соседние картинки всё равно должны попасть в ArticleImage/LlmUsage, а не
+    потеряться вместе с исключением. Мутационно проверено (см. отчёт
+    задачи): при возврате к `list(pool.map(...))` этот тест падает — ни
+    одна ArticleImage не записывается вообще, включая успешные."""
+    from app.models.article import ArticleImage
+    from app.models.job import JobRun, LlmUsage
+
+    prepared.site.reference_images = 3
+    db_session.commit()
+    job = JobRun(kind="build_article", site_id=prepared.site.id,
+                created_by_id=None)
+    db_session.add(job)
+    db_session.commit()
+
+    body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>x</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    text_client = SequencedTextClient(body)
+    image_generator = PartialFailureImageGenerator(fail_on="2")
+    builder = ArticleBuilder(
+        db=db_session, article=prepared.article, site=prepared.site,
+        text_client=text_client, image_generator=image_generator,
+        site_client=FakeSiteClient(),
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 3},
+        watermark_bytes=b"", job_run_id=job.id,
+    )
+
+    builder.build()
+
+    assert prepared.article.status == "failed"
+    assert "сорвался провайдер" in prepared.article.error_text
+
+    images = db_session.query(ArticleImage).filter_by(
+        article_id=prepared.article.id, kind="content").all()
+    assert sorted(i.position for i in images) == [1, 3]
+    assert all(i.cost == 5.4 for i in images)
+
+    usage = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="image").all()
+    assert len(usage) == 2
+    assert all(u.cost == 5.4 for u in usage)
+
+
+def test_duplicate_slug_within_same_site_marks_second_failed_without_crashing(
+        db_session, prepared):
+    """Находка №2 ревью Task 16: два Article с топиками, слагифицирующимися
+    в одинаковый url (частичный индекс uq_article_site_slug), не должны
+    ронять build() необработанным IntegrityError — вторая статья обязана
+    остаться failed, а сессия — оставаться пригодной для следующего
+    commit (иначе Task 17's цикл по статьям партии развалился бы целиком).
+    Мутационно проверено (см. отчёт задачи): без try/except IntegrityError
+    в _apply_body этот тест падает с необработанным IntegrityError."""
+    from app.models.article import Article
+
+    second = Article(batch_id=prepared.batch.id, site_id=prepared.site.id,
+                     topic="Чем ещё утеплить дом")
+    db_session.add(second)
+    db_session.commit()
+
+    same_body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>x</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    make_builder(db_session, prepared, body=same_body).build()
+    assert prepared.article.status == "published"
+    assert prepared.article.slug == "chem-uteplit-karkasnyy-dom"
+
+    second_builder = ArticleBuilder(
+        db=db_session, article=second, site=prepared.site,
+        text_client=FakeTextClient(same_body), image_generator=FakeImageGenerator(),
+        site_client=FakeSiteClient(),
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 2},
+        watermark_bytes=b"", job_run_id=None,
+    )
+    second_builder.build()
+
+    assert second.status == "failed"
+    assert "уже собирается" in second.error_text
+
+    # Сессия не осталась в сорванной транзакции — следующий commit проходит.
+    prepared.site.tone_of_voice = "проверка после отката"
+    db_session.commit()
+    assert prepared.site.tone_of_voice == "проверка после отката"
+
+
+def test_llm_usage_model_matches_kind_not_always_text_client(db_session, prepared):
+    """Находка №3 ревью Task 16: LlmUsage.model для kind="image" обязан
+    браться у image_generator, а не у text_client — иначе журнал расходов
+    (app/models/job.py) показывает неправильную модель для картинок.
+    Мутационно проверено (см. отчёт задачи): при возврате к
+    `getattr(self.text_client, "model", "")` для всех kind этот тест
+    падает — LlmUsage(kind="image").model оказывается текстовой моделью."""
+    from app.models.job import JobRun, LlmUsage
+
+    class NamedTextClient(FakeTextClient):
+        model = "anthropic/claude-sonnet-4-6"
+
+    class NamedImageGenerator(FakeImageGenerator):
+        model = "openai/gpt-image-2"
+
+    job = JobRun(kind="build_article", site_id=prepared.site.id, created_by_id=None)
+    db_session.add(job)
+    db_session.commit()
+
+    body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>x</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder = ArticleBuilder(
+        db=db_session, article=prepared.article, site=prepared.site,
+        text_client=NamedTextClient(body), image_generator=NamedImageGenerator(),
+        site_client=FakeSiteClient(),
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 2},
+        watermark_bytes=b"", job_run_id=job.id,
+    )
+    builder.build()
+
+    assert prepared.article.status == "published"
+    image_rows = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="image").all()
+    text_rows = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
+    assert image_rows and all(r.model == "openai/gpt-image-2" for r in image_rows)
+    assert text_rows and all(r.model == "anthropic/claude-sonnet-4-6" for r in text_rows)
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_articles_builder.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.articles.builder'`
 
-- [ ] **Step 3: Реализация**
+Фактически: подтверждено запуском — ровно этот `ModuleNotFoundError` до создания
+`app/articles/builder.py`.
+
+- [x] **Step 3: Реализация**
+
+**Важно (закрыто при реализации):** код `_generate_content_images` ниже — не
+буквальная копия исходного черновика этого шага. Исходный черновик использовал
+`list(pool.map(render, ...))`, что противоречило требованию из цитаты выше
+(находка №1, ревью Task 8): при падении одной параллельной генерации
+терялись бы данные и расходы уже успешно завершённых соседних генераций.
+Переписано на `concurrent.futures.as_completed` с записью
+`ArticleImage`/`LlmUsage` по мере готовности каждого future и ожиданием ВСЕХ
+futures перед тем, как поднять итоговую ошибку. По ходу реализации закрыты и
+две дополнительные находки, обнаруженные при ревью самого Task 16 (не в
+исходном черновике плана): №2 (`IntegrityError` на конфликте
+`uq_article_site_slug` в `_apply_body`) и №3 (путаница модели в
+`LlmUsage.model` между текстовым и графическим клиентом). Подробности и
+подтверждения — в разделе «Находки ревью Task 16» после Step 5.
 
 `execution/backend/app/articles/builder.py`:
 
@@ -7434,8 +7614,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.articles.builder'`
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai.factory import build_image_generator, build_text_client, image_params
@@ -7456,6 +7637,13 @@ from app.sites.client import (
 
 COVER_CROP = "3:2"
 CONTENT_CROP = "3:2"
+
+
+class ArticleBuildError(RuntimeError):
+    """Ошибка, обнаруженная самим билдером (не AI-провайдером и не сайтом),
+    но которая всё равно обязана довести статью до status="failed", а не
+    уронить сборку батча необработанным исключением. Пример: конфликт
+    частичного уникального индекса uq_article_site_slug (см. _apply_body)."""
 
 
 def image_filename(article_id: int, position: int) -> str:
@@ -7496,7 +7684,17 @@ class ArticleBuilder:
             self._upload_content_images(content_images)
             page = self._create_page()
             self._attach_cover(page["id"])
-        except (LLMError, ImageError, SiteAPIError, PromptError) as exc:
+        except (LLMError, ImageError, SiteAPIError, PromptError,
+                ArticleBuildError) as exc:
+            # db.rollback() обязателен и здесь: если исключение — это
+            # IntegrityError, пойманный и перевыброшенный из _apply_body как
+            # ArticleBuildError, транзакция сессии уже отменена внутри
+            # _apply_body до того, как долетело сюда (см. её комментарий) —
+            # повторный rollback() на уже чистой сессии безопасен (no-op).
+            # Для остальных типов исключений транзакция не портится, но
+            # безусловный rollback() ничего не стоит и не полагается на то,
+            # какой именно except-класс сработал.
+            self.db.rollback()
             self.article.status = "failed"
             self.article.error_text = str(exc)
             self.db.commit()
@@ -7529,6 +7727,22 @@ class ArticleBuilder:
         return self.site.reference_images
 
     def _generate_body(self) -> dict:
+        """Известное ограничение (найдено при ревью Task 16, не чинится
+        здесь): TextClient.complete_json (app/ai/text.py) бросает LLMError
+        ДО вызова self._usage(response), если json.loads провалился — то
+        есть настоящий, уже оплаченный ответ провайдера отбрасывается вместе
+        с исключением, и _record_usage ниже для этого вызова не выполнится
+        никогда, потому что до него не доходит управление. Стоимость такого
+        одного неудачного вызова текста нигде не осядет в LlmUsage, хотя
+        RouterAI её уже учёл. Отличие от находки №1 (контентные картинки) —
+        масштаб: там теряются N-1 успешных платных результатов из-за одного
+        соседа, здесь — стоимость ровно одного неудачного вызова. Чинить
+        значит менять сигнатуру TextClient.complete_json/LLMError (Task 7,
+        уже закоммиченный и покрытый код с более широким радиусом влияния:
+        его использует и /test-эндпоинт Task 13) — решено не делать этого
+        в Task 16, а зафиксировать как принятый риск: разовая, а не
+        системная потеря, и админ всё равно увидит failed-статью с текстом
+        ошибки, просто без соответствующей строки расхода."""
         count = self._image_count()
         template = resolve_prompt(self.db, "article_body", self.site.id)
         prompt = render_prompt(template, {
@@ -7553,7 +7767,37 @@ class ArticleBuilder:
         self.article.body_html = body["html"]
         self.article.meta_description = body.get("meta_description", "")
         self.article.meta_keywords = body.get("meta_keywords", "")
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            # uq_article_site_slug (частичный индекс на (site_id, slug),
+            # app/models/article.py) — реалистичный конфликт: фильтр дублей
+            # тем (app/articles/topics.py, filter_duplicates) сам
+            # документирует дыры (нет лемматизации словоформ), а slugify
+            # дополнительно обрезает длину и схлопывает пунктуацию, так что
+            # даже НЕ признанные дублями темы иногда дают одинаковый url.
+            # После непойманного IntegrityError транзакция Postgres
+            # переходит в aborted-состояние — любой следующий db.commit() в
+            # этой же сессии тоже падает, пока не сделан rollback(). Проверено
+            # эмпирически на живом Postgres 16 (docker compose up -d postgres,
+            # миграции применены): без rollback() следующий commit() в той же
+            # сессии падает sqlalchemy.exc.PendingRollbackError ("This
+            # Session's transaction has been rolled back due to a previous
+            # exception during flush... issue Session.rollback()") — так
+            # SQLAlchemy перехватывает попытку продолжить работу в уже
+            # прерванной транзакции раньше, чем голый psycopg успел бы отдать
+            # InFailedSqlTransaction на стороне драйвера. С rollback() —
+            # следующий commit() в той же сессии проходит штатно (тоже
+            # проверено). Task 17 использует одну сессию на весь цикл по
+            # статьям партии, поэтому rollback() здесь обязателен: без него не
+            # только эта статья не долетит до status="failed", но и вся
+            # партия развалится с этого места.
+            self.db.rollback()
+            target = f"{self.site.articles_url_prefix}{self.article.slug}/"
+            raise ArticleBuildError(
+                f"на этот сайт уже собирается или опубликована другая статья "
+                f"с таким же адресом ({target}) — слаг совпал, попробуй "
+                f"переформулировать тему") from exc
 
     def _guard_duplicate_url(self) -> None:
         """Дубль url означает повторный прогон той же темы — молча создавать
@@ -7570,6 +7814,31 @@ class ArticleBuilder:
         self._record_usage("text", result.tokens_prompt, result.tokens_completion, result.cost)
         return result.text.strip()
 
+    def _render_content_image(self, position: int, prompt: str):
+        """Один платный вызов генерации + наложение знака. Вызывается из
+        рабочего потока ThreadPoolExecutor — см. _generate_content_images."""
+        result = self.image_generator.generate(
+            prompt=prompt, size=self.image_params["size"],
+            quality=self.image_params["quality"], crop=CONTENT_CROP)
+        try:
+            # Водяной знак — только на контентные картинки; обложка остаётся
+            # чистой. apply_watermark(app/ai/watermark.py) на битом (не
+            # изображение) watermark_bytes бросает PIL.UnidentifiedImageError
+            # (наследник OSError) — файл существует (иначе build_for вообще
+            # не дошёл бы сюда с непустыми байтами), но повреждён. Решение
+            # (находка №6 ревью Task 16): НЕ трактовать это как «знака нет»
+            # симметрично отсутствующему файлу — генерация уже оплачена, и
+            # тихая публикация без знака подрывает то, ради чего знак вообще
+            # ставится. Явная ошибка — админ должен узнать и поправить файл
+            # на карточке сайта, а не обнаружить пропажу знака постфактум на
+            # опубликованных картинках.
+            data = apply_watermark(result.data, self.watermark_bytes)
+        except OSError as exc:
+            raise ImageError(
+                f"файл водяного знака сайта повреждён (не изображение): {exc}"
+            ) from exc
+        return position, prompt, data, result.cost
+
     def _generate_content_images(self) -> list[tuple[int, bytes]]:
         count = self._image_count()
         prompts = [
@@ -7581,25 +7850,44 @@ class ArticleBuilder:
             for position in range(1, count + 1)
         ]
 
-        def render(position_prompt):
-            position, prompt = position_prompt
-            result = self.image_generator.generate(
-                prompt=prompt, size=self.image_params["size"],
-                quality=self.image_params["quality"], crop=CONTENT_CROP)
-            # Водяной знак — только на контентные картинки; обложка остаётся чистой.
-            return position, prompt, apply_watermark(result.data, self.watermark_bytes), result.cost
-
-        # Генерация идёт 40–140 секунд на кадр, поэтому параллельно.
+        images: list[tuple[int, bytes]] = []
+        first_error: Exception | None = None
+        # Генерация занимает 40-140 с на кадр, поэтому идёт параллельно. Не
+        # pool.map(): если одна генерация падает, list(pool.map(...)) бросает
+        # исключение при первом же неудачном результате В ПОРЯДКЕ ПОДАЧИ
+        # задач, а уже посчитанные результаты соседних успешных генераций
+        # отбрасываются молча — сами HTTP-запросы к RouterAI за них уже
+        # выполнились и, вероятно, уже оплачены (поток внутри
+        # ThreadPoolExecutor не отменяется истечением with-блока, он просто
+        # доработает и будет отброшен). as_completed отдаёт futures по мере
+        # завершения, а не в порядке подачи, и здесь дожидаемся ВСЕХ
+        # futures: для каждого успешного сразу пишем ArticleImage/LlmUsage
+        # и коммитим, для проваленных — запоминаем первое исключение и
+        # продолжаем ждать остальные, поднимая итоговую ошибку только после
+        # того, как все futures обработаны. Обрыв ожидания раньше времени
+        # (raise/break на первом же исключении из as_completed) не решил бы
+        # проблему: остальные, ещё не завершившиеся потоки всё равно
+        # доработают и, возможно, тоже вернут оплаченный результат, который
+        # был бы потерян точно так же.
         with ThreadPoolExecutor(max_workers=self.image_params["workers"]) as pool:
-            rendered = list(pool.map(render, enumerate(prompts, start=1)))
+            futures = [pool.submit(self._render_content_image, position, prompt)
+                       for position, prompt in enumerate(prompts, start=1)]
+            for future in as_completed(futures):
+                try:
+                    position, prompt, data, cost = future.result()
+                except Exception as exc:  # noqa: BLE001 — см. комментарий выше
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                self.db.add(ArticleImage(article_id=self.article.id, kind="content",
+                                         position=position, prompt=prompt, cost=cost))
+                self._record_usage("image", 0, 0, cost)
+                self.db.commit()
+                images.append((position, data))
 
-        images = []
-        for position, prompt, data, cost in sorted(rendered):
-            self.db.add(ArticleImage(article_id=self.article.id, kind="content",
-                                     position=position, prompt=prompt, cost=cost))
-            self._record_usage("image", 0, 0, cost)
-            images.append((position, data))
-        self.db.commit()
+        if first_error is not None:
+            raise first_error
+        images.sort(key=lambda item: item[0])
         return images
 
     def _upload_content_images(self, images: list[tuple[int, bytes]]) -> None:
@@ -7642,17 +7930,39 @@ class ArticleBuilder:
 
     def _record_usage(self, kind: str, tokens_prompt: int, tokens_completion: int,
                       cost: float) -> None:
+        """model берётся из источника, СООТВЕТСТВУЮЩЕГО kind, а не всегда с
+        text_client (найдено при ревью Task 16: старая версия писала модель
+        текстового клиента даже для kind="image" — журнал расходов
+        (LlmUsage, app/models/job.py) существует именно для того, чтобы
+        «расход надо видеть до того, как он станет сюрпризом», и неверная
+        модель в строке журнала подрывает ровно эту цель)."""
         if self.job_run_id is None:
             return
+        source = self.image_generator if kind == "image" else self.text_client
         self.db.add(LlmUsage(job_run_id=self.job_run_id, kind=kind,
-                             model=getattr(self.text_client, "model", ""),
+                             model=getattr(source, "model", ""),
                              tokens_prompt=tokens_prompt,
                              tokens_completion=tokens_completion, cost=cost))
 
 
 def build_for(db: Session, article: Article, site: Site, site_client,
               job_run_id: int | None) -> None:
-    """Сборка билдера из настроек БД — точка входа для Celery-задачи."""
+    """Сборка билдера из настроек БД — точка входа для Celery-задачи.
+
+    Известный риск (найдено при ревью Task 16, не чинится здесь): сборка
+    клиентов (build_text_client/build_image_generator/image_params) идёт
+    ДО входа в try-блок ArticleBuilder.build(), то есть если из-за
+    незаполненного ключа RouterAI или неверного ENCRYPTION_KEY любая из
+    них бросит AIConfigError (Task 13, app/ai/factory.py) — это исключение
+    вылетит из build_for() непойманным, наружу за пределы try/except
+    build()'а. По инварианту Task 17 (run_batch_sync не должен ронять весь
+    батч из-за одной статьи) это выглядит как нарушение. Но AIConfigError —
+    ошибка конфигурации панели, ОДНА И ТА ЖЕ для всех статей партии (ключ
+    либо задан, либо нет), а не отказ, специфичный для конкретной статьи;
+    осмысленное место проверки — один раз ДО цикла по статьям в
+    run_batch_sync (Task 17, ещё не реализован), а не здесь на каждую
+    статью по отдельности. Оставлено как открытый риск с конкретным
+    сценарием для Task 17, чтобы не забыть при её реализации."""
     watermark = b""
     if site.watermark_path:
         try:
@@ -7672,17 +7982,117 @@ def build_for(db: Session, article: Article, site: Site, site_client,
     ).build()
 ```
 
-- [ ] **Step 4: Запустить тест, убедиться что проходит**
+- [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_articles_builder.py -v`
-Expected: PASS — 13 passed
+Expected: PASS — 16 passed (13 из исходного черновика + 3 на находки №1/№2/№3)
 
-- [ ] **Step 5: Commit**
+Фактически: 16 passed. Полный прогон `pytest -q` по всему backend — 267 passed
+(было 251 до Task 16, +16 новых тестов этой задачи).
+
+- [x] **Step 5: Commit**
 
 ```bash
-git add execution/backend/app/articles/builder.py execution/backend/tests/test_articles_builder.py
+git add execution/backend/app/articles/builder.py execution/backend/tests/test_articles_builder.py \
+       orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: сборка статьи — текст, картинки, публикация черновиком"
 ```
+
+### Находки ревью Task 16 — что сделано
+
+**№1. `_generate_content_images` теряла успешные результаты соседей
+(обязательная находка).** Переписана на `concurrent.futures.as_completed`:
+цикл дожидается ВСЕХ futures, для каждого успешного сразу пишет
+`ArticleImage`/`LlmUsage` и коммитит, для проваленных запоминает первое
+исключение и продолжает ждать остальные, поднимая итоговую ошибку только
+после того, как все futures обработаны. Покрыто тестом
+`test_content_image_partial_failure_still_records_successful_siblings`
+(3 картинки, вторая по номеру в промпте падает с `ImageError`, первая и
+третья успешны). Мутационно проверено: временный откат на
+`list(pool.map(...))` роняет этот тест — `assert sorted(...) == [1, 3]`
+не выполняется, потому что при багованной версии `ArticleImage` не
+записывается вообще (ни одной строки, включая успешные) — исключение
+рвёт выполнение до цикла записи. После проверки код возвращён к
+исправленной версии, весь набор тестов снова зелёный.
+
+**№2. Непойманный `IntegrityError` на конфликте `uq_article_site_slug`
+(обязательная находка).** `_apply_body` теперь ловит `IntegrityError` вокруг
+своего `db.commit()`, делает `db.rollback()` и поднимает `ArticleBuildError`
+с понятным админу текстом («на этот сайт уже собирается или опубликована
+другая статья с таким же адресом... слаг совпал»). `ArticleBuildError`
+добавлен в except-список `build()`. Покрыто тестом
+`test_duplicate_slug_within_same_site_marks_second_failed_without_crashing`
+(две статьи одного сайта, второй билдер получает тот же заголовок → тот же
+slug). Мутационно проверено: временное удаление try/except роняет тест
+необработанным `sqlalchemy.exc.IntegrityError` прямо из `build()`. Отдельно
+проверено эмпирически на живом Postgres 16 (`docker compose up -d postgres`,
+миграции применены) через одноразовый скрипт, вставлявший два `Article` с
+одинаковым `(site_id, slug)`:
+```
+OK: первая статья получила slug без ошибок
+OK: commit() бросил IntegrityError, как и ожидалось
+     (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "uq_article_site_slug"
+OK: следующий commit БЕЗ rollback() тоже упал: PendingRollbackError
+     This Session's transaction has been rolled back due to a previous exception during flush...
+OK: после db.rollback() следующий commit в той же сессии прошёл нормально
+```
+Подтверждено: без `rollback()` следующий `commit()` в той же сессии
+действительно падает (`PendingRollbackError` — SQLAlchemy перехватывает
+попытку продолжить работу в прерванной транзакции раньше, чем голый
+psycopg успел бы отдать `InFailedSqlTransaction` на уровне драйвера, но
+итог для вызывающего кода тот же: сессия непригодна для дальнейших
+commit до отката). С `rollback()` — следующий `commit()` проходит штатно.
+Скрипт был одноразовым и удалён после проверки, в репозитории не остался.
+
+**№3. `LlmUsage.model` всегда брался с `text_client`, даже для
+`kind="image"` (обязательная находка).** `_record_usage` теперь выбирает
+источник модели по `kind`: `image_generator.model` для `kind="image"`,
+`text_client.model` для `kind="text"`. Покрыто тестом
+`test_llm_usage_model_matches_kind_not_always_text_client` (разные `.model`
+у фейкового текстового и графического клиента, проверка обеих строк
+`LlmUsage`). Мутационно проверено: возврат к безусловному
+`getattr(self.text_client, "model", "")` роняет тест — строки `kind="image"`
+получают модель текстового клиента вместо графического.
+
+**№4. Потеря стоимости при `complete_json`, вернувшем невалидный JSON
+(документировано, не чинится в Task 16).** `TextClient.complete_json`
+(`app/ai/text.py`) бросает `LLMError` до вызова `self._usage(response)` —
+оплаченный ответ провайдера отбрасывается вместе с исключением. Решение:
+не менять сигнатуру `TextClient.complete_json`/`LLMError` в рамках Task 16
+— это уже закоммиченный и покрытый тестами код Task 7 с более широким
+радиусом влияния (его использует и `/test`-эндпоинт Task 13). Риск
+задокументирован в докстринге `ArticleBuilder._generate_body` (см. код
+выше) с явным обоснованием: разовая потеря одного неудачного вызова, а не
+системная (в отличие от находки №1, где терялись N-1 успешных результатов
+из-за одного соседа), и админ всё равно увидит `failed`-статью с текстом
+ошибки — только без соответствующей строки расхода в журнале.
+
+**№5. `build_for` собирает клиентов ДО входа в try-блок `build()`
+(документировано, риск для Task 17).** Если `build_text_client`/
+`build_image_generator`/`image_params` бросят `AIConfigError` (нет ключа
+RouterAI или неверный `ENCRYPTION_KEY`), это исключение вылетит из
+`build_for()` непойманным. Решение: не чинить в Task 16 — `AIConfigError`
+одна и та же для всех статей партии (ключ либо задан, либо нет), и
+осмысленное место проверки — один раз до цикла по статьям в
+`run_batch_sync` (Task 17, ещё не реализован), а не здесь на каждую
+статью. Риск задокументирован в докстринге `build_for` (см. код выше) —
+явно зафиксирован сценарий, чтобы не всплыл сюрпризом при реализации
+Task 17.
+
+**№6. `apply_watermark` на битом файле знака (найдено и закрыто в
+Task 16).** Решено НЕ трактовать повреждённый (не изображение, но
+существующий) `watermark_path` симметрично отсутствующему файлу: генерация
+уже оплачена, и тихая публикация без знака подрывает саму цель водяного
+знака. `_render_content_image` оборачивает `apply_watermark` в
+`try/except OSError` (перехватывает `PIL.UnidentifiedImageError`, наследник
+`OSError`) и поднимает `ImageError` с понятным текстом — админ узнаёт и
+поправит файл на карточке сайта. Поскольку эта ошибка возникает внутри
+`_render_content_image`, вызываемого из `as_completed`-цикла, она проходит
+через тот же путь, что и находка №1 (не рвёт другие уже успешные
+результаты). Отдельным тестом на битый watermark не покрыто (сценарий
+редкий — файл существовал, был подменён на невалидный после успешной
+проверки), задокументировано как явное архитектурное решение в
+докстрингах `_render_content_image` и в этом разделе плана.
 
 ---
 

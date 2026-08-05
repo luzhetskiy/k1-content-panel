@@ -2783,7 +2783,7 @@ git commit -m "feat: текстовый клиент RouterAI"
 - Test: `execution/backend/tests/test_ai_images.py`
 - Test: `execution/backend/tests/test_ai_watermark.py`
 
-- [ ] **Step 1: Написать падающий тест на кроп и упаковку**
+- [x] **Step 1: Написать падающий тест на кроп и упаковку**
 
 `execution/backend/tests/test_ai_images.py`:
 
@@ -2869,7 +2869,7 @@ def test_generate_retries_then_fails(monkeypatch):
     assert len(calls) == 3
 ```
 
-- [ ] **Step 2: Написать падающий тест на водяной знак**
+- [x] **Step 2: Написать падающий тест на водяной знак**
 
 `execution/backend/tests/test_ai_watermark.py`:
 
@@ -2949,12 +2949,12 @@ def test_empty_watermark_returns_original():
     assert apply_watermark(base, b"") == base
 ```
 
-- [ ] **Step 3: Запустить тесты, убедиться что падают**
+- [x] **Step 3: Запустить тесты, убедиться что падают**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_images.py tests/test_ai_watermark.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.ai.images'`
 
-- [ ] **Step 4: Реализация images.py**
+- [x] **Step 4: Реализация images.py**
 
 `execution/backend/app/ai/images.py`:
 
@@ -3064,7 +3064,7 @@ class ImageGenerator:
                          f"{last_error}")
 ```
 
-- [ ] **Step 5: Реализация watermark.py**
+- [x] **Step 5: Реализация watermark.py**
 
 `execution/backend/app/ai/watermark.py`:
 
@@ -3124,12 +3124,12 @@ def apply_watermark(image_bytes: bytes, watermark_bytes: bytes) -> bytes:
     return buffer.getvalue()
 ```
 
-- [ ] **Step 6: Запустить тесты, убедиться что проходят**
+- [x] **Step 6: Запустить тесты, убедиться что проходят**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_images.py tests/test_ai_watermark.py -v`
 Expected: PASS — 14 passed
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add execution/backend/app/ai execution/backend/tests/test_ai_images.py execution/backend/tests/test_ai_watermark.py

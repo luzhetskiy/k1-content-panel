@@ -8103,9 +8103,15 @@ Task 16).** Решено НЕ трактовать повреждённый (н�
 - Create: `execution/backend/app/tasks.py`
 - Test: `execution/backend/tests/test_tasks.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 Задачи тестируются вызовом их внутренних функций напрямую — брокер в тестах не поднимается.
+
+**Ревью нашло 4 находки (детали и обоснование решений — в разделе «Находки
+ревью Task 17» сразу после Step 7). Тестовый файл ниже уже включает
+регрессионные тесты на все три исправленные находки (1, 2, 3) — они
+дописаны поверх исходного черновика Step 1, а не в отдельный шаг, чтобы
+код и тест на находку шли одним изменением.**
 
 `execution/backend/tests/test_tasks.py`:
 
@@ -8118,7 +8124,7 @@ from app.ai.text import JsonResult
 from app.models.article import Article, ArticleBatch
 from app.models.job import JobRun
 from app.models.site import Site
-from app.tasks import run_batch_sync, generate_topics_sync
+from app.tasks import generate_topics_sync, retry_article_sync, run_batch_sync
 
 
 @pytest.fixture
@@ -8157,11 +8163,22 @@ def patch_deps(monkeypatch, topics, existing=None):
 
 
 def test_generate_topics_fills_articles(db_session, batch, monkeypatch):
-    patch_deps(monkeypatch, ["Тема А", "Тема Б", "Тема В"])
+    # Не "Тема А"/"Тема Б"/"Тема В": буквы-суффиксы А/В транслитерируются в
+    # "a"/"v" — предлоги из _STOPWORDS (app/articles/topics.py) — и после
+    # нормализации все три темы схлопываются в один и тот же токен {"tema"},
+    # из-за чего filter_duplicates честно считает вторую и третью дублями
+    # первой (найдено при прогоне этого теста: с этими строками проходит
+    # только "Тема А"). Это не баг задачи 17, а уже документированное в
+    # topics.py ограничение формулы (Task 15) — тестовые темы просто обязаны
+    # быть такими, какие реально приходят от модели, а не буквенными ярлыками.
+    patch_deps(monkeypatch, ["Утепление фасада минватой", "Выбор кровельного материала",
+                            "Монтаж вентилируемого фасада"])
     generate_topics_sync(db_session, batch.id)
     db_session.refresh(batch)
     assert batch.status == "topics_review"
-    assert [a.topic for a in batch.articles] == ["Тема А", "Тема Б", "Тема В"]
+    assert [a.topic for a in batch.articles] == [
+        "Утепление фасада минватой", "Выбор кровельного материала",
+        "Монтаж вентилируемого фасада"]
 
 
 def test_generate_topics_drops_duplicates(db_session, batch, monkeypatch):
@@ -8242,14 +8259,189 @@ def test_run_batch_continues_after_single_failure(db_session, batch, site, monke
     # Одна упавшая статья не должна отменять остальные — партия всё равно done.
     assert batch.status == "done"
     assert {a.status for a in batch.articles} == {"failed", "published"}
+
+
+# --- находка №1 ревью Task 17: AIConfigError (Task 13) не ловилась ни в
+# одной из трёх *_sync-функций — она новее их исходного except-списка. ---
+
+def test_generate_topics_ai_config_error_marks_batch_failed(db_session, batch, monkeypatch):
+    from app.ai.factory import AIConfigError
+
+    def broken(db):
+        raise AIConfigError("ключ RouterAI не задан — заполните routerai_api_key")
+
+    monkeypatch.setattr("app.tasks.build_text_client", broken)
+    monkeypatch.setattr("app.tasks.open_site_client",
+                        lambda db, site: SimpleNamespace(list_section_pages=lambda p: []))
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "ключ" in batch.error_text
+
+
+def test_run_batch_ai_config_error_marks_batch_failed(db_session, batch, site, monkeypatch):
+    from app.ai.factory import AIConfigError
+
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="Тема А"))
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id):
+        raise AIConfigError("ключ RouterAI не задан — заполните routerai_api_key")
+
+    monkeypatch.setattr("app.tasks.build_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "ключ" in batch.error_text
+
+
+def test_run_batch_secret_decryption_error_on_site_client_marks_failed(
+        db_session, batch, site, monkeypatch):
+    from app.settings.crypto import SecretDecryptionError
+
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="Тема А"))
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def broken(db, site):
+        raise SecretDecryptionError("значение зашифровано другим ключом")
+
+    monkeypatch.setattr("app.tasks.open_site_client", broken)
+    monkeypatch.setattr("app.tasks.build_for", lambda *a, **k: None)
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "ключ" in batch.error_text or "зашифровано" in batch.error_text
+
+
+def test_retry_article_ai_config_error_marks_failed(db_session, batch, site, monkeypatch):
+    from app.ai.factory import AIConfigError
+
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема")
+    db_session.add(article)
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id):
+        raise AIConfigError("ключ RouterAI не задан — заполните routerai_api_key")
+
+    monkeypatch.setattr("app.tasks.build_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    retry_article_sync(db_session, article.id)
+    db_session.refresh(article)
+    assert article.status == "failed"
+    assert "ключ" in article.error_text
+
+
+# --- находка №2 ревью Task 17: сайт партии/статьи мог быть удалён
+# (site_id nullable, ON DELETE SET NULL, Task 14) — db.get(Site, ...) вернёт
+# None, а без проверки упадёт AttributeError на первом же обращении к site.id.
+
+def test_generate_topics_without_site_marks_batch_failed(db_session, admin, monkeypatch):
+    batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=admin.id)
+    db_session.add(batch)
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr("app.tasks.build_text_client", lambda db: calls.append(1))
+
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "удал" in batch.error_text
+    assert calls == []  # до платного вызова дело не должно было дойти
+
+
+def test_run_batch_without_site_marks_batch_failed(db_session, admin, monkeypatch):
+    batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=admin.id)
+    db_session.add(batch)
+    db_session.commit()
+    db_session.add(Article(batch_id=batch.id, site_id=None, topic="Тема"))
+    batch.status = "topics_review"
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: calls.append(1))
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "удал" in batch.error_text
+    assert calls == []
+
+
+def test_retry_article_without_site_marks_article_failed(db_session, admin, monkeypatch):
+    batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=admin.id)
+    db_session.add(batch)
+    db_session.commit()
+    article = Article(batch_id=batch.id, site_id=None, topic="Тема")
+    db_session.add(article)
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: calls.append(1))
+
+    retry_article_sync(db_session, article.id)
+    db_session.refresh(article)
+    assert article.status == "failed"
+    assert "удал" in article.error_text
+    assert calls == []
+
+
+# --- находка №3 ревью Task 17: generate_topics_sync не защищена от
+# повторного запуска — без защиты каждый повтор задваивает Article.
+
+def test_generate_topics_does_not_duplicate_on_rerun(db_session, batch, monkeypatch):
+    calls = []
+
+    def fake_build_text_client(db):
+        calls.append(1)
+        return SimpleNamespace(
+            model="m", complete_json=lambda p: JsonResult(["Тема А"], 10, 20, 0.2))
+
+    monkeypatch.setattr("app.tasks.build_text_client", fake_build_text_client)
+    monkeypatch.setattr("app.tasks.open_site_client",
+                        lambda db, site: SimpleNamespace(list_section_pages=lambda p: []))
+
+    generate_topics_sync(db_session, batch.id)
+    generate_topics_sync(db_session, batch.id)  # повторная постановка той же задачи
+
+    db_session.refresh(batch)
+    assert [a.topic for a in batch.articles] == ["Тема А"]
+    assert len(calls) == 1
+
+
+def test_generate_topics_retry_after_failure_is_allowed(db_session, batch, monkeypatch):
+    from app.ai.text import LLMError
+
+    def broken(db):
+        raise LLMError("LLM недоступна")
+
+    monkeypatch.setattr("app.tasks.build_text_client", broken)
+    monkeypatch.setattr("app.tasks.open_site_client",
+                        lambda db, site: SimpleNamespace(list_section_pages=lambda p: []))
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+
+    patch_deps(monkeypatch, ["Тема А"])
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "topics_review"
+    assert [a.topic for a in batch.articles] == ["Тема А"]
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_tasks.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.tasks'`
+Фактически: подтверждено — `ModuleNotFoundError: No module named 'app.tasks'`.
 
-- [ ] **Step 3: Объект Celery**
+- [x] **Step 3: Объект Celery**
 
 `execution/backend/app/celery_app.py`:
 
@@ -8273,27 +8465,68 @@ celery_app.conf.timezone = "Europe/Samara"
 # угодно долго, а воркеров всего два (--concurrency=2, см. docker-compose.yml),
 # то есть одна такая задача съедает половину мощности.
 #
-# Расчёт худшего случая одного вызова LLM: REQUEST_TIMEOUT_SECONDS=120 с на
-# попытку × llm_max_retries (дефолт 3) плюс паузы backoff 2 с и 4 с ≈ 366 с.
+# ⚠️ Находка №4 ревью Task 17 (расчёт был перепроверен, а не переписан на
+# глазок — см. требование в тексте задачи не доверять комментарию из плана
+# на слово). Реальный худший случай ОДНОГО текстового вызова (app/ai/text.py:
+# TEXT_MAX_RETRIES=3, REQUEST_TIMEOUT_SECONDS=120, backoff 2+4=6):
+#   3×120 + 6 = 366 с.
+# Это подтверждает то, что уже было в плане, — но дальше план ошибался.
 #
-# Эти глобальные лимиты рассчитаны на задачи с предсказуемой длительностью —
-# generate_topics и retry_article: один вызов LLM плюс сборка одной статьи с
-# картинками. Для run_batch они НЕ применяются: партия обрабатывается
-# последовательно и её длительность пропорциональна числу статей, поэтому
-# лимит вычисляется при постановке задачи и передаётся в apply_async()
-# (см. Task 18). Глухой статический лимит там обрывал бы законную работу на
-# середине партии — часть статей опубликована, часть нет, — что хуже, чем
-# его отсутствие: защищаться нужно от зависшего соединения, а не от штатной
-# нагрузки.
+# generate_topics действительно укладывается в «один вызов LLM плюс одна
+# сетевая проверка списка страниц сайта» — 366 с с большим запасом до 900.
+#
+# retry_article — НЕТ. Он вызывает build_for → ArticleBuilder.build() целиком
+# (app/articles/builder.py), а это НЕ один вызов LLM. Реальная
+# последовательность платных вызовов на одну статью:
+#   1) текст тела статьи                                   — 1 вызов, 366 с
+#   2) текстовый промпт для КАЖДОЙ контентной картинки      — ПОСЛЕДОВАТЕЛЬНО,
+#      не параллельно: `_generate_content_images` строит список `prompts`
+#      обычным list comprehension (`[self._image_prompt(...) for position in
+#      range(1, count + 1)]`) ДО того, как открывается ThreadPoolExecutor —
+#      параллельна там только генерация самих картинок, а не промптов к ним.
+#      N картинок → N последовательных вызовов по 366 с.
+#   3) генерация N контентных картинок — ПАРАЛЛЕЛЬНО (ThreadPoolExecutor),
+#      поэтому по времени это один худший случай пачки, не N: TIMEOUT=180 ×
+#      IMAGE_MAX_RETRIES=2 + backoff 5×1 = 365 с (см. app/ai/images.py).
+#   4) текстовый промпт обложки                             — 1 вызов, 366 с
+#   5) генерация обложки (одна картинка)                    — 365 с
+#
+# Итого: 366 + 366×N + 365 + 366 + 365 = 1462 + 366×N секунд.
+# Для N=2 (site.reference_images в тестовой фикстуре, app/tasks.py тесты):
+#   1462 + 732 = 2194 с ≈ 36.6 минуты.
+# Для N=3..4 (упоминались в плане как типичные): 2560..2926 с ≈ 42.7..48.8 мин.
+#
+# Это В 2–3 РАЗА больше task_soft_time_limit=900/task_time_limit=1080 ниже.
+# При статических лимитах retry_article регулярно (не в исключительных
+# случаях — при обычных повторах из-за 429/сетевых сбоев, для которых и
+# существуют TEXT_MAX_RETRIES/IMAGE_MAX_RETRIES) убивался бы посреди
+# легитимной, просто медленной сборки — то есть работающая статья
+# помечалась бы failed по таймауту, хотя ничего не зависло.
+#
+# Решение (осознанный выбор, а не недосмотр): НЕ поднимать эти глобальные
+# лимиты. Поднять их до величины, покрывающей retry_article (~2200-2900 с),
+# означало бы одновременно раздуть лимит и для generate_topics (её реальный
+# бюджет — 366 с) почти в 3-4 раза без всякой пользы — задача с одним
+# зависшим вызовом держала бы слот воркера втрое дольше необходимого.
+# Вместо этого retry_article ставится в одну категорию с run_batch: она
+# ДОЛЖНА получать свои soft_time_limit/time_limit через apply_async() при
+# постановке в очередь, а не полагаться на этот глобальный дефолт — так же,
+# как план уже обещает для run_batch (см. _batch_time_limits, Task 18).
+# Task 18 обязана считать лимит по числу картинок статьи (site.reference_
+# images), например soft = 1462 + 366×reference_images, hard = soft + 180 —
+# по формуле выше, а НЕ вызывать `retry_article.delay(...)` без параметров
+# (черновик Task 18 в плане на момент этой находки делал именно так — это
+# зафиксировано как дефект черновика и исправлено текстом плана, см. Task 18
+# ниже: `_retry_time_limits` и `/articles/{id}/retry` теперь на apply_async).
 #
 # Мягкий лимит меньше жёсткого на 3 минуты: этого хватает, чтобы обработчик
 # SoftTimeLimitExceeded (см. tasks.py) записал status="failed" в JobRun и
-# ArticleBatch и закрыл сессию БД до принудительного убийства процесса.
-celery_app.conf.task_soft_time_limit = 900   # 15 минут
+# ArticleBatch/Article и закрыл сессию БД до принудительного убийства процесса.
+celery_app.conf.task_soft_time_limit = 900   # 15 минут — рассчитано на generate_topics
 celery_app.conf.task_time_limit = 1080       # 18 минут
 ```
 
-- [ ] **Step 4: Задачи**
+- [x] **Step 4: Задачи**
 
 `execution/backend/app/tasks.py`:
 
@@ -8306,7 +8539,7 @@ from __future__ import annotations
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from app.ai.factory import build_text_client
+from app.ai.factory import AIConfigError, build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
 from app.api.admin_sites import open_client as open_site_client
@@ -8321,8 +8554,17 @@ from app.models.site import Site
 from app.settings.crypto import SecretDecryptionError
 from app.sites.client import SiteAPIError
 
+# Статусы партии, из которых имеет смысл (пере)генерировать темы — находка №3
+# ревью Task 17. topics_pending — обычный старт; failed — ручной перезапуск
+# после починки причины отказа (например, админ вписал ключ RouterAI).
+# В обоих случаях у партии гарантированно нет ни одной Article: успешный
+# прогон добавляет Article и сразу переводит статус в topics_review одним
+# коммитом (см. generate_topics_sync ниже) — состояния «темы уже есть, но
+# статус ещё topics_pending/failed» в этом коде не возникает.
+_TOPICS_RUNNABLE_STATUSES = ("topics_pending", "failed")
 
-def _start_job(db, kind: str, site_id: int, created_by_id: int | None,
+
+def _start_job(db, kind: str, site_id: int | None, created_by_id: int | None,
                params: dict) -> JobRun:
     job = JobRun(kind=kind, site_id=site_id, created_by_id=created_by_id,
                  params_json=params, status="running")
@@ -8342,7 +8584,38 @@ def _finish_job(db, job: JobRun, status: str, log: str = "") -> None:
 
 def generate_topics_sync(db, batch_id: int) -> None:
     batch = db.get(ArticleBatch, batch_id)
-    site = db.get(Site, batch.site_id)
+
+    # Находка №3 ревью Task 17: без этой проверки повторная постановка той же
+    # задачи (сетевой ретрай брокера, дубль клика до появления защиты на
+    # уровне API в Task 18) заново сходит в платную модель и ЗАНОВО добавит
+    # все kept-темы как новые Article, задублировав их — ArticleBatch.articles
+    # просто растёт с каждым повтором. run_batch_sync защищена по каждой
+    # статье (`if article.status == "published": continue`); здесь такой же
+    # природы защита нужна на уровне всей партии целиком — тихий выход, а не
+    # исключение: тот же стиль, что и пропуск опубликованной статьи ниже.
+    if batch.status not in _TOPICS_RUNNABLE_STATUSES:
+        return
+
+    # db.get(Site, None) не вызываем: SQLAlchemy предупреждает про поиск по
+    # заведомо NULL первичному ключу ("fully NULL primary key identity cannot
+    # load any object") — batch.site_id уже может быть NULL сам по себе
+    # (нашли этот же случай, что и ниже), незачем ходить в БД, чтобы узнать
+    # то, что уже известно из самого значения site_id.
+    site = db.get(Site, batch.site_id) if batch.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: site_id nullable, ON DELETE SET NULL
+        # (Task 14) — сайт партии могли удалить между постановкой задачи в
+        # очередь и её реальным запуском. Без этой проверки следующая строка
+        # (site.id) уронила бы задачу необработанным AttributeError, и
+        # партия осталась бы в topics_pending навсегда — молча.
+        batch.status = "failed"
+        batch.error_text = "сайт этой партии удалён — генерация тем невозможна"
+        db.commit()
+        job = _start_job(db, "generate_topics", None, batch.created_by_id,
+                         {"batch_id": batch_id, "count": batch.requested_count})
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
     job = _start_job(db, "generate_topics", site.id, batch.created_by_id,
                      {"batch_id": batch_id, "count": batch.requested_count})
     try:
@@ -8373,11 +8646,16 @@ def generate_topics_sync(db, batch_id: int) -> None:
         _finish_job(db, job, "ok",
                     f"предложено {len(proposed)}, отсеяно дублей {len(dropped)}, "
                     f"принято {len(kept)}")
-    # SoftTimeLimitExceeded — в том же списке: без него мягкий лимит бесполезен,
-    # задача умрёт по жёсткому, а JobRun навсегда останется в статусе "running",
-    # и в журнале это выглядит как «задача до сих пор идёт».
+    # Находка №1 ревью Task 17: AIConfigError (Task 13, app/ai/factory.py) не
+    # входила в этот список — она моложе исходного except-списка. Без неё
+    # build_text_client(db) при незаполненном ключе RouterAI (или неверном
+    # ENCRYPTION_KEY) ронял всю задачу необработанным исключением, а
+    # ArticleBatch/JobRun оставались в "running"/topics_pending навсегда —
+    # админ не увидел бы причину нигде, кроме логов воркера. SecretDecryptionError
+    # здесь ловит тот же класс ошибки конфигурации со стороны SiteClient
+    # (list_section_pages), а не только RouterAI.
     except (LLMError, PromptError, SiteAPIError, SecretDecryptionError,
-            SoftTimeLimitExceeded) as exc:
+            AIConfigError, SoftTimeLimitExceeded) as exc:
         batch.status = "failed"
         batch.error_text = str(exc) or "превышен лимит времени задачи"
         db.commit()
@@ -8397,15 +8675,34 @@ def generate_topics(batch_id: int) -> None:
 
 def run_batch_sync(db, batch_id: int) -> None:
     batch = db.get(ArticleBatch, batch_id)
-    site = db.get(Site, batch.site_id)
+    site = db.get(Site, batch.site_id) if batch.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: site_id nullable, ON DELETE SET NULL
+        # (Task 14) — сайт партии могли удалить между постановкой задачи в
+        # очередь и её реальным запуском. Проверка стоит до
+        # `batch.status = "running"`, чтобы партия не проходила через
+        # бессмысленный промежуточный статус "running" на пути к "failed",
+        # когда заранее известно, что собирать нечем.
+        batch.status = "failed"
+        batch.error_text = "сайт этой партии удалён — сборка статей невозможна"
+        db.commit()
+        job = _start_job(db, "run_batch", None, batch.created_by_id,
+                         {"batch_id": batch_id, "articles": len(batch.articles)})
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
     batch.status = "running"
     db.commit()
 
     job = _start_job(db, "run_batch", site.id, batch.created_by_id,
                      {"batch_id": batch_id, "articles": len(batch.articles)})
-    site_client = open_site_client(db, site)
 
     try:
+        # Находка №1 ревью Task 17: раньше `site_client = open_site_client(...)`
+        # стоял ДО try — необработанный SecretDecryptionError (токен сайта
+        # расшифрован другим ENCRYPTION_KEY) ронял задачу, а партия оставалась
+        # в "running" навсегда. Перенесено внутрь try вместе с циклом.
+        site_client = open_site_client(db, site)
         for article in batch.articles:
             if article.status == "published":
                 continue
@@ -8422,6 +8719,22 @@ def run_batch_sync(db, batch_id: int) -> None:
         batch.status = "failed"
         batch.error_text = (f"превышен лимит времени партии, готово "
                             f"{done}/{len(batch.articles)}")
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        # Находка №1 ревью Task 17: AIConfigError долетает сюда либо из
+        # open_site_client (SecretDecryptionError) выше, либо изнутри
+        # build_for() (Task 16, app/articles/builder.py) — она собирает
+        # клиентов RouterAI ДО входа в собственный try, см. её докстринг.
+        # Это ошибка конфигурации панели, ОДНА И ТА ЖЕ для всех статей партии
+        # (ключ либо задан, либо нет), а не отказ, специфичный для конкретной
+        # статьи — поэтому она обрывает партию целиком, а не просто эту
+        # статью, в отличие от LLMError/ImageError/SiteAPIError, с которыми
+        # build_for() справляется сам и никогда их наружу не отдаёт.
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "failed"
+        batch.error_text = f"{exc}; готово {done}/{len(batch.articles)}"
         db.commit()
         _finish_job(db, job, "failed", batch.error_text)
         return
@@ -8446,7 +8759,17 @@ def run_batch(batch_id: int) -> None:
 
 def retry_article_sync(db, article_id: int) -> None:
     article = db.get(Article, article_id)
-    site = db.get(Site, article.site_id)
+    site = db.get(Site, article.site_id) if article.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: та же ситуация, что и у партии, — сайт
+        # статьи мог быть удалён между постановкой задачи и её запуском.
+        article.status = "failed"
+        article.error_text = "сайт этой статьи удалён — повтор невозможен"
+        db.commit()
+        job = _start_job(db, "retry_article", None, None, {"article_id": article_id})
+        _finish_job(db, job, "failed", article.error_text)
+        return
+
     job = _start_job(db, "retry_article", site.id, None, {"article_id": article_id})
     try:
         build_for(db, article, site, open_site_client(db, site), job.id)
@@ -8456,6 +8779,15 @@ def retry_article_sync(db, article_id: int) -> None:
         db.commit()
         _finish_job(db, job, "failed", article.error_text)
         return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        # Находка №1 ревью Task 17: см. подробный комментарий в run_batch_sync
+        # выше — тот же класс ошибки, тот же непойманный путь без этого except.
+        article.status = "failed"
+        article.error_text = str(exc)
+        db.commit()
+        _finish_job(db, job, "failed", str(exc))
+        return
+
     db.commit()
     _finish_job(db, job, "ok" if article.status == "published" else "failed",
                 article.error_text)
@@ -8470,22 +8802,136 @@ def retry_article(article_id: int) -> None:
         db.close()
 ```
 
-- [ ] **Step 5: Запустить тест, убедиться что проходит**
+- [x] **Step 5: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_tasks.py -v`
-Expected: PASS — 7 passed
+Expected: PASS — было заявлено 7 passed; фактически тестов теперь 16 (7 исходных
++ 9 на находки №1–3, см. Step 1) — **16 passed**.
 
-- [ ] **Step 6: Проверить, что worker видит задачи**
+- [x] **Step 6: Проверить, что worker видит задачи**
 
 Run: `cd execution && docker compose up -d worker && docker compose logs worker | grep -A5 "\[tasks\]"`
 Expected: в списке `[tasks]` присутствуют `app.tasks.generate_topics`, `app.tasks.run_batch`, `app.tasks.retry_article`
+Фактически подтверждено:
+```
+[tasks]
+  . app.tasks.generate_topics
+  . app.tasks.retry_article
+  . app.tasks.run_batch
+```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add execution/backend/app/celery_app.py execution/backend/app/tasks.py execution/backend/tests/test_tasks.py
 git commit -m "feat: фоновые задачи генерации тем и сборки партии"
 ```
+
+#### Находки ревью Task 17
+
+**№1 — устаревшие except-списки (AIConfigError, Task 13, не ловилась).**
+Ни одна из трёх `*_sync`-функций не ловила `AIConfigError` (введена в Task 13,
+позже исходного черновика Task 17), а `run_batch_sync` дополнительно держала
+`site_client = open_site_client(db, site)` вне `try`, то есть и
+`SecretDecryptionError` там тоже была непойманной. Итог без фикса: любая из
+двух ошибок улетает из `*_sync` необработанной, `JobRun`/`ArticleBatch`/
+`Article` зависают в `"running"`/прежнем статусе навсегда, админ не видит
+причину нигде, кроме логов воркера. Починено: `AIConfigError` добавлена в
+except-списки всех трёх функций; в `run_batch_sync` `open_site_client(...)`
+перенесён внутрь `try`, добавлен `except (AIConfigError, SecretDecryptionError)`
+рядом с `SoftTimeLimitExceeded`. Подтверждено 4 регрессионными тестами
+(`test_generate_topics_ai_config_error_marks_batch_failed`,
+`test_run_batch_ai_config_error_marks_batch_failed`,
+`test_run_batch_secret_decryption_error_on_site_client_marks_failed`,
+`test_retry_article_ai_config_error_marks_failed`) и мутационно: временное
+удаление `AIConfigError`/`SecretDecryptionError` из соответствующих
+except-кортежей на каждом из трёх мест валило ровно нужный тест
+необработанным исключением (`AIConfigError`/`SecretDecryptionError`
+всплывали до самого pytest), после возврата кортежа — тест снова зелёный.
+
+**№2 — `db.get(Site, ...)` может вернуть `None` (сайт партии/статьи удалён).**
+`site_id` у `ArticleBatch`/`Article` nullable с `ON DELETE SET NULL` (Task 14) —
+намеренно, чтобы удаление сайта не стирало историю статей. Без проверки
+`site is None` следующее обращение к `site.id` в любой из трёх `*_sync`
+падало необработанным `AttributeError: 'NoneType' object has no attribute
+'id'`. Защиты выше по стеку на момент этой находки не было: черновик Task 18
+проверяет существование сайта только один раз, в момент создания партии
+(`create_batch`), но не защищает от удаления сайта ПОСЛЕ постановки задачи в
+очередь, до её реального выполнения воркером — то есть сценарий реалистичен.
+Починено: во всех трёх функциях — явная проверка `site is None` (без лишнего
+похода в БД: `db.get(Site, None)` не вызывается, значение читается сразу из
+`batch.site_id`/`article.site_id`, если оно уже `None`, — иначе SQLAlchemy
+предупреждает "fully NULL primary key identity cannot load any object").
+При `None` партия/статья переводится в `"failed"` с понятным текстом
+("сайт этой партии/статьи удалён — ... невозможн(а/о)"), заводится `JobRun`
+(с `site_id=None` — поле nullable, см. Task 14) и сразу завершается как
+`"failed"`, а не остаётся в промежуточном статусе. Подтверждено 3
+регрессионными тестами (`test_generate_topics_without_site_marks_batch_failed`,
+`test_run_batch_without_site_marks_batch_failed`,
+`test_retry_article_without_site_marks_article_failed`) и мутационно:
+временная замена `if site is None:` на `if False:` во всех трёх местах валила
+все три теста тем же `AttributeError: 'NoneType' object has no attribute 'id'`.
+
+**№3 — `generate_topics_sync` не защищена от повторного запуска.**
+`run_batch_sync` уже была защищена по каждой статье
+(`if article.status == "published": continue`), а `generate_topics_sync` —
+нет: повторная постановка той же задачи (сетевой ретрай брокера, дубль клика
+до появления защиты на уровне API в Task 18) заново сходила бы в платную
+модель и ЗАНОВО добавляла все `kept`-темы как новые `Article`, задваивая их —
+`ArticleBatch.articles` просто растёт с каждым повтором. Решение: тихий
+ранний выход (без исключения — тот же стиль, что и пропуск опубликованной
+статьи в `run_batch_sync`), если `batch.status` не в
+`("topics_pending", "failed")`. `"failed"` разрешён намеренно: это ручной
+перезапуск после починки причины отказа (например, админ дописал ключ
+RouterAI), и в этом состоянии у партии гарантированно нет ни одной `Article`
+— успешный прогон добавляет статьи и переводит статус в `topics_review`
+одним и тем же коммитом, так что «темы уже есть, но статус ещё
+topics_pending/failed» в этом коде не возникает. Подтверждено 2
+регрессионными тестами (`test_generate_topics_does_not_duplicate_on_rerun` —
+повторный вызов не плодит вторую `"Тема А"` и не делает второй платный
+вызов; `test_generate_topics_retry_after_failure_is_allowed` — после
+`LLMError` повторный вызов с рабочими зависимостями всё-таки создаёт темы) и
+мутационно: временная замена guard-условия на `if False: return` (то есть
+защита выключена) вернула дубль — `['Тема А', 'Тема А']` вместо `['Тема А']`.
+
+**№4 — бюджет времени `retry_article` vs `task_soft_time_limit=900`/
+`task_time_limit=1080` (⚠️-предупреждение из текста задачи).** Полный расчёт
+и решение — в комментарии `celery_app.py` выше (раздел «⚠️ Находка №4»).
+Коротко: `retry_article` вызывает `build_for` → `ArticleBuilder.build()`
+целиком, а НЕ один вызов LLM, как предполагал исходный комментарий в плане.
+Реальный худший случай — `1462 + 366×N` секунд, где N = `site.reference_
+images` (366 с — на текст тела статьи, ещё 366×N — на N ПОСЛЕДОВАТЕЛЬНЫХ (не
+параллельных — параллельна только сама генерация картинок, `_generate_
+content_images`, `app/articles/builder.py`) текстовых промптов контентных
+картинок, 365 с — на параллельную пачку генерации самих картинок, 366 с — на
+текстовый промпт обложки, 365 с — на генерацию обложки). Для N=2 (тестовая
+фикстура) это ≈2194 с (36.6 мин), для N=3-4 — 2560-2926 с (42.7-48.8 мин) —
+в 2-3 раза больше глобальных `task_soft_time_limit=900`/`task_time_limit=
+1080`. Решение: глобальные лимиты НЕ поднимаются (это раздуло бы бюджет
+`generate_topics`, чей реальный бюджет — 366 с, без всякой пользы).
+`retry_article` переведена в ту же категорию, что и `run_batch`: лимит
+времени должен вычисляться в момент постановки в очередь и передаваться
+через `apply_async(soft_time_limit=..., time_limit=...)` по формуле
+`soft = 1462 + 366×reference_images`, `hard = soft + 180`. Это зафиксировано
+и реализовано в Task 18 ниже (`_retry_time_limits`, эндпоинт
+`/articles/{id}/retry` на `apply_async` вместо `delay`) — на момент этой
+находки черновик Task 18 использовал `retry_article.delay(article.id)` без
+параметров, что было бы тем же дефектом уровнем выше; исправлено текстом
+плана заранее, до того как Task 18 будет реализована и её тесты запущены.
+
+**Дополнительно проверено, не потребовало исправления:**
+- Утечка секретов в `JobRun.log_text`/`error_text`: тексты `AIConfigError`/
+  `SecretDecryptionError`/`LLMError`/`SiteAPIError`, которые здесь впервые
+  системно оседают в этих полях через `_finish_job`, не содержат сырых
+  токенов/ключей — сами исключения (Task 7/11/13) это уже гарантируют, здесь
+  новых мест утечки не добавлено.
+- Неатомарность `run_batch_sync`: `batch.status = "running"; db.commit()`,
+  затем отдельным коммитом создаётся `JobRun`. Если процесс убьют (SIGKILL/
+  OOM) строго между этими двумя коммитами, `ArticleBatch` останется в
+  `"running"` без соответствующего `JobRun`. Это тот же класс остаточного
+  риска, что уже осознанно принят и задокументирован для `JobRun.status=
+  "running"` в Task 14 (докстринг `JobRun`, `app/models/job.py`: обнаружение
+  зависших через `started_at`), а не отдельная новая дыра — не чинится здесь.
 
 ---
 
@@ -8525,12 +8971,24 @@ def no_celery(monkeypatch):
     monkeypatch.setattr("app.api.article_batches.generate_topics.delay",
                         lambda batch_id: sent.append(("topics", batch_id)) or
                         type("R", (), {"id": "task-1"})())
-    # run_batch ставится через apply_async с вычисленными лимитами времени,
-    # а не через delay — подменяем именно его.
+    # run_batch и retry_article ставятся через apply_async с вычисленными
+    # лимитами времени, а не через delay (находка №4 ревью Task 17, см.
+    # app/celery_app.py и _retry_time_limits ниже) — подменяем оба.
     monkeypatch.setattr("app.api.article_batches.run_batch.apply_async",
                         lambda args, **kwargs: sent.append(("run", args[0], kwargs)) or
                         type("R", (), {"id": "task-2"})())
+    monkeypatch.setattr("app.api.article_batches.retry_article.apply_async",
+                        lambda args, **kwargs: sent.append(("retry", args[0], kwargs)) or
+                        type("R", (), {"id": "task-3"})())
     return sent
+
+
+# TODO (Task 18, не покрыто здесь — оставлено явным напоминанием, а не тихим
+# пробелом): нужен тест на _retry_time_limits, аналогичный
+# test_batch_time_limits_grow_with_article_count ниже — соответствие росту
+# reference_images, и тест на сам эндпоинт /articles/{id}/retry, что он
+# зовёт retry_article.apply_async(...) с лимитами, посчитанными по
+# site.reference_images статьи, а не голый .delay().
 
 
 def test_batch_time_limits_grow_with_article_count():
@@ -8802,6 +9260,28 @@ def _batch_time_limits(article_count: int) -> tuple[int, int]:
     return soft, soft + TIME_LIMIT_GAP_SECONDS
 
 
+# Находка №4 ревью Task 17 (полный расчёт — в app/celery_app.py, раздел
+# «⚠️ Находка №4»). ARTICLE_TIME_BUDGET_SECONDS=900 выше — не точный худший
+# случай одной статьи, а генерозный средний слот ВНУТРИ СУММЫ на партию:
+# он безопасен для _batch_time_limits, потому что переплата на одних статьях
+# компенсируется недоплатой на других, а типовая статья укладывается в разы
+# быстрее. Для retry_article такой компенсации нет — это ВСЕГДА ровно одна
+# статья, и весь вес её реального худшего случая ложится на лимит без
+# усреднения. Реальный худший случай: 1462 + 366×N секунд, где
+# N = site.reference_images (366 — тело статьи, 366×N — N ПОСЛЕДОВАТЕЛЬНЫХ
+# текстовых промптов контентных картинок, 365 — параллельная пачка самих
+# картинок, 366 — промпт обложки, 365 — обложка). Использовать здесь
+# ARTICLE_TIME_BUDGET_SECONDS=900 было бы недостаточно уже при N=1
+# (1462+366=1828 с) — отдельные константы ниже, не переиспользование.
+_RETRY_FIXED_SECONDS = 1462     # тело + пачка картинок + промпт обложки + обложка
+_RETRY_PER_IMAGE_SECONDS = 366  # один последовательный текстовый промпт картинки
+
+
+def _retry_time_limits(reference_images: int) -> tuple[int, int]:
+    soft = _RETRY_FIXED_SECONDS + _RETRY_PER_IMAGE_SECONDS * reference_images
+    return soft, soft + TIME_LIMIT_GAP_SECONDS
+
+
 class TopicsIn(BaseModel):
     topics: list[str]
 
@@ -8851,7 +9331,18 @@ def retry(article_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "статья не найдена")
     if article.status == "published":
         raise HTTPException(400, "статья уже выложена черновиком")
-    retry_article.delay(article.id)
+    # apply_async с вычисленными лимитами, а не delay() — находка №4 ревью
+    # Task 17 (app/celery_app.py, _retry_time_limits выше): retry_article
+    # вызывает build_for → ArticleBuilder.build() целиком, и реальный худший
+    # случай (1462 + 366×N с, N — число картинок статьи) в 2-3 раза больше
+    # глобального дефолта Celery (900/1080 с) уже при N=2. site может быть
+    # None (сайт статьи удалён, Task 14, ON DELETE SET NULL) — тогда берём
+    # reference_images=0: retry_article_sync сам обнаружит отсутствие сайта
+    # и завершится почти мгновенно (находка №2 ревью Task 17), так что запас
+    # времени здесь роли не играет.
+    site = db.get(Site, article.site_id) if article.site_id is not None else None
+    soft, hard = _retry_time_limits(site.reference_images if site else 0)
+    retry_article.apply_async(args=[article.id], soft_time_limit=soft, time_limit=hard)
     return {"ok": True}
 ```
 

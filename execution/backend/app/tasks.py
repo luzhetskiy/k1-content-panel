@@ -1,0 +1,263 @@
+"""Фоновые задачи. Каждая обёрнута парой sync-функций: сама задача открывает
+сессию, а логика живёт в `*_sync(db, ...)` — так её можно тестировать без брокера.
+"""
+
+from __future__ import annotations
+
+from celery.exceptions import SoftTimeLimitExceeded
+
+from app.ai.factory import AIConfigError, build_text_client
+from app.ai.prompts import PromptError, render_prompt, resolve_prompt
+from app.ai.text import LLMError
+from app.api.admin_sites import open_client as open_site_client
+from app.articles.builder import build_for
+from app.articles.topics import filter_duplicates
+from app.celery_app import celery_app
+from app.clock import utcnow
+from app.db import SessionLocal
+from app.models.article import Article, ArticleBatch
+from app.models.job import JobRun
+from app.models.site import Site
+from app.settings.crypto import SecretDecryptionError
+from app.sites.client import SiteAPIError
+
+# Статусы партии, из которых имеет смысл (пере)генерировать темы — находка №3
+# ревью Task 17. topics_pending — обычный старт; failed — ручной перезапуск
+# после починки причины отказа (например, админ вписал ключ RouterAI).
+# В обоих случаях у партии гарантированно нет ни одной Article: успешный
+# прогон добавляет Article и сразу переводит статус в topics_review одним
+# коммитом (см. generate_topics_sync ниже) — состояния «темы уже есть, но
+# статус ещё topics_pending/failed» в этом коде не возникает.
+_TOPICS_RUNNABLE_STATUSES = ("topics_pending", "failed")
+
+
+def _start_job(db, kind: str, site_id: int | None, created_by_id: int | None,
+               params: dict) -> JobRun:
+    job = JobRun(kind=kind, site_id=site_id, created_by_id=created_by_id,
+                 params_json=params, status="running")
+    db.add(job)
+    db.commit()
+    return job
+
+
+def _finish_job(db, job: JobRun, status: str, log: str = "") -> None:
+    job.status = status
+    job.log_text = log
+    job.finished_at = utcnow()
+    db.commit()
+
+
+# --- генерация тем ---
+
+def generate_topics_sync(db, batch_id: int) -> None:
+    batch = db.get(ArticleBatch, batch_id)
+
+    # Находка №3 ревью Task 17: без этой проверки повторная постановка той же
+    # задачи (сетевой ретрай брокера, дубль клика до появления защиты на
+    # уровне API в Task 18) заново сходит в платную модель и ЗАНОВО добавит
+    # все kept-темы как новые Article, задублировав их — ArticleBatch.articles
+    # просто растёт с каждым повтором. run_batch_sync защищена по каждой
+    # статье (`if article.status == "published": continue`); здесь такой же
+    # природы защита нужна на уровне всей партии целиком — тихий выход, а не
+    # исключение: тот же стиль, что и пропуск опубликованной статьи ниже.
+    if batch.status not in _TOPICS_RUNNABLE_STATUSES:
+        return
+
+    # db.get(Site, None) не вызываем: SQLAlchemy предупреждает про поиск по
+    # заведомо NULL первичному ключу ("fully NULL primary key identity cannot
+    # load any object") — batch.site_id уже может быть NULL сам по себе
+    # (нашли этот же случай, что и ниже), незачем ходить в БД, чтобы узнать
+    # то, что уже известно из самого значения site_id.
+    site = db.get(Site, batch.site_id) if batch.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: site_id nullable, ON DELETE SET NULL
+        # (Task 14) — сайт партии могли удалить между постановкой задачи в
+        # очередь и её реальным запуском. Без этой проверки следующая строка
+        # (site.id) уронила бы задачу необработанным AttributeError, и
+        # партия осталась бы в topics_pending навсегда — молча.
+        batch.status = "failed"
+        batch.error_text = "сайт этой партии удалён — генерация тем невозможна"
+        db.commit()
+        job = _start_job(db, "generate_topics", None, batch.created_by_id,
+                         {"batch_id": batch_id, "count": batch.requested_count})
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
+    job = _start_job(db, "generate_topics", site.id, batch.created_by_id,
+                     {"batch_id": batch_id, "count": batch.requested_count})
+    try:
+        existing = [p.get("title", "") for p in
+                    open_site_client(db, site).list_section_pages(site.articles_url_prefix)]
+        template = resolve_prompt(db, "topics", site.id)
+        prompt = render_prompt(template, {
+            "count": batch.requested_count,
+            "site_name": site.name,
+            "site_description": site.site_description,
+            "tone_of_voice": site.tone_of_voice,
+            "existing_titles": existing,
+        })
+        result = build_text_client(db).complete_json(prompt)
+        if not isinstance(result.data, list):
+            raise LLMError("модель вернула не массив тем")
+
+        proposed = [str(t).strip() for t in result.data if str(t).strip()]
+        kept, dropped = filter_duplicates(proposed, existing)
+        for topic in kept:
+            db.add(Article(batch_id=batch.id, site_id=site.id, topic=topic))
+        batch.status = "topics_review"
+        db.commit()
+        _finish_job(db, job, "ok",
+                    f"предложено {len(proposed)}, отсеяно дублей {len(dropped)}, "
+                    f"принято {len(kept)}")
+    # Находка №1 ревью Task 17: AIConfigError (Task 13, app/ai/factory.py) не
+    # входила в этот список — она моложе исходного except-списка. Без неё
+    # build_text_client(db) при незаполненном ключе RouterAI (или неверном
+    # ENCRYPTION_KEY) ронял всю задачу необработанным исключением, а
+    # ArticleBatch/JobRun оставались в "running"/topics_pending навсегда —
+    # админ не увидел бы причину нигде, кроме логов воркера. SecretDecryptionError
+    # здесь ловит тот же класс ошибки конфигурации со стороны SiteClient
+    # (list_section_pages), а не только RouterAI.
+    except (LLMError, PromptError, SiteAPIError, SecretDecryptionError,
+            AIConfigError, SoftTimeLimitExceeded) as exc:
+        batch.status = "failed"
+        batch.error_text = str(exc) or "превышен лимит времени задачи"
+        db.commit()
+        _finish_job(db, job, "failed", str(exc) or "превышен лимит времени задачи")
+
+
+@celery_app.task(name="app.tasks.generate_topics")
+def generate_topics(batch_id: int) -> None:
+    db = SessionLocal()
+    try:
+        generate_topics_sync(db, batch_id)
+    finally:
+        db.close()
+
+
+# --- сборка партии ---
+
+def run_batch_sync(db, batch_id: int) -> None:
+    batch = db.get(ArticleBatch, batch_id)
+    site = db.get(Site, batch.site_id) if batch.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: см. тот же аргумент в generate_topics_sync
+        # выше. Проверка стоит до `batch.status = "running"`, чтобы партия не
+        # проходила через бессмысленный промежуточный статус "running" на пути
+        # к "failed", когда заранее известно, что собирать нечем.
+        batch.status = "failed"
+        batch.error_text = "сайт этой партии удалён — сборка статей невозможна"
+        db.commit()
+        job = _start_job(db, "run_batch", None, batch.created_by_id,
+                         {"batch_id": batch_id, "articles": len(batch.articles)})
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
+    batch.status = "running"
+    db.commit()
+
+    job = _start_job(db, "run_batch", site.id, batch.created_by_id,
+                     {"batch_id": batch_id, "articles": len(batch.articles)})
+
+    try:
+        # Находка №1 ревью Task 17: раньше `site_client = open_site_client(...)`
+        # стоял ДО try — необработанный SecretDecryptionError (токен сайта
+        # расшифрован другим ENCRYPTION_KEY) ронял задачу, а партия оставалась
+        # в "running" навсегда. Перенесено внутрь try вместе с циклом.
+        site_client = open_site_client(db, site)
+        for article in batch.articles:
+            if article.status == "published":
+                continue
+            # Падение одной статьи не должно отменять остальные: билдер сам
+            # пишет причину в error_text и оставляет статью в failed.
+            build_for(db, article, site, site_client, job.id)
+            db.commit()
+    except SoftTimeLimitExceeded:
+        # Лимит вычисляется от числа статей (см. Task 18), так что сюда мы
+        # попадаем только при реально зависшей партии. Уже опубликованные
+        # статьи остаются опубликованными — их пропустит `continue` при
+        # повторном запуске; помечаем партию, чтобы она не висела в "running".
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "failed"
+        batch.error_text = (f"превышен лимит времени партии, готово "
+                            f"{done}/{len(batch.articles)}")
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        # Находка №1 ревью Task 17: AIConfigError долетает сюда либо из
+        # open_site_client (SecretDecryptionError) выше, либо изнутри
+        # build_for → build_for() (Task 16, app/articles/builder.py) собирает
+        # клиентов RouterAI ДО входа в собственный try — см. её докстринг.
+        # Это ошибка конфигурации панели, ОДНА И ТА ЖЕ для всех статей партии
+        # (ключ либо задан, либо нет), а не отказ, специфичный для конкретной
+        # статьи — поэтому она обрывает партию целиком, а не просто эту
+        # статью, в отличие от LLMError/ImageError/SiteAPIError, с которыми
+        # build_for() справляется сам и никогда их наружу не отдаёт.
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "failed"
+        batch.error_text = f"{exc}; готово {done}/{len(batch.articles)}"
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
+    batch.status = "done"
+    db.commit()
+    failed = [a for a in batch.articles if a.status == "failed"]
+    _finish_job(db, job, "ok" if not failed else "failed",
+                f"готово {len(batch.articles) - len(failed)}/{len(batch.articles)}")
+
+
+@celery_app.task(name="app.tasks.run_batch")
+def run_batch(batch_id: int) -> None:
+    db = SessionLocal()
+    try:
+        run_batch_sync(db, batch_id)
+    finally:
+        db.close()
+
+
+# --- повтор одной статьи ---
+
+def retry_article_sync(db, article_id: int) -> None:
+    article = db.get(Article, article_id)
+    site = db.get(Site, article.site_id) if article.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17: та же ситуация, что и у партии, — сайт
+        # статьи мог быть удалён между постановкой задачи и её запуском.
+        article.status = "failed"
+        article.error_text = "сайт этой статьи удалён — повтор невозможен"
+        db.commit()
+        job = _start_job(db, "retry_article", None, None, {"article_id": article_id})
+        _finish_job(db, job, "failed", article.error_text)
+        return
+
+    job = _start_job(db, "retry_article", site.id, None, {"article_id": article_id})
+    try:
+        build_for(db, article, site, open_site_client(db, site), job.id)
+    except SoftTimeLimitExceeded:
+        article.status = "failed"
+        article.error_text = "превышен лимит времени задачи"
+        db.commit()
+        _finish_job(db, job, "failed", article.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        # Находка №1 ревью Task 17: см. подробный комментарий в run_batch_sync
+        # выше — тот же класс ошибки, тот же непойманный путь без этого except.
+        article.status = "failed"
+        article.error_text = str(exc)
+        db.commit()
+        _finish_job(db, job, "failed", str(exc))
+        return
+
+    db.commit()
+    _finish_job(db, job, "ok" if article.status == "published" else "failed",
+                article.error_text)
+
+
+@celery_app.task(name="app.tasks.retry_article")
+def retry_article(article_id: int) -> None:
+    db = SessionLocal()
+    try:
+        retry_article_sync(db, article_id)
+    finally:
+        db.close()

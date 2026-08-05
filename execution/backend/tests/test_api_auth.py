@@ -1,3 +1,9 @@
+from fastapi.testclient import TestClient
+
+from app.api.deps import get_db
+from app.main import app
+
+
 def test_login_sets_cookie(client, admin):
     resp = client.post("/api/auth/login",
                        data={"username": "admin@k1.ru", "password": "adminpass"})
@@ -68,3 +74,47 @@ def test_require_role_rejects_unauthenticated_with_401_not_403(client, admin_onl
     существования тому, кто вообще не прошёл аутентификацию."""
     resp = client.get(admin_only_route)
     assert resp.status_code == 401
+
+
+def test_login_is_case_insensitive_and_trims_whitespace(client, admin):
+    """Колонка email в БД регистрозависима (миграция ради этого сейчас
+    избыточна), поэтому нормализация — на входе в login(). Без неё админ,
+    набравший почту в регистре из своего почтового клиента, не мог бы войти,
+    без самовосстановления — только shell в контейнер."""
+    resp = client.post("/api/auth/login",
+                       data={"username": "  Admin@K1.Ru  ", "password": "adminpass"})
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "admin@k1.ru"
+
+
+def test_logout_clears_cookie(admin_client):
+    resp = admin_client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert admin_client.get("/api/auth/me").status_code == 401
+
+
+def test_health_ok_when_db_reachable(client):
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_health_reports_db_failure(client):
+    """DEPLOY.md (Task 26) использует /api/health как единственную дымовую
+    проверку после выкладки — она обязана уметь сказать "нет", если БД
+    недоступна, а не врать {"status": "ok"} как раньше (статический ответ)."""
+    def _broken_db():
+        raise RuntimeError("симуляция недоступной БД")
+        yield  # pragma: no cover - никогда не достигается
+
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = _broken_db
+    try:
+        with TestClient(app, raise_server_exceptions=False) as broken:
+            resp = broken.get("/api/health")
+        assert resp.status_code == 500
+    finally:
+        if previous_override is not None:
+            app.dependency_overrides[get_db] = previous_override
+        else:
+            app.dependency_overrides.pop(get_db, None)

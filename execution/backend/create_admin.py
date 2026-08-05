@@ -15,12 +15,27 @@ from app.models.user import User
 
 
 def main() -> None:
-    email = input("Email: ").strip()
+    # .lower() зеркалит нормализацию в app/api/auth.py:login — без неё
+    # admin, созданный с любой заглавной буквой в почте, не сможет войти:
+    # колонка email регистрозависима, а почтовый клиент показывает и
+    # подставляет адрес как ему вздумается.
+    email = input("Email: ").strip().lower()
     full_name = input("Имя: ").strip()
+    if not email:
+        print("Email не может быть пустым")
+        sys.exit(1)
+    if not full_name:
+        print("Имя не может быть пустым")
+        sys.exit(1)
     password = getpass.getpass("Пароль: ")
     if getpass.getpass("Пароль ещё раз: ") != password:
         print("Пароли не совпадают")
         sys.exit(1)
+    # Нижняя граница — в символах (len() строки), верхняя (BCRYPT_MAX_BYTES в
+    # hash_password) — в байтах UTF-8. Сегодня это безвредно: даже 8 символов
+    # из четырёхбайтовых code point'ов — это 32 байта, всё ещё далеко от 72.
+    # Но единицы разные, и рядом стоящие проверки в разных единицах —
+    # приглашение перепутать их при будущей правке нижней границы.
     if len(password) < 8:
         print("Пароль короче 8 символов")
         sys.exit(1)

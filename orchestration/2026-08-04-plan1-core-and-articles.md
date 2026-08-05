@@ -859,7 +859,13 @@ BCRYPT_MAX_BYTES = 72
 def hash_password(password: str) -> str:
     if len(password.encode()) > BCRYPT_MAX_BYTES:
         raise ValueError(f"пароль длиннее {BCRYPT_MAX_BYTES} байт")
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    # Cost зафиксирован явно (12), а не оставлен на дефолт bcrypt.gensalt():
+    # _DUMMY_HASH в app/api/auth.py считается один раз при импорте и должен
+    # оставаться неотличимым по времени от хешей реальных пользователей.
+    # Если библиотека когда-нибудь сменит дефолтный cost, у уже сохранённых
+    # в БД хешей (cost 12) и у свежего dummy-хеша (новый дефолт) разойдётся
+    # время bcrypt.checkpw — и тайминг-защита сломается молча.
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -965,6 +971,7 @@ git commit -m "feat: хеширование паролей и JWT"
 - Create: `execution/backend/create_admin.py`
 - Modify: `execution/backend/tests/conftest.py` (дополнить фикстурами для API; `db_session` там уже есть — создан в Task 2)
 - Test: `execution/backend/tests/test_api_auth.py`
+- Test: `execution/backend/tests/test_api_deps.py` (добавлен при ревью — юнит-тест на `get_db` напрямую, см. Step 1)
 
 - [x] **Step 1: Фикстуры для тестов API**
 
@@ -985,15 +992,17 @@ in-memory SQLite. Здесь он дополняется, а не создаёт
 import contextlib
 
 import pytest
+from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import config as app_config
 from app.db import Base
 import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_role
 from app.api.security import hash_password
 from app.main import app
 from app.models.user import User
@@ -1001,6 +1010,17 @@ from app.models.user import User
 # SQLite в памяти: модельные и (позже) API-тесты проверяют поведение, а не
 # диалект БД. Postgres-специфичного SQL в моделях нет.
 TEST_URL = "sqlite:///:memory:"
+
+
+@pytest.fixture(autouse=True)
+def _jwt_secret(monkeypatch):
+    """Без этой фикстуры тесты одалживают JWT_SECRET из окружения процесса
+    (docker-compose.yml для запуска через `docker compose run`). Проверено:
+    `docker compose run --rm -e JWT_SECRET= backend pytest -q` без этой
+    фикстуры валит 5 тестов по причине, не связанной с кодом — секрет пуст,
+    `create_access_token` бросает ValueError. Фикстура автоиспользуемая, чтобы
+    не дублировать `monkeypatch.setattr` в каждом тестовом файле."""
+    monkeypatch.setattr(app_config.config, "jwt_secret", "test-secret")
 
 
 @pytest.fixture
@@ -1102,11 +1122,33 @@ def admin_only_route():
 > Task 6+; добавлен импорт `APIRouter`, `Depends` в `fastapi` и `require_role`
 > в `app.api.deps` в начале файла (см. полный текст `conftest.py`).
 
+> **Дополнение 2 (Task 4, ревью качества).** Найдено ещё две дыры:
+> 1. Тесты одалживали `JWT_SECRET` из окружения процесса (`docker-compose.yml`)
+>    — `docker compose run --rm -e JWT_SECRET= backend pytest -q` валил 5
+>    тестов по причине, не связанной с кодом. Добавлена автоиспользуемая
+>    `_jwt_secret` (см. код выше) — фиксирует секрет для всех тестов файла
+>    вне зависимости от окружения запуска.
+> 2. `conftest.py` подменяет `get_db` на `lambda: db_session` для всех
+>    API-тестов, поэтому настоящий генератор `get_db` с `try/finally:
+>    db.close()` не выполнялся ни в одном тесте — рефакторинг, потерявший
+>    `finally`, уехал бы зелёным. Добавлен отдельный файл
+>    `tests/test_api_deps.py`, гоняющий сам генератор напрямую (без FastAPI,
+>    без реальной БД — `SessionLocal` подменяется на фейковую сессию),
+>    проверяет закрытие и при обычном возврате, и при `gen.throw(...)`
+>    (так FastAPI закрывает generator-зависимости, если обработка запроса
+>    упала с исключением).
+
 - [x] **Step 2: Написать падающий тест**
 
 `execution/backend/tests/test_api_auth.py`:
 
 ```python
+from fastapi.testclient import TestClient
+
+from app.api.deps import get_db
+from app.main import app
+
+
 def test_login_sets_cookie(client, admin):
     resp = client.post("/api/auth/login",
                        data={"username": "admin@k1.ru", "password": "adminpass"})
@@ -1177,6 +1219,104 @@ def test_require_role_rejects_unauthenticated_with_401_not_403(client, admin_onl
     существования тому, кто вообще не прошёл аутентификацию."""
     resp = client.get(admin_only_route)
     assert resp.status_code == 401
+
+
+def test_login_is_case_insensitive_and_trims_whitespace(client, admin):
+    """Колонка email в БД регистрозависима (миграция ради этого сейчас
+    избыточна), поэтому нормализация — на входе в login(). Без неё админ,
+    набравший почту в регистре из своего почтового клиента, не мог бы войти,
+    без самовосстановления — только shell в контейнер."""
+    resp = client.post("/api/auth/login",
+                       data={"username": "  Admin@K1.Ru  ", "password": "adminpass"})
+    assert resp.status_code == 200
+    assert resp.json()["email"] == "admin@k1.ru"
+
+
+def test_logout_clears_cookie(admin_client):
+    resp = admin_client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert admin_client.get("/api/auth/me").status_code == 401
+
+
+def test_health_ok_when_db_reachable(client):
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_health_reports_db_failure(client):
+    """DEPLOY.md (Task 26) использует /api/health как единственную дымовую
+    проверку после выкладки — она обязана уметь сказать "нет", если БД
+    недоступна, а не врать {"status": "ok"} как раньше (статический ответ)."""
+    def _broken_db():
+        raise RuntimeError("симуляция недоступной БД")
+        yield  # pragma: no cover - никогда не достигается
+
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = _broken_db
+    try:
+        with TestClient(app, raise_server_exceptions=False) as broken:
+            resp = broken.get("/api/health")
+        assert resp.status_code == 500
+    finally:
+        if previous_override is not None:
+            app.dependency_overrides[get_db] = previous_override
+        else:
+            app.dependency_overrides.pop(get_db, None)
+```
+
+`execution/backend/tests/test_api_deps.py` (новый файл, добавлен при ревью —
+см. «Дополнение 2» выше):
+
+```python
+"""`conftest.py` подменяет `get_db` на `lambda: db_session` для всех
+API-тестов (см. `_client_for`), поэтому настоящий генератор с
+`try/finally: db.close()` не выполняется НИ В ОДНОМ тесте `test_api_auth.py`
+— рефакторинг, потерявший `finally`, уехал бы в проде зелёным. Эти тесты
+гоняют сам генератор `get_db` напрямую, без FastAPI и без реальной БД:
+`SessionLocal` подменяется на фабрику фейковой сессии, интересен только факт
+вызова `close()`.
+"""
+
+import pytest
+
+from app.api import deps
+
+
+class _FakeSession:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_get_db_closes_session_after_normal_use(monkeypatch):
+    session = _FakeSession()
+    monkeypatch.setattr(deps, "SessionLocal", lambda: session)
+
+    gen = deps.get_db()
+    yielded = next(gen)
+    assert yielded is session
+    assert session.closed is False
+
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert session.closed is True
+
+
+def test_get_db_closes_session_when_caller_raises(monkeypatch):
+    """FastAPI закрывает generator-зависимости через `gen.throw(...)`, если
+    обработка запроса упала с исключением — `finally` обязан сработать и в
+    этом случае, а не только при штатном завершении."""
+    session = _FakeSession()
+    monkeypatch.setattr(deps, "SessionLocal", lambda: session)
+
+    gen = deps.get_db()
+    next(gen)
+    with pytest.raises(ValueError):
+        gen.throw(ValueError("запрос упал"))
+    assert session.closed is True
 ```
 
 - [x] **Step 3: Запустить тест, убедиться что падает**
@@ -1283,7 +1423,15 @@ def login(
     form: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
-    user = db.scalars(select(User).where(User.email == form.username)).first()
+    # Email нормализуется на входе (не в колонке БД — она осталась
+    # регистрозависимой, миграция ради этого сейчас избыточна): без этого
+    # "Admin@K1.ru" и "admin@k1.ru" — разные пользователи для БД, и админ,
+    # набравший почту в регистре, который подставил его собственный почтовый
+    # клиент, не может войти. Самовосстановления при этом нет — только shell
+    # в контейнер. См. также create_admin.py и Task 19 (создание/правка
+    # пользователя должны нормализовать email тем же способом).
+    email = form.username.strip().lower()
+    user = db.scalars(select(User).where(User.email == email)).first()
     password_hash = user.password_hash if user and user.is_active else _DUMMY_HASH
     password_ok = verify_password(form.password, password_hash)
     if user is None or not user.is_active or not password_ok:
@@ -1292,7 +1440,14 @@ def login(
     token = create_access_token(user.id, user.role, secret=config.jwt_secret)
     response.set_cookie(
         "access_token", token,
-        httponly=True, samesite="lax", secure=config.cookie_secure,
+        # samesite="strict", а не "lax": lax — site-scoped, не origin-scoped,
+        # и приложение на соседнем поддомене того же домена (а в разработке —
+        # что угодно на другом порту localhost) всё ещё считается same-site и
+        # получит cookie в cross-origin запросах. Панель — SPA без входящих
+        # внешних ссылок, поэтому strict здесь бесплатен: первая межсайтовая
+        # навигация cookie не получит, а все запросы SPA после загрузки идут
+        # с её собственного origin и остаются same-site.
+        httponly=True, samesite="strict", secure=config.cookie_secure,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     return UserProfile(email=user.email, full_name=user.full_name, role=user.role)
@@ -1300,7 +1455,15 @@ def login(
 
 @router.post("/logout")
 def logout(response: Response):
-    response.delete_cookie("access_token")
+    # Атрибуты зеркалят set_cookie в login(): идентичность cookie для браузера
+    # — это имя+домен+путь, и delete_cookie сработал бы и без httponly/
+    # samesite/secure, но асимметрия между установкой и удалением одной и той
+    # же cookie — лишний повод для будущей путаницы при правке одного места
+    # без другого.
+    response.delete_cookie(
+        "access_token",
+        httponly=True, samesite="strict", secure=config.cookie_secure,
+    )
     return {"ok": True}
 
 
@@ -1314,9 +1477,28 @@ def me(user: User = Depends(get_current_user)):
 `execution/backend/app/main.py`:
 
 ```python
-from fastapi import FastAPI
+"""Сборка FastAPI-приложения.
+
+Два намеренных решения, зафиксированных здесь, чтобы их не «починили» при
+будущей правке:
+
+1. CORS отсутствует осознанно, не по недосмотру. И в разработке (Vite
+   проксирует `/api` на бэкенд), и в проде (nginx, Task 26) фронт и API
+   обслуживаются с одного origin — добавление `CORSMiddleware` было бы
+   регрессом, открывающим API для чтения с чужих origin.
+2. `/docs`, `/redoc`, `/openapi.json` включены по умолчанию FastAPI и не
+   отключены. Сегодня это безопасно: nginx (Task 26) проксирует наружу
+   только `location /api/`, а корневой `/` отдаёт статику SPA — сам FastAPI
+   снаружи недостижим. Если этот блок nginx когда-нибудь расширят до
+   `location /`, вся схема API станет публично перечислимой через `/docs`.
+"""
+
+from fastapi import Depends, FastAPI
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.api import auth
+from app.api.deps import get_db
 
 app = FastAPI(title="k1 content service")
 
@@ -1324,7 +1506,13 @@ app.include_router(auth.router)
 
 
 @app.get("/api/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    # Дымовая проверка после выкладки (DEPLOY.md, Task 26) полагается на этот
+    # эндпоинт как на единственный сигнал "сервис работает". Статический
+    # {"status": "ok"} отвечал бы так же и при лежащем Postgres — реальный
+    # запрос к БД превращает проверку из "жив ли uvicorn" в "работает ли
+    # сервис".
+    db.execute(text("select 1"))
     return {"status": "ok"}
 ```
 
@@ -1357,12 +1545,27 @@ from app.models.user import User
 
 
 def main() -> None:
-    email = input("Email: ").strip()
+    # .lower() зеркалит нормализацию в app/api/auth.py:login — без неё
+    # admin, созданный с любой заглавной буквой в почте, не сможет войти:
+    # колонка email регистрозависима, а почтовый клиент показывает и
+    # подставляет адрес как ему вздумается.
+    email = input("Email: ").strip().lower()
     full_name = input("Имя: ").strip()
+    if not email:
+        print("Email не может быть пустым")
+        sys.exit(1)
+    if not full_name:
+        print("Имя не может быть пустым")
+        sys.exit(1)
     password = getpass.getpass("Пароль: ")
     if getpass.getpass("Пароль ещё раз: ") != password:
         print("Пароли не совпадают")
         sys.exit(1)
+    # Нижняя граница — в символах (len() строки), верхняя (BCRYPT_MAX_BYTES в
+    # hash_password) — в байтах UTF-8. Сегодня это безвредно: даже 8 символов
+    # из четырёхбайтовых code point'ов — это 32 байта, всё ещё далеко от 72.
+    # Но единицы разные, и рядом стоящие проверки в разных единицах —
+    # приглашение перепутать их при будущей правке нижней границы.
     if len(password) < 8:
         print("Пароль короче 8 символов")
         sys.exit(1)
@@ -5788,8 +5991,13 @@ def create_user(payload: UserIn, db: Session = Depends(get_db),
         raise HTTPException(400, f"неизвестная роль: {payload.role}")
     if len(payload.password) < 8:
         raise HTTPException(422, "пароль короче 8 символов")
-    if db.scalars(select(User).where(User.email == payload.email)).first():
-        raise HTTPException(400, f"пользователь {payload.email} уже существует")
+    # Нормализация зеркалит login() и create_admin.py: колонка email
+    # регистрозависима, поэтому без .lower() «Ivan@k1.ru» и «ivan@k1.ru»
+    # завелись бы как два разных пользователя (unique=True их не различает),
+    # а войти удалось бы только тем написанием, которым создавали.
+    email = payload.email.strip().lower()
+    if db.scalars(select(User).where(User.email == email)).first():
+        raise HTTPException(400, f"пользователь {email} уже существует")
 
     try:
         password_hash = hash_password(payload.password)
@@ -5798,7 +6006,7 @@ def create_user(payload: UserIn, db: Session = Depends(get_db),
         # без перехвата это ушло бы наружу 500-й (см. app/api/security.py).
         raise HTTPException(422, str(e))
 
-    user = User(email=payload.email, full_name=payload.full_name, role=payload.role,
+    user = User(email=email, full_name=payload.full_name, role=payload.role,
                 is_active=payload.is_active,
                 password_hash=password_hash)
     db.add(user)
@@ -5821,7 +6029,15 @@ def update_user(user_id: int, payload: UserIn, db: Session = Depends(get_db),
     if losing_admin and _count_active_admins(db, exclude_id=user.id) == 0:
         raise HTTPException(400, "это последний активный администратор")
 
-    user.email = payload.email
+    # Тот же .lower(), что и в create_user — иначе правка пользователя стала бы
+    # обходным путём завести адрес в другом регистре. Занятость проверяем до
+    # присваивания: без этой проверки смена почты на чужую упала бы нарушением
+    # unique-констрейнта, то есть 500-й вместо внятного 400.
+    email = payload.email.strip().lower()
+    if email != user.email and db.scalars(select(User).where(User.email == email)).first():
+        raise HTTPException(400, f"пользователь {email} уже существует")
+
+    user.email = email
     user.full_name = payload.full_name
     user.role = payload.role
     user.is_active = payload.is_active
@@ -7500,9 +7716,26 @@ COPY --from=build /app/dist /usr/share/nginx/html
 `execution/frontend/nginx.conf`:
 
 ```nginx
+# Ограничение частоты на логин. Собственной защиты от перебора у эндпоинта
+# нет: единственный тормоз — bcrypt (~225 мс на попытку, то есть ~4 попытки
+# в секунду). Вдобавок /login работает усилителем нагрузки — из-за постоянного
+# dummy-хеша каждый запрос, верный или нет, занимает воркер на те же ~225 мс,
+# поэтому несколько десятков одновременных POST забивают контейнер. Для панели
+# на 2–3 человек 10 попыток в минуту с адреса — с большим запасом.
+limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+
 server {
     listen 80;
     client_max_body_size 20m;
+
+    # Точное совпадение (`=`) имеет приоритет над префиксным `location /api/`
+    # ниже, поэтому логин уходит сюда, а не в общий блок.
+    location = /api/auth/login {
+        limit_req zone=login burst=5 nodelay;
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
 
     location /api/ {
         proxy_pass http://api:8000;

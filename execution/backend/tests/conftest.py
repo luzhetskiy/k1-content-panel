@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import config as app_config
 from app.db import Base
 import app.models  # noqa: F401 — регистрирует все модели в Base.metadata
 
@@ -18,6 +19,17 @@ from app.models.user import User
 # SQLite в памяти: модельные и (позже) API-тесты проверяют поведение, а не
 # диалект БД. Postgres-специфичного SQL в моделях нет.
 TEST_URL = "sqlite:///:memory:"
+
+
+@pytest.fixture(autouse=True)
+def _jwt_secret(monkeypatch):
+    """Без этой фикстуры тесты одалживают JWT_SECRET из окружения процесса
+    (docker-compose.yml для запуска через `docker compose run`). Проверено:
+    `docker compose run --rm -e JWT_SECRET= backend pytest -q` без этой
+    фикстуры валит 5 тестов по причине, не связанной с кодом — секрет пуст,
+    `create_access_token` бросает ValueError. Фикстура автоиспользуемая, чтобы
+    не дублировать `monkeypatch.setattr` в каждом тестовом файле."""
+    monkeypatch.setattr(app_config.config, "jwt_secret", "test-secret")
 
 
 @pytest.fixture

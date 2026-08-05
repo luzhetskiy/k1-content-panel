@@ -34,7 +34,13 @@ BCRYPT_MAX_BYTES = 72
 def hash_password(password: str) -> str:
     if len(password.encode()) > BCRYPT_MAX_BYTES:
         raise ValueError(f"пароль длиннее {BCRYPT_MAX_BYTES} байт")
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    # Cost зафиксирован явно (12), а не оставлен на дефолт bcrypt.gensalt():
+    # _DUMMY_HASH в app/api/auth.py считается один раз при импорте и должен
+    # оставаться неотличимым по времени от хешей реальных пользователей.
+    # Если библиотека когда-нибудь сменит дефолтный cost, у уже сохранённых
+    # в БД хешей (cost 12) и у свежего dummy-хеша (новый дефолт) разойдётся
+    # время bcrypt.checkpw — и тайминг-защита сломается молча.
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
 
 
 def verify_password(password: str, password_hash: str) -> bool:

@@ -4354,6 +4354,15 @@ def create_site(payload: SiteIn, db: Session = Depends(get_db),
 def update_site(site_id: int, payload: SiteIn, db: Session = Depends(get_db),
                 _user: User = Depends(require_role("admin"))):
     site = _get_or_404(db, site_id)
+    # Та же проверка, что и в create_site, и по той же причине: домен
+    # нормализуется валидатором модели, поэтому сравнивать надо нормализованное
+    # значение. Без проверки смена домена на уже занятый роняет уникальный
+    # индекс необработанным IntegrityError — 500 вместо внятного 400.
+    domain = (payload.domain or "").strip().lower()
+    clash = db.scalars(
+        select(Site).where(Site.domain == domain, Site.id != site.id)).first()
+    if clash:
+        raise HTTPException(400, f"сайт {domain} уже заведён")
     _apply(site, payload)
     db.commit()
     return _to_out(site)

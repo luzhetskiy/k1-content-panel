@@ -15,20 +15,44 @@ def _service(db: Session) -> SettingsService:
     return SettingsService(db, config.encryption_key)
 
 
-@router.get("")
-def read_settings(db: Session = Depends(get_db),
-                  _user: User = Depends(require_role("admin"))) -> dict:
-    seed_settings(db)
+def _current_settings(db: Session) -> dict:
+    """Собирает текущие настройки в ответ. Не вызывает seed_settings — тот
+    вызывается ровно один раз за GET из read_settings, а не отсюда: PUT
+    зовёт эту функцию после своего единственного коммита, и повторное
+    наполнение дефолтов со своим отдельным commit() внутри было бы лишней
+    точкой отказа поверх уже сохранённых изменений (если бы оно упало,
+    клиент получил бы 500, хотя запрошенные им изменения уже записаны)."""
     service = _service(db)
     result = {key: service.get_str(key, default) for key, default in DEFAULT_SETTINGS.items()}
+    errors: dict[str, str] = {}
     for key in SECRET_KEYS:
         try:
             value = service.get_secret(key)
         except SecretDecryptionError as exc:
-            result[key] = f"ОШИБКА: {exc}"
+            # Пустая строка, а не текст ошибки: это же поле уходит через PUT
+            # обратно как «новое значение», если фронт когда-нибудь пришлёт
+            # форму целиком, — а любая непустая строка в этом поле
+            # шифруется и сохраняется как настоящий секрет (см. PUT ниже).
+            # Раньше сюда клали f"ОШИБКА: {exc}" — при round-trip GET → PUT
+            # это необратимо затирало настоящий ключ текстом диагностики.
+            # Пустая строка уже означает «не менять» по контракту PUT, так
+            # что round-trip перестаёт быть разрушительным по построению.
+            # Сама диагностика уходит в отдельный ключ _errors, откуда её
+            # точно не отправят обратно как значение.
+            result[key] = ""
+            errors[key] = str(exc)
             continue
         result[key] = mask(value) if value else ""
+    if errors:
+        result["_errors"] = errors
     return result
+
+
+@router.get("")
+def read_settings(db: Session = Depends(get_db),
+                  _user: User = Depends(require_role("admin"))) -> dict:
+    seed_settings(db)
+    return _current_settings(db)
 
 
 @router.put("")
@@ -50,8 +74,9 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
     service = _service(db)
     for key, value in payload.items():
         if key in SECRET_KEYS:
-            # Пустая строка = «не менять»: фронт получает маску, а не значение,
-            # и не может отправить секрет обратно неизменным.
+            # Пустая строка = «не менять»: фронт получает маску (или пустую
+            # строку при ошибке расшифровки — см. _current_settings), а не
+            # значение, и не может отправить секрет обратно неизменным.
             if value:
                 service.set_secret(key, str(value), commit=False)
         elif key in DEFAULT_SETTINGS:
@@ -60,4 +85,7 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
     # применяются все разом, либо ни один — иначе ошибка на середине списка
     # оставляет половину настроек изменённой, а половину нет.
     db.commit()
-    return read_settings(db, _user)
+    # _current_settings, а не read_settings(db, _user): без повторного
+    # seed_settings и без вызова функции-эндпоинта из другого эндпоинта —
+    # сборка ответа отделена от наполнения дефолтов.
+    return _current_settings(db)

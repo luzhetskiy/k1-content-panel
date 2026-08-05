@@ -2,6 +2,7 @@
 записи не перезаписываются — отредактированный в админке промпт переживает
 перезапуск сервиса."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.setting import Setting
@@ -30,4 +31,21 @@ def seed_settings(db: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
         if db.get(Setting, key) is None:
             db.add(Setting(key=key, value=value, is_secret=False))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Конкурентный seed_settings: вызывается на каждом GET
+        # /api/admin/settings, так что два админа, открывшие страницу
+        # настроек на пустой БД одновременно, оба проходят SELECT-фазу
+        # (видят пусто) раньше, чем кто-то из них коммитит — тот же класс
+        # гонки, что чинили в Task 5 для SettingsService._upsert. Один из
+        # них коммитит первым и захватывает часть или все дефолтные ключи;
+        # наш commit() ловит конфликт первичного ключа. Откатываем и
+        # смотрим заново: то, что конкурент уже вставил, теперь видно и не
+        # добавляется повторно (идемпотентность), то, что всё ещё
+        # отсутствует — довставляем и коммитим один раз.
+        db.rollback()
+        for key, value in DEFAULT_SETTINGS.items():
+            if db.get(Setting, key) is None:
+                db.add(Setting(key=key, value=value, is_secret=False))
+        db.commit()

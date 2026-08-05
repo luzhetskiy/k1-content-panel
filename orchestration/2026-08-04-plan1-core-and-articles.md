@@ -2089,6 +2089,120 @@ def test_invalid_int_setting_rejected(admin_client):
     (Task 8), где её уже никто не увидит."""
     resp = admin_client.put("/api/admin/settings", json={"image_workers": ""})
     assert resp.status_code == 422
+
+
+def test_secret_decryption_error_returns_empty_value_and_errors_key(admin_client, db_session):
+    """Если ENCRYPTION_KEY сменили после того, как секрет сохранён старым
+    ключом, get_secret бросает SecretDecryptionError. Поле секрета обязано
+    остаться пустым (безопасно для round-trip в PUT — пустая строка значит
+    «не менять»), а диагностика уходит в отдельный ключ _errors, откуда её
+    точно не отправят обратно как значение."""
+    from cryptography.fernet import Fernet
+
+    from app.config import config
+
+    admin_client.put("/api/admin/settings", json={"routerai_api_key": "sk-super-secret-value"})
+
+    original_key = config.encryption_key
+    config.encryption_key = Fernet.generate_key().decode()
+    try:
+        body = admin_client.get("/api/admin/settings").json()
+    finally:
+        config.encryption_key = original_key
+
+    assert body["routerai_api_key"] == ""
+    assert "routerai_api_key" in body["_errors"]
+
+
+def test_get_response_echoed_back_does_not_overwrite_secret(admin_client, db_session):
+    """Регрессия на найденный сценарий потери данных: раньше GET при чужом
+    ENCRYPTION_KEY клал в поле секрета текст ошибки («ОШИБКА: ...»), и если
+    фронт отправлял ответ GET целиком обратно в PUT (обычный паттерн «сохранить
+    всю форму»), этот текст шифровался поверх настоящего ключа — и уже
+    ничем не восстанавливался, даже возвратом правильного ENCRYPTION_KEY."""
+    from cryptography.fernet import Fernet
+
+    from app.config import config
+    from app.settings.service import SettingsService
+
+    admin_client.put("/api/admin/settings", json={"routerai_api_key": "sk-super-secret-value"})
+
+    original_key = config.encryption_key
+    config.encryption_key = Fernet.generate_key().decode()
+    try:
+        body = admin_client.get("/api/admin/settings").json()
+        admin_client.put("/api/admin/settings", json=body)
+    finally:
+        config.encryption_key = original_key
+
+    service = SettingsService(db_session, config.encryption_key)
+    assert service.get_secret("routerai_api_key") == "sk-super-secret-value"
+
+
+def test_seed_settings_retries_once_on_concurrent_insert(db_session, monkeypatch):
+    """seed_settings пишет через db.add напрямую, минуя защищённый от гонки
+    SettingsService._upsert, и вызывается на каждом GET — тот же класс
+    гонки, что чинили в Task 5, но здесь без защиты. Симулируем конкурента,
+    вставившего и закоммитившего одну из дефолтных настроек первым (между
+    нашим SELECT-проходом и commit()): наш commit() обязан поймать конфликт
+    первичного ключа, откатиться и повторить один раз, а не отдать наружу
+    голый IntegrityError (→ 500 у одного из двух админов, открывших
+    страницу настроек одновременно на пустой БД)."""
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.setting import Setting
+    from app.seed import DEFAULT_SETTINGS, seed_settings
+
+    real_commit = db_session.commit
+    calls = {"n": 0}
+
+    def flaky_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Конкурент реально занимает строку в БД первым, прежде чем наш
+            # собственный commit() (уже пытающийся вставить ту же строку)
+            # получит отказ по PK.
+            db_session.rollback()
+            db_session.execute(
+                text(
+                    "INSERT INTO settings (key, value, is_secret) "
+                    "VALUES ('text_model', 'concurrent-value', 0)"
+                )
+            )
+            real_commit()
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+        real_commit()
+
+    monkeypatch.setattr(db_session, "commit", flaky_commit)
+
+    seed_settings(db_session)
+
+    assert calls["n"] == 2
+    # Конкурентно вставленное значение не перезаписывается — идемпотентность
+    # seed_settings сохраняется и на повторе после гонки.
+    assert db_session.get(Setting, "text_model").value == "concurrent-value"
+    for key, value in DEFAULT_SETTINGS.items():
+        if key == "text_model":
+            continue
+        assert db_session.get(Setting, key).value == value
+
+
+def test_put_does_not_call_seed_settings_again(admin_client, monkeypatch):
+    """PUT собирает ответ через отдельную от GET функцию и не должен зависеть
+    от повторного наполнения дефолтов (со своим отдельным commit() внутри
+    seed_settings) — иначе сбой в этом наполнении превращает уже сохранённые
+    изменения в ложный 500 у клиента, хотя сам payload уже записан."""
+    import app.api.admin_settings as admin_settings_module
+
+    def boom(db):
+        raise RuntimeError("seed_settings не должен вызываться из PUT")
+
+    monkeypatch.setattr(admin_settings_module, "seed_settings", boom)
+
+    resp = admin_client.put("/api/admin/settings", json={"image_workers": "6"})
+    assert resp.status_code == 200
+    assert resp.json()["image_workers"] == "6"
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -2105,6 +2219,7 @@ Expected: FAIL — 404 на `/api/admin/settings`
 записи не перезаписываются — отредактированный в админке промпт переживает
 перезапуск сервиса."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.setting import Setting
@@ -2133,7 +2248,24 @@ def seed_settings(db: Session) -> None:
     for key, value in DEFAULT_SETTINGS.items():
         if db.get(Setting, key) is None:
             db.add(Setting(key=key, value=value, is_secret=False))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Конкурентный seed_settings: вызывается на каждом GET
+        # /api/admin/settings, так что два админа, открывшие страницу
+        # настроек на пустой БД одновременно, оба проходят SELECT-фазу
+        # (видят пусто) раньше, чем кто-то из них коммитит — тот же класс
+        # гонки, что чинили в Task 5 для SettingsService._upsert. Один из
+        # них коммитит первым и захватывает часть или все дефолтные ключи;
+        # наш commit() ловит конфликт первичного ключа. Откатываем и
+        # смотрим заново: то, что конкурент уже вставил, теперь видно и не
+        # добавляется повторно (идемпотентность), то, что всё ещё
+        # отсутствует — довставляем и коммитим один раз.
+        db.rollback()
+        for key, value in DEFAULT_SETTINGS.items():
+            if db.get(Setting, key) is None:
+                db.add(Setting(key=key, value=value, is_secret=False))
+        db.commit()
 ```
 
 - [x] **Step 4: Роутер настроек**
@@ -2158,20 +2290,44 @@ def _service(db: Session) -> SettingsService:
     return SettingsService(db, config.encryption_key)
 
 
-@router.get("")
-def read_settings(db: Session = Depends(get_db),
-                  _user: User = Depends(require_role("admin"))) -> dict:
-    seed_settings(db)
+def _current_settings(db: Session) -> dict:
+    """Собирает текущие настройки в ответ. Не вызывает seed_settings — тот
+    вызывается ровно один раз за GET из read_settings, а не отсюда: PUT
+    зовёт эту функцию после своего единственного коммита, и повторное
+    наполнение дефолтов со своим отдельным commit() внутри было бы лишней
+    точкой отказа поверх уже сохранённых изменений (если бы оно упало,
+    клиент получил бы 500, хотя запрошенные им изменения уже записаны)."""
     service = _service(db)
     result = {key: service.get_str(key, default) for key, default in DEFAULT_SETTINGS.items()}
+    errors: dict[str, str] = {}
     for key in SECRET_KEYS:
         try:
             value = service.get_secret(key)
         except SecretDecryptionError as exc:
-            result[key] = f"ОШИБКА: {exc}"
+            # Пустая строка, а не текст ошибки: это же поле уходит через PUT
+            # обратно как «новое значение», если фронт когда-нибудь пришлёт
+            # форму целиком, — а любая непустая строка в этом поле
+            # шифруется и сохраняется как настоящий секрет (см. PUT ниже).
+            # Раньше сюда клали f"ОШИБКА: {exc}" — при round-trip GET → PUT
+            # это необратимо затирало настоящий ключ текстом диагностики.
+            # Пустая строка уже означает «не менять» по контракту PUT, так
+            # что round-trip перестаёт быть разрушительным по построению.
+            # Сама диагностика уходит в отдельный ключ _errors, откуда её
+            # точно не отправят обратно как значение.
+            result[key] = ""
+            errors[key] = str(exc)
             continue
         result[key] = mask(value) if value else ""
+    if errors:
+        result["_errors"] = errors
     return result
+
+
+@router.get("")
+def read_settings(db: Session = Depends(get_db),
+                  _user: User = Depends(require_role("admin"))) -> dict:
+    seed_settings(db)
+    return _current_settings(db)
 
 
 @router.put("")
@@ -2193,8 +2349,9 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
     service = _service(db)
     for key, value in payload.items():
         if key in SECRET_KEYS:
-            # Пустая строка = «не менять»: фронт получает маску, а не значение,
-            # и не может отправить секрет обратно неизменным.
+            # Пустая строка = «не менять»: фронт получает маску (или пустую
+            # строку при ошибке расшифровки — см. _current_settings), а не
+            # значение, и не может отправить секрет обратно неизменным.
             if value:
                 service.set_secret(key, str(value), commit=False)
         elif key in DEFAULT_SETTINGS:
@@ -2203,7 +2360,10 @@ def update_settings(payload: dict, db: Session = Depends(get_db),
     # применяются все разом, либо ни один — иначе ошибка на середине списка
     # оставляет половину настроек изменённой, а половину нет.
     db.commit()
-    return read_settings(db, _user)
+    # _current_settings, а не read_settings(db, _user): без повторного
+    # seed_settings и без вызова функции-эндпоинта из другого эндпоинта —
+    # сборка ответа отделена от наполнения дефолтов.
+    return _current_settings(db)
 ```
 
 - [x] **Step 5: Подключить роутер**
@@ -2220,7 +2380,7 @@ app.include_router(admin_settings.router)
 - [x] **Step 6: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_api_admin_settings.py -v`
-Expected: PASS — 6 passed
+Expected: PASS — 10 passed
 
 - [x] **Step 7: Commit**
 
@@ -7638,6 +7798,21 @@ export default function AdminPromptsPage() {
 ```
 
 - [ ] **Step 2: Экран настроек**
+
+> Бэкенд (Task 6) отдаёт секретное поле `routerai_api_key` либо маской
+> (`sk-...alue`), либо пустой строкой — никогда как значение, пригодное для
+> повторной отправки. **Отправлять полученное от GET значение этого поля
+> обратно в PUT нельзя**: пустая строка означает «не менять», а любая
+> непустая строка будет зашифрована и сохранена как новый секрет —
+> необратимо затерев прежний ключ. Форма ниже это уже учитывает: значение
+> поля сбрасывается в `''` сразу после загрузки и после каждого сохранения
+> (`routerai_api_key: ''`), а не копируется из ответа сервера — так и
+> оставить, при рефакторинге этого экрана не убирать сброс. Если ответ GET
+> содержит ключ `_errors` (словарь «имя настройки → текст ошибки»,
+> появляется, например, при устаревшем `ENCRYPTION_KEY`) — это диагностика
+> для админа, показать её предупреждением над формой; отправлять `_errors`
+> обратно в PUT не нужно (роутер настроек и так игнорирует незнакомые ключи
+> payload, но поле не должно попадать в тело запроса намеренно).
 
 `execution/frontend/src/pages/AdminSettingsPage.tsx`:
 

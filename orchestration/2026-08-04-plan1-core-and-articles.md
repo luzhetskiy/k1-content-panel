@@ -6319,13 +6319,77 @@ git commit -m "feat: API промптов с тестовым прогоном"
 
 ### Task 14: Модели статей и журнала задач
 
+> **Дефекты, найденные при ревью (исправлены и здесь, и в коде — см. Step 3/4):**
+> 1. `ArticleBatch.site_id` и `Article.site_id` в исходном черновике плана были
+>    `NOT NULL` с `ondelete="CASCADE"`. Это противоречит уже написанному коду
+>    Task 18: `_to_out` в `app/api/article_batches.py` достаёт сайт через
+>    `db.get(Site, batch.site_id)` и подставляет `"—"`, если сайта нет —
+>    ветка, которая при `CASCADE` никогда не выполнилась бы (партия исчезла
+>    бы вместе с сайтом раньше, чем кто-то увидел бы `"—"`). Удаление сайта
+>    (`delete_site`, Task 11, уже в проде) с `CASCADE` тихо стёрло бы всю
+>    историю опубликованных статей — `remote_url`/`remote_page_id` это
+>    единственная запись о том, что реально было выложено на сайте. Исправлено
+>    на `nullable=True` + `ondelete="SET NULL"`, симметрично `JobRun.site_id`.
+>    Проверено эмпирически на живом Postgres (миграция `e25842d72da3`
+>    применена): `DELETE FROM sites` оставляет строки `article_batches` и
+>    `articles` на месте с `site_id = NULL`, `remote_page_id`/`remote_url`
+>    сохранены.
+> 2. `ArticleImage.kind` — добавлен `CheckConstraint("kind IN ('cover',
+>    'content')")`. `kind` used как literal в `app/articles/builder.py`
+>    (Task 16), опечатка в нём привела бы не к явной ошибке, а к
+>    необработанному `StopIteration` несколькими шагами дальше
+>    (`_upload_content_images`: `next(i for i in article.images if i.kind ==
+>    "content" ...)`). Проверено эмпирически на Postgres: `INSERT ... kind =
+>    'banner'` падает с `CheckViolation` на самом INSERT.
+> 3. `Article.slug` — добавлен частичный уникальный индекс `(site_id, slug)
+>    WHERE slug != ''` (тот же приём, что и `uq_prompt_key_global` в
+>    `prompt_template.py`, Task 12). Живая проверка перед публикацией
+>    (`_guard_duplicate_url`, Task 16) спрашивает сам сайт и не защищает от
+>    гонки внутри своей же партии, если список страниц сайта кэширован или
+>    eventually-consistent. Частичность обязательна: черновики до сборки
+>    хранят `slug=""` по умолчанию, и в одной партии их одновременно
+>    несколько (`test_batch_articles_relationship`) — сквозной
+>    `UniqueConstraint` запретил бы вторую тему в партии. Проверено
+>    эмпирически на Postgres: дубль `(site_id, slug)` с непустым slug падает
+>    с `duplicate key value violates unique constraint`, два черновика с
+>    `slug=""` в одном сайте и одинаковый slug на разных сайтах — проходят.
+> 4. `Article.batch_id`, `ArticleImage.article_id`, `LlmUsage.job_run_id` —
+>    добавлен `index=True`. Обоснование по факту использования в уже
+>    написанном коде дальше по плану, не «на всякий случай»: `batch.articles`
+>    (фильтр по `batch_id`) выполняется на каждый показ партии (Task 18
+>    `read_batch`/`_to_out`, Task 17 `run_batch_sync`, Task 16 тесты);
+>    `article.images` (фильтр по `article_id`) — на каждую загрузку картинки
+>    статьи (Task 16 `_upload_content_images`); `job.usage` (фильтр по
+>    `job_run_id`) — на каждую строку журнала на `/api/jobs` (Task 18
+>    `list_jobs`, N+1 по конструкции). Ни `Article.site_id`, ни
+>    `ArticleBatch.site_id`, ни `JobRun.site_id` индекс не получили — по
+>    всему плану (Tasks 15–18, 22–23) они используются только как аргумент
+>    `db.get(Site, ...)` (PK-поиск сайта), ни разу как `WHERE` по таблице
+>    статей/партий/джобов.
+>
+> Остальные найденные вопросы решены без изменения кода (см. комментарии в
+> `app/models/job.py`): `JobRun.status="running"` по умолчанию — осознанно
+> (запись создаётся уже из тела запущенной Celery-задачи, а не до постановки
+> в очередь, так что «никогда не стартовавшего running» не бывает; риск
+> «стартовал и не досчитал» из-за убитого процесса остаётся, но `started_at`
+> уже достаточен, чтобы такие записи находить запросом — предмет будущего
+> экрана журнала, не этой задачи). `LlmUsage.cost`/`ArticleImage.cost`
+> остаются `float` (источник данных сам float), но при суммировании в Task 18
+> (`sum(u.cost for u in job.usage)`) отображаемое значение нужно округлять
+> (`round(x, 2)`) — иначе на экране может появиться `5.399999999999999`.
+> Секретов в `params_json`/`log_text` не обнаружено: все вызовы `_start_job`
+> в Task 17 передают только `batch_id`/`count`/`article_id`, а текст ошибок
+> (`str(exc)`) — это `response.text[:300]` с чужого сайта или сообщение
+> `LLMError`/`ImageError`, ни то ни другое не включает `api_token`/ключ
+> RouterAI по коду в `app/sites/client.py`, `app/ai/text.py`, `app/ai/images.py`.
+
 **Files:**
 - Create: `execution/backend/app/models/article.py`
 - Create: `execution/backend/app/models/job.py`
-- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `ArticleBatch`, `Article`, `ArticleImage`, `JobRun`)
+- Modify: `execution/backend/app/models/__init__.py` (зарегистрировать `ArticleBatch`, `Article`, `ArticleImage`, `JobRun`, `LlmUsage`)
 - Test: `execution/backend/tests/test_models_article.py`
 
-- [ ] **Step 1: Написать падающий тест**
+- [x] **Step 1: Написать падающий тест**
 
 `execution/backend/tests/test_models_article.py`:
 
@@ -6399,21 +6463,110 @@ def test_llm_usage_links_to_job(db_session):
     db_session.commit()
     db_session.refresh(job)
     assert job.usage[0].cost == 5.4
+
+
+# --- дополнительные тесты: структурные решения, найденные при ревью плана ---
+
+
+def test_article_image_kind_rejects_unknown_value(db_session):
+    """kind — по сути перечисление cover|content (используется как literal
+    в app/articles/builder.py, Task 16). Опечатка в этой строке в будущем
+    коде (например, при доработке Task 17) не должна тихо лечь в таблицу —
+    из неё потом читают через `next(i for i in article.images if i.kind ==
+    "content" ...)`, и непойманный из-за опечатки кадр уронит сборку статьи
+    необработанным StopIteration вместо внятной ошибки. CHECK на уровне БД
+    ловит это сразу при INSERT, а не через несколько шагов конвейера."""
+    from sqlalchemy.exc import IntegrityError
+
+    batch = ArticleBatch(site_id=1, requested_count=1, created_by_id=1)
+    db_session.add(batch)
+    db_session.commit()
+    article = Article(batch_id=batch.id, site_id=1, topic="Т")
+    db_session.add(article)
+    db_session.commit()
+    db_session.add(ArticleImage(article_id=article.id, kind="banner", position=0))
+    try:
+        db_session.commit()
+        assert False, "ожидался IntegrityError на недопустимом kind"
+    except IntegrityError:
+        db_session.rollback()
+
+
+def test_duplicate_slug_within_site_is_rejected(db_session):
+    """Два черновика с одинаковым slug на одном сайте целили бы в один и тот
+    же url (builder.py: `articles_url_prefix + slug + '/'`). Живая проверка
+    на сайте (_guard_duplicate_url, Task 16) защищает от этого только если
+    список страниц сайта уже отдаёт свежесозданную страницу — при кэширующем
+    или eventually-consistent списочном эндпоинте окно гонки есть. Частичный
+    уникальный индекс — страховка в БД, а не замена проверки на сайте."""
+    from sqlalchemy.exc import IntegrityError
+
+    batch = ArticleBatch(site_id=1, requested_count=2, created_by_id=1)
+    db_session.add(batch)
+    db_session.commit()
+    db_session.add(Article(batch_id=batch.id, site_id=1, topic="А", slug="chem-uteplit"))
+    db_session.commit()
+    db_session.add(Article(batch_id=batch.id, site_id=1, topic="Б", slug="chem-uteplit"))
+    try:
+        db_session.commit()
+        assert False, "ожидался IntegrityError на дублирующемся slug в рамках сайта"
+    except IntegrityError:
+        db_session.rollback()
+
+
+def test_empty_slug_does_not_collide_between_draft_articles(db_session):
+    """Черновики до сборки (status=draft) имеют slug="" по умолчанию — их в
+    партии может быть много одновременно (test_batch_articles_relationship).
+    Частичный индекс должен игнорировать пустую строку, иначе второй черновик
+    в партии не сохранился бы."""
+    batch = ArticleBatch(site_id=1, requested_count=2, created_by_id=1)
+    db_session.add(batch)
+    db_session.commit()
+    db_session.add_all([
+        Article(batch_id=batch.id, site_id=1, topic="А"),
+        Article(batch_id=batch.id, site_id=1, topic="Б"),
+    ])
+    db_session.commit()   # не должно бросить IntegrityError
+
+
+def test_same_slug_allowed_on_different_sites(db_session):
+    """Уникальность slug — в рамках сайта, а не глобальная: у двух разных
+    сайтов разделы независимы, совпадение url между ними — не проблема."""
+    batch1 = ArticleBatch(site_id=1, requested_count=1, created_by_id=1)
+    batch2 = ArticleBatch(site_id=2, requested_count=1, created_by_id=1)
+    db_session.add_all([batch1, batch2])
+    db_session.commit()
+    db_session.add_all([
+        Article(batch_id=batch1.id, site_id=1, topic="А", slug="odna-tema"),
+        Article(batch_id=batch2.id, site_id=2, topic="Б", slug="odna-tema"),
+    ])
+    db_session.commit()   # не должно бросить IntegrityError
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться что падает**
+- [x] **Step 2: Запустить тест, убедиться что падает**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_article.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.models.article'`
 
-- [ ] **Step 3: Модели статей**
+Фактически: подтверждено, `ModuleNotFoundError: No module named 'app.models.article'`.
+
+- [x] **Step 3: Модели статей**
 
 `execution/backend/app/models/article.py`:
 
 ```python
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.clock import utcnow
@@ -6429,7 +6582,20 @@ class ArticleBatch(Base):
     __tablename__ = "article_batches"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    # SET NULL, а не CASCADE. Партия и её статьи — это журнал того, что было
+    # реально опубликовано (remote_url/remote_page_id), а не производные от
+    # сайта данные, которые можно потерять без сожаления. Удаление сайта
+    # (delete_site, app/api/admin_sites.py, уже в проде с Task 11) не должно
+    # стирать эту историю — только оборвать ссылку на уже не существующий
+    # сайт. Это согласуется с уже написанным в Task 18 API: `_to_out`
+    # (app/api/article_batches.py) достаёт сайт через `db.get(Site,
+    # batch.site_id)` и подставляет "—", если сайта нет, — при CASCADE эта
+    # ветка была бы мёртвым кодом, потому что сама партия исчезла бы вместе
+    # с сайтом раньше, чем кто-то успел бы увидеть "—". Симметрично с
+    # JobRun.site_id (см. app/models/job.py) — обе истории переживают
+    # удаление сайта по одной и той же причине.
+    site_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sites.id", ondelete="SET NULL"), nullable=True)
     requested_count: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="topics_pending")
     error_text: Mapped[str] = mapped_column(Text, default="")
@@ -6449,10 +6615,44 @@ class Article(Base):
     """
 
     __tablename__ = "articles"
+    __table_args__ = (
+        # Страховка от двух черновиков с одинаковым url на одном сайте
+        # (url = articles_url_prefix + slug + "/", см. app/articles/builder.py).
+        # Живая проверка перед публикацией (_guard_duplicate_url, Task 16)
+        # спрашивает сам сайт и защищает от дублей с уже существующими там
+        # страницами, но не от гонки внутри нашей же партии, если список
+        # страниц сайта кэширован или eventually-consistent и не показывает
+        # только что созданную страницу. Это не замена проверке на сайте
+        # (реальная уникальность url решается на его стороне), а гарантия,
+        # что наша собственная БД не заведёт заведомо конфликтующую пару.
+        # Частичный, а не сквозной индекс — черновики до сборки хранят
+        # slug="" (default), и в одной партии их может быть много одновременно
+        # (см. test_batch_articles_relationship); сквозной UniqueConstraint
+        # запретил бы вторую тему в той же партии ещё до генерации текста.
+        # Тот же приём частичного индекса уже применён в prompt_template.py
+        # для site_id IS NULL — проверено там же: NULL/пустая строка не
+        # различаются самим собой в UNIQUE, различать их надо явным WHERE.
+        Index("uq_article_site_slug", "site_id", "slug", unique=True,
+              postgresql_where=text("slug != ''"),
+              sqlite_where=text("slug != ''")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    batch_id: Mapped[int] = mapped_column(ForeignKey("article_batches.id", ondelete="CASCADE"))
-    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("article_batches.id", ondelete="CASCADE"), index=True)
+    # Дублирует batch.site_id — намеренная денормализация, не забытая связь.
+    # retry_article_sync (Task 17, app/tasks.py) достаёт сайт статьи напрямую
+    # через `db.get(Site, article.site_id)`, не заходя в её партию: для
+    # повтора одной упавшей статьи знать партию не обязательно, а партия к
+    # моменту повтора вообще может быть архивной. Оба поля проставляются
+    # одним и тем же вызывающим кодом из одного объекта site в один момент
+    # (Task 15/17: `Article(batch_id=batch.id, site_id=site.id, ...)`),
+    # поэтому расхождение article.site_id != article.batch.site_id возможно
+    # только при ручной правке БД в обход приложения, а не в штатном потоке.
+    # SET NULL, а не CASCADE — см. комментарий у ArticleBatch.site_id выше:
+    # опубликованная статья должна остаться в истории и после удаления сайта.
+    site_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sites.id", ondelete="SET NULL"), nullable=True)
     topic: Mapped[str] = mapped_column(String(500))
     title: Mapped[str] = mapped_column(String(500), default="")
     slug: Mapped[str] = mapped_column(String(200), default="")
@@ -6472,9 +6672,25 @@ class Article(Base):
 
 class ArticleImage(Base):
     __tablename__ = "article_images"
+    __table_args__ = (
+        # kind — фактически перечисление cover|content, но хранится строкой:
+        # тип-литерал в Python (Mapped[str]) не проверяется на INSERT ни на
+        # SQLite, ни на Postgres. Опечатка в новом коде (Task 16/17 пишут
+        # buider.py как `kind="content"` литералом в нескольких местах) не
+        # всплыла бы сразу: `_upload_content_images` находит картинку через
+        # `next(i for i in article.images if i.kind == "content" ...)` —
+        # непойманная опечатка при записи привела бы к необработанному
+        # StopIteration на чтении, на несколько шагов дальше от места
+        # ошибки. CHECK ловит опечатку в момент INSERT, а не через 2 шага
+        # конвейера. Проверено эмпирически на Postgres (docker compose up -d
+        # postgres, миграция применена): INSERT с kind='banner' падает с
+        # `CheckViolation`, а не проходит молча.
+        CheckConstraint("kind IN ('cover', 'content')", name="ck_article_image_kind"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"))
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))       # cover | content
     position: Mapped[int] = mapped_column(Integer, default=0)
     prompt: Mapped[str] = mapped_column(Text, default="")
@@ -6484,7 +6700,7 @@ class ArticleImage(Base):
     article: Mapped["Article"] = relationship(back_populates="images")
 ```
 
-- [ ] **Step 4: Модели журнала**
+- [x] **Step 4: Модели журнала**
 
 `execution/backend/app/models/job.py`:
 
@@ -6505,12 +6721,38 @@ JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 
 class JobRun(Base):
-    """Журнал фоновых задач: кто, что, когда и чем кончилось."""
+    """Журнал фоновых задач: кто, что, когда и чем кончилось.
+
+    status по умолчанию "running", а не "pending" — единственная модель в
+    проекте с таким дефолтом. Это осознанно: JobRun создаётся уже внутри
+    Celery-задачи, которая начала выполняться (см. _start_job в Task 17,
+    app/tasks.py — вызывается из generate_topics_sync/run_batch_sync/
+    retry_article_sync, то есть из тела уже запущенной задачи, а не перед
+    постановкой в очередь). Если брокер недоступен, `.delay()`/`apply_async()`
+    в API (Task 18) бросит исключение ДО того, как строка JobRun вообще
+    появится, — то есть зависшего "running", который никогда не стартовал,
+    таким путём не возникает.
+    Остаточный риск — не «никогда не стартовавшая» запись, а «стартовавшая и
+    не досчитавшая до конца»: воркер убит по OOM или SIGKILL, потеряно
+    соединение с БД внутри `except` до commit — в этих случаях JobRun
+    останется в "running" навсегда, потому что `_finish_job` не будет вызван.
+    Обработчик SoftTimeLimitExceeded в tasks.py закрывает мягкий случай
+    (истечение времени), но не жёсткий сбой процесса. Схема уже даёт всё
+    нужное для обнаружения зависших записей без изменений: `started_at`
+    есть у каждой JobRun, и запрос вида `status='running' AND started_at <
+    now() - interval` находит их без дополнительного поля. Это не чинится
+    в Task 14 — отмечено как риск для будущего экрана журнала задач
+    (Task 18/23): такой запрос там нужно предусмотреть, а не изобретать поле.
+    """
 
     __tablename__ = "job_runs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(String(50))       # generate_topics | build_article
+    # SET NULL: журнал расходов и логов должен пережить удаление сайта —
+    # это операционная история/costs, ценность которой не привязана к тому,
+    # заведён ли ещё сам сайт в панели. См. тот же выбор и то же обоснование
+    # у ArticleBatch.site_id и Article.site_id (app/models/article.py).
     site_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("sites.id", ondelete="SET NULL"), nullable=True)
     params_json: Mapped[dict] = mapped_column(JsonType, default=dict)
@@ -6528,12 +6770,28 @@ class JobRun(Base):
 
 class LlmUsage(Base):
     """Расход RouterAI. Картинка в качестве high стоит ≈16.8 единицы —
-    расход надо видеть до того, как он станет сюрпризом."""
+    расход надо видеть до того, как он станет сюрпризом.
+
+    cost — float, не Decimal: источник данных сам float (TextResult.cost,
+    ImageResult.cost в app/ai/text.py и app/ai/images.py приходят из ответа
+    RouterAI как float), так что Decimal здесь дал бы ложную точность без
+    исправления источника. Но Task 18 суммирует cost по всем LlmUsage джобы
+    (`sum(u.cost for u in job.usage)`) — накопленная ошибка двоичного float
+    на сумме из нескольких чисел может дать в ответе API что-то вроде
+    5.399999999999999 вместо 5.4. Округление обязано делаться на стороне
+    отображения (round(x, 2) в Task 18/25 при формировании ответа), а не
+    здесь: хранить нужно то, что реально пришло от провайдера.
+    """
 
     __tablename__ = "llm_usage"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    job_run_id: Mapped[int] = mapped_column(ForeignKey("job_runs.id", ondelete="CASCADE"))
+    # index=True: Task 18 (app/api/jobs.py) считает cost и tokens_total через
+    # `job.usage` для каждой строки списка джобов на /api/jobs — то есть этот
+    # фильтр по job_run_id выполняется на каждый показанный ряд журнала,
+    # а не один раз на всю страницу.
+    job_run_id: Mapped[int] = mapped_column(
+        ForeignKey("job_runs.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20))       # text | image
     model: Mapped[str] = mapped_column(String(100), default="")
     tokens_prompt: Mapped[int] = mapped_column(Integer, default=0)
@@ -6544,16 +6802,20 @@ class LlmUsage(Base):
     job: Mapped["JobRun"] = relationship(back_populates="usage")
 ```
 
-- [ ] **Step 5: Запустить тест, убедиться что проходит**
+- [x] **Step 5: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_models_article.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 6: Миграция**
+Фактически: 10 passed (6 из плана + 4 дополнительных теста на CHECK-constraint
+и частичный уникальный индекс, добавленных при ревью, см. врезку выше).
 
-Добавь `ArticleBatch`, `Article`, `ArticleImage` и `JobRun` в `app/models/__init__.py`
-(реестр моделей, см. Task 2, Step 3) — `alembic/env.py` и `tests/conftest.py`
-подхватят их через `import app.models` без собственных правок. Затем:
+- [x] **Step 6: Миграция**
+
+Добавь `ArticleBatch`, `Article`, `ArticleImage`, `JobRun` и `LlmUsage` в
+`app/models/__init__.py` (реестр моделей, см. Task 2, Step 3) — `alembic/env.py`
+и `tests/conftest.py` подхватят их через `import app.models` без собственных
+правок. Затем:
 
 Run:
 ```bash
@@ -6562,10 +6824,28 @@ docker compose run --rm backend alembic upgrade head
 ```
 Expected: `Running upgrade <prev> -> <hash>, articles and jobs`
 
-- [ ] **Step 7: Commit**
+Фактически: `Running upgrade 8fa16f835bee -> e25842d72da3, articles and jobs`.
+Автогенерация корректно увидела `CheckConstraint`, частичный `Index` и все
+`index=True` из Step 3/4 — сверено содержимым файла миграции построчно.
+
+Эмпирическая проверка на живом Postgres (`docker compose up -d postgres`,
+миграция применена, проверялось прямыми SQL-запросами через `psql`, не через
+тесты — SQLite-тесты FK не проверяют, а частичный индекс и CHECK — сквозные
+для обоих движков и уже покрыты тестами выше):
+- `INSERT INTO article_images (..., kind) VALUES (..., 'banner')` →
+  `ERROR: new row for relation "article_images" violates check constraint
+  "ck_article_image_kind"`.
+- Второй `INSERT INTO articles` с тем же `(site_id, slug)` → `ERROR: duplicate
+  key value violates unique constraint "uq_article_site_slug"`; два черновика
+  с `slug=''` на одном сайте и одинаковый slug на разных сайтах — проходят.
+- `DELETE FROM sites WHERE id = 1` при существующих `article_batches`/
+  `articles` с этим `site_id` → обе строки остаются, `site_id` становится
+  `NULL`, `status`/`remote_page_id`/`remote_url` не тронуты.
+
+- [x] **Step 7: Commit**
 
 ```bash
-git add execution/backend/app/models execution/backend/alembic execution/backend/tests/test_models_article.py
+git add execution/backend/app/models execution/backend/alembic execution/backend/tests/test_models_article.py orchestration/2026-08-04-plan1-core-and-articles.md
 git commit -m "feat: модели статей, партий и журнала задач"
 ```
 

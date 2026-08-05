@@ -2403,11 +2403,14 @@ git commit -m "feat: настройки RouterAI с маскированием �
 `execution/backend/tests/test_ai_text.py`:
 
 ```python
+import logging
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
-from app.ai.text import LLMError, TextClient
+from app.ai.text import REQUEST_TIMEOUT_SECONDS, LLMError, TextClient, build_client
 
 
 class FakeCompletions:
@@ -2430,6 +2433,33 @@ class FakeCompletions:
 def fake_client(content, **kwargs):
     completions = FakeCompletions(content, **kwargs)
     return SimpleNamespace(chat=SimpleNamespace(completions=completions)), completions
+
+
+def _api_error(cls, status_code: int, message: str):
+    """Настоящий экземпляр исключения openai.* — не заглушка, чтобы проверить
+    именно ветвление по классам, которое видит боевой код."""
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    response = httpx.Response(status_code, request=request, json={"error": {"message": message}})
+    return cls(message, response=response, body=None)
+
+
+class ExceptionCompletions:
+    """Бросает заданное исключение первые `fail_times` вызовов, затем отвечает успешно."""
+
+    def __init__(self, make_exc, fail_times=1, content="ок"):
+        self.make_exc = make_exc
+        self.fail_times = fail_times
+        self.content = content
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.make_exc()
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, cost=0.1),
+        )
 
 
 def test_complete_text_returns_content_and_usage():
@@ -2470,6 +2500,92 @@ def test_empty_content_is_an_error():
     client, _ = fake_client(None)
     with pytest.raises(LLMError, match="пустой content"):
         TextClient(client, "test-model").complete_text("промпт")
+
+
+# --- избирательный ретрай: детерминированные отказы vs временные ---
+
+def test_auth_error_is_not_retried():
+    completions = ExceptionCompletions(
+        lambda: _api_error(openai.AuthenticationError, 401, "invalid api key"))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    with pytest.raises(LLMError, match="ключ"):
+        TextClient(client, "test-model", max_retries=3).complete_text("промпт")
+    assert completions.calls == 1
+
+
+def test_bad_request_is_not_retried():
+    completions = ExceptionCompletions(
+        lambda: _api_error(openai.BadRequestError, 400, "malformed request"))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    with pytest.raises(LLMError, match="некорректный"):
+        TextClient(client, "test-model", max_retries=3).complete_text("промпт")
+    assert completions.calls == 1
+
+
+def test_rate_limit_is_retried():
+    completions = ExceptionCompletions(
+        lambda: _api_error(openai.RateLimitError, 429, "too many requests"), fail_times=2)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    result = TextClient(client, "test-model", max_retries=3).complete_text("промпт")
+    assert result.text == "ок"
+    assert completions.calls == 3
+
+
+def test_build_client_sets_timeout_and_disables_sdk_retries():
+    client = build_client("https://routerai.ru/api/v1", "sk-test")
+    assert client.timeout == REQUEST_TIMEOUT_SECONDS
+    assert client.max_retries == 0
+
+
+# --- разбор JSON с текстом вокруг огороженного блока ---
+
+def test_complete_json_handles_text_before_and_after_fence():
+    client, _ = fake_client('Вот темы:\n```json\n["Тема 1", "Тема 2"]\n```\nСпасибо!')
+    result = TextClient(client, "test-model").complete_json("промпт")
+    assert result.data == ["Тема 1", "Тема 2"]
+
+
+def test_complete_json_takes_first_of_several_fences():
+    client, _ = fake_client('```json\n["A"]\n```\n```json\n["B"]\n```')
+    result = TextClient(client, "test-model").complete_json("промпт")
+    assert result.data == ["A"]
+
+
+def test_complete_json_handles_fence_without_language_tag():
+    client, _ = fake_client('```\n["Тема"]\n```')
+    result = TextClient(client, "test-model").complete_json("промпт")
+    assert result.data == ["Тема"]
+
+
+def test_complete_json_handles_plain_json_without_fence():
+    client, _ = fake_client('["Тема 1", "Тема 2"]')
+    result = TextClient(client, "test-model").complete_json("промпт")
+    assert result.data == ["Тема 1", "Тема 2"]
+
+
+def test_complete_json_keeps_triple_backticks_inside_string_intact():
+    client, _ = fake_client('```json\n{"note": "see ```python``` block"}\n```')
+    result = TextClient(client, "test-model").complete_json("промпт")
+    assert result.data == {"note": "see ```python``` block"}
+
+
+# --- расход, о котором провайдер не сообщил ---
+
+def test_missing_usage_cost_logs_warning(caplog):
+    client, _ = fake_client("ок")
+
+    def create(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ок"))],
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=7),  # без cost
+        )
+
+    client.chat.completions.create = create
+    with caplog.at_level(logging.WARNING):
+        result = TextClient(client, "test-model").complete_text("промпт")
+    assert result.cost == 0.0
+    assert "usage.cost" in caplog.text
+    assert "test-model" in caplog.text
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -2489,13 +2605,40 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.ai'`
 """
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
 
+import openai
 from openai import OpenAI
 
-_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+logger = logging.getLogger(__name__)
+
+# Огороженный блок markdown: ```json ... ``` или ``` ... ```. Открывающая и
+# закрывающая метки должны занимать свою строку целиком — иначе тройные
+# кавычки, случайно оказавшиеся внутри значения (например, в примере кода
+# внутри текста статьи), обрывали бы блок раньше времени.
+_FENCE = re.compile(
+    r"^```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n^```[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+# Один вызов генерации текста статьи укладывается в это время с большим
+# запасом; дефолт SDK (600 с на чтение) — это по сути «жди сколько хочешь»,
+# а нам нужно, чтобы зависшее соединение не съедало слот Celery-воркера
+# часами (см. app/celery_app.py — там свой предел на всю задачу).
+REQUEST_TIMEOUT_SECONDS = 120.0
+
+# Отказы, которые не изменятся при повторе: неверный ключ, нет доступа,
+# некорректный запрос, модель/ресурс не найдены. Ретраить их — тратить время
+# и попытки на заведомо тот же результат.
+_NON_RETRYABLE = (
+    openai.AuthenticationError,
+    openai.PermissionDeniedError,
+    openai.BadRequestError,
+    openai.NotFoundError,
+)
 
 
 class LLMError(RuntimeError):
@@ -2519,7 +2662,27 @@ class JsonResult:
 
 
 def build_client(base_url: str, api_key: str) -> OpenAI:
-    return OpenAI(base_url=base_url, api_key=api_key)
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        # Ретраями управляет TextClient. Если оставить дефолт SDK (2 внутренних
+        # повтора), на каждую нашу попытку добавляются ещё до трёх HTTP-запросов
+        # — при 429 это удваивает и без того лишнюю нагрузку на провайдера.
+        max_retries=0,
+    )
+
+
+def _non_retryable_message(exc: Exception) -> str:
+    if isinstance(exc, openai.AuthenticationError):
+        return f"RouterAI отклонил ключ API — проверьте настройку routerai_api_key (401): {exc}"
+    if isinstance(exc, openai.PermissionDeniedError):
+        return f"RouterAI запретил доступ этим ключом (403): {exc}"
+    if isinstance(exc, openai.BadRequestError):
+        return f"RouterAI отклонил запрос как некорректный (400): {exc}"
+    if isinstance(exc, openai.NotFoundError):
+        return f"RouterAI не нашёл модель или ресурс (404): {exc}"
+    return f"RouterAI отказал в запросе без права на повтор: {exc}"
 
 
 class TextClient:
@@ -2537,7 +2700,9 @@ class TextClient:
 
     def complete_json(self, prompt: str) -> JsonResult:
         response = self._call(prompt)
-        raw = _FENCE.sub("", self._content(response)).strip()
+        content = self._content(response)
+        match = _FENCE.search(content)
+        raw = match.group("body").strip() if match else content.strip()
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -2553,9 +2718,11 @@ class TextClient:
                     messages=[{"role": "user", "content": prompt}],
                     temperature=self.temperature,
                 )
+            except _NON_RETRYABLE as exc:
+                raise LLMError(_non_retryable_message(exc)) from exc
             except Exception as exc:
-                # Повторять имеет смысл только сбои транспорта. Разбор ответа
-                # вынесен наружу, чтобы не ретраить осмысленный отказ модели.
+                # Сбои транспорта и превышение лимита частоты (429) — тут
+                # повтор осмыслен, в отличие от _NON_RETRYABLE выше.
                 last_error = exc
                 if self.backoff and attempt < self.max_retries - 1:
                     time.sleep(self.backoff * (2**attempt))
@@ -2570,22 +2737,31 @@ class TextClient:
             raise LLMError("модель отказалась отвечать: пустой content")
         return content
 
-    @staticmethod
-    def _usage(response) -> tuple[int, int, float]:
+    def _usage(self, response) -> tuple[int, int, float]:
         usage = getattr(response, "usage", None)
         if usage is None:
             return 0, 0, 0.0
+        _missing = object()
+        cost = getattr(usage, "cost", _missing)
+        if cost is _missing:
+            # usage.cost — расширение RouterAI, а не часть OpenAI API. Молчаливый
+            # ноль неотличим от настоящего нуля, поэтому хотя бы в лог.
+            logger.warning(
+                "RouterAI не сообщил usage.cost для модели %s — стоимость записана как 0",
+                self.model,
+            )
+            cost = 0.0
         return (
             getattr(usage, "prompt_tokens", 0) or 0,
             getattr(usage, "completion_tokens", 0) or 0,
-            float(getattr(usage, "cost", 0.0) or 0.0),
+            float(cost or 0.0),
         )
 ```
 
 - [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_text.py -v`
-Expected: PASS — 6 passed
+Expected: PASS — 16 passed
 
 - [x] **Step 5: Commit**
 
@@ -5646,6 +5822,24 @@ celery_app = Celery(
 celery_app.conf.timezone = "Europe/Samara"
 
 # beat не нужен: периодических задач нет, всё запускается из UI.
+
+# Без лимита зависшее соединение с RouterAI держит слот воркера сколько
+# угодно долго: TextClient (app/ai/text.py) не сдаётся раньше max_retries
+# попыток по REQUEST_TIMEOUT_SECONDS=120 с каждая — до ~366 с на один вызов
+# complete_text/complete_json, и это может повториться на каждой статье
+# партии. Воркеров всего два (--concurrency=2, см. docker-compose.yml), а до
+# введения таймаута в Task 7 у SDK был дефолт в 600 с на попытку — то есть
+# одно молчащее соединение было способно занимать половину мощности воркеров
+# около полутора часов на единственном вызове. Мягкий лимит меньше жёсткого,
+# чтобы задача успела записать status="failed" в JobRun/ArticleBatch и
+# закрыть сессию БД до принудительного завершения. Числа — компромисс:
+# с запасом хватает на generate_topics/retry_article (один вызов LLM плюс
+# сборка одной статьи), но для больших партий в run_batch (до 50 статей,
+# см. Task 18) это может оказаться тесно — точнее было бы считать лимит от
+# числа статей через time_limit= в apply_async() при постановке задачи;
+# это за рамками текущей задачи.
+celery_app.conf.task_soft_time_limit = 1800  # 30 минут
+celery_app.conf.task_time_limit = 2100       # 35 минут
 ```
 
 - [ ] **Step 4: Задачи**
@@ -6110,6 +6304,14 @@ def retry(article_id: int, db: Session = Depends(get_db),
 `execution/backend/app/api/jobs.py`:
 
 ```python
+"""Журнал задач. `cost` — сумма LlmUsage.cost (Task 7/14), а это, в свою
+очередь, usage.cost из ответа RouterAI — нестандартное расширение, которого
+может не быть у конкретной модели. Ноль в этом поле не обязательно значит
+«бесплатно»: если провайдер его не прислал, TextClient пишет предупреждение
+в лог (app/ai/text.py, _usage) и подставляет 0. Отличить «правда бесплатно»
+от «не сообщили» по одной только цифре в журнале нельзя — при подозрении
+смотреть логи воркера за нужный job_run_id."""
+
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -6148,6 +6350,7 @@ def list_jobs(limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
         result.append(JobOut(
             id=job.id, kind=job.kind, site_name=site.name if site else "—",
             status=job.status, log_text=job.log_text,
+            # 0 может означать «провайдер не сообщил стоимость», а не «бесплатно».
             cost=sum(u.cost for u in job.usage),
             tokens_total=sum(u.tokens_prompt + u.tokens_completion for u in job.usage),
             started_at=job.started_at, finished_at=job.finished_at,

@@ -2876,7 +2876,7 @@ def test_generate_retries_then_fails(monkeypatch):
 ```python
 import io
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 from app.ai.watermark import apply_watermark
 
@@ -2894,13 +2894,38 @@ def test_watermark_preserves_size():
     assert Image.open(io.BytesIO(result)).size == (1600, 900)
 
 
-def test_watermark_changes_bottom_right_corner():
+def changed_box(base: bytes, marked: bytes):
+    """Прямоугольник изменённых пикселей — где именно лёг знак."""
+    before = Image.open(io.BytesIO(base)).convert("RGB")
+    after = Image.open(io.BytesIO(marked)).convert("RGB")
+    return ImageChops.difference(before, after).getbbox()
+
+
+def test_watermark_lands_in_bottom_right_quadrant():
     base = image_bytes(1600, 900, (10, 10, 10))
     mark = image_bytes(200, 80, (255, 255, 255, 255), mode="RGBA")
-    before = Image.open(io.BytesIO(base)).convert("RGB")
-    after = Image.open(io.BytesIO(apply_watermark(base, mark))).convert("RGB")
-    corner = (1600 - 60, 900 - 60)
-    assert before.getpixel(corner) != after.getpixel(corner)
+    left, top, right, bottom = changed_box(base, apply_watermark(base, mark))
+    assert left > 1600 / 2 and top > 900 / 2
+    assert right <= 1600 and bottom <= 900
+
+
+def test_watermark_is_small():
+    """«Небольшой» — требование владельца, а не вкусовщина: знак помечает
+    авторство, а не соперничает с содержимым кадра. Без этой проверки долю
+    ширины можно молча увеличить, и никто не заметит."""
+    base = image_bytes(1600, 900, (10, 10, 10))
+    mark = image_bytes(200, 80, (255, 255, 255, 255), mode="RGBA")
+    left, _, right, _ = changed_box(base, apply_watermark(base, mark))
+    assert (right - left) <= 1600 * 0.15
+
+
+def test_watermark_does_not_touch_edges():
+    """Отступы от правого и нижнего краёв — тоже требование владельца."""
+    base = image_bytes(1600, 900, (10, 10, 10))
+    mark = image_bytes(200, 80, (255, 255, 255, 255), mode="RGBA")
+    _, _, right, bottom = changed_box(base, apply_watermark(base, mark))
+    assert right < 1600 - 1600 * 0.02
+    assert bottom < 900 - 1600 * 0.02
 
 
 def test_watermark_leaves_top_left_untouched():
@@ -3046,8 +3071,16 @@ class ImageGenerator:
 ```python
 """Наложение водяного знака сайта на контентные картинки.
 
-Знак ставится в правый нижний угол с отступом; на обложку статьи знак НЕ
-накладывается — это витрина, а не иллюстрация внутри текста.
+Знак ставится в правый нижний угол, небольшой, с отступом от обоих краёв;
+на обложку статьи знак НЕ накладывается — это витрина, а не иллюстрация
+внутри текста.
+
+Пропорции заданы владельцем по образцу готовой картинки: знак занимает
+примерно одну десятую ширины кадра и не касается краёв. Это осознанно
+скромно — знак помечает авторство, а не борется за внимание с содержимым
+кадра. Числа ниже закреплены тестами (`tests/test_ai_watermark.py`):
+проверяется и доля ширины, и наличие отступов, поэтому «чуть покрупнее»
+не пройдёт молча.
 """
 
 from __future__ import annotations
@@ -3056,8 +3089,8 @@ import io
 
 from PIL import Image
 
-MARK_WIDTH_FRACTION = 0.22   # доля ширины кадра, которую занимает знак
-MARGIN_FRACTION = 0.025      # отступ от краёв, доля ширины кадра
+MARK_WIDTH_FRACTION = 0.11   # доля ширины кадра, которую занимает знак
+MARGIN_FRACTION = 0.045      # отступ от краёв, доля ширины кадра
 OPACITY = 0.75
 
 
@@ -3094,7 +3127,7 @@ def apply_watermark(image_bytes: bytes, watermark_bytes: bytes) -> bytes:
 - [ ] **Step 6: Запустить тесты, убедиться что проходят**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_ai_images.py tests/test_ai_watermark.py -v`
-Expected: PASS — 12 passed
+Expected: PASS — 14 passed
 
 - [ ] **Step 7: Commit**
 

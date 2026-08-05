@@ -11,6 +11,21 @@
 - у списка staticpages пагинация `?page=N`, фильтры ?parent= и ?search= игнорируются,
   раздел вычленяется по префиксу url;
 - teaser_image — ImageField страницы, строкой не задаётся, только multipart.
+
+Замечания ревью (сверка с рабочими скриптами и app/ai/images.py):
+- `SiteAPIError.status_code` хранит HTTP-код ответа (None для ошибок разбора
+  тела и сетевых сбоев) — вызывающий код (Task 11/18) решает по нему, есть ли
+  смысл повторить запрос: 5xx и сетевые таймауты — да, 400/401/403/404/413 —
+  нет (та же граница, что и для RouterAI в app/ai/text.py). Сам клиент
+  ретраи не делает — это ответственность вызывающего кода;
+- тело успешного ответа не гарантированно JSON: прокси, страница логина или
+  обрыв соединения посреди тела отдают 200 с мусором. `.json()` всегда
+  обёрнут — иначе наружу летит голый json.JSONDecodeError вместо
+  SiteAPIError (тот же класс дефекта, что уже закрыт в app/ai/images.py для
+  ответов RouterAI);
+- `timeout` всегда берётся из атрибутов клиента, а не зашит числом в теле
+  метода: `self.timeout` — для чтения/создания страниц, `self.upload_timeout`
+  — для загрузки файлов и обложки (файлы крупнее, дефолт больше).
 """
 
 from __future__ import annotations
@@ -41,7 +56,12 @@ _TRANSLIT = {
 
 
 class SiteAPIError(RuntimeError):
-    pass
+    """status_code — HTTP-код ответа сайта; None для ошибок разбора тела
+    (сайт вернул 200, но не JSON) и для сетевых сбоев ниже уровня HTTP."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def slugify(text: str, limit: int = 60) -> str:
@@ -55,10 +75,12 @@ def strip_html_comments(html: str) -> str:
 
 
 class SiteClient:
-    def __init__(self, base_url: str, token: str, timeout: int = 60):
+    def __init__(self, base_url: str, token: str, timeout: int = 60,
+                upload_timeout: int = 120):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.upload_timeout = upload_timeout
 
     @property
     def _headers(self) -> dict:
@@ -66,8 +88,19 @@ class SiteClient:
 
     def _check(self, response, what: str):
         if not response.ok:
-            raise SiteAPIError(f"{what}: HTTP {response.status_code}: {response.text[:300]}")
+            raise SiteAPIError(f"{what}: HTTP {response.status_code}: {response.text[:300]}",
+                               status_code=response.status_code)
         return response
+
+    def _json(self, response, what: str):
+        """Тело успешного ответа не гарантированно JSON: прокси, страница
+        логина или обрыв соединения посреди тела отдают 200 с мусором. Без
+        обёртки сюда долетает голый json.JSONDecodeError вместо SiteAPIError —
+        тот же класс дефекта, что уже закрыт в app/ai/images.py."""
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise SiteAPIError(f"{what}: сайт вернул не JSON: {response.text[:300]}") from exc
 
     # --- страницы ---
 
@@ -80,7 +113,7 @@ class SiteClient:
                 requests.get(f"{self.base_url}{STATICPAGES_PATH}?page={page_number}",
                              headers=self._headers, timeout=self.timeout),
                 "список страниц")
-            body = response.json()
+            body = self._json(response, "список страниц")
             pages += [item for item in body.get("results", [])
                       if (item.get("url") or "").startswith(url_prefix)]
             if not body.get("next"):
@@ -88,10 +121,11 @@ class SiteClient:
             page_number += 1
 
     def get_page(self, page_id: int) -> dict:
-        return self._check(
+        response = self._check(
             requests.get(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
                          headers=self._headers, timeout=self.timeout),
-            f"страница {page_id}").json()
+            f"страница {page_id}")
+        return self._json(response, f"страница {page_id}")
 
     def create_page(self, title: str, url: str, html: str, parent_id: int | None,
                     meta_description: str = "", meta_keywords: str = "") -> dict:
@@ -106,11 +140,12 @@ class SiteClient:
             "meta_description": meta_description,
             "meta_keywords": meta_keywords,
         }
-        return self._check(
+        response = self._check(
             requests.post(f"{self.base_url}{STATICPAGES_PATH}", json=payload,
                           headers={**self._headers, "Content-Type": "application/json"},
                           timeout=self.timeout),
-            "создание страницы").json()
+            "создание страницы")
+        return self._json(response, "создание страницы")
 
     def set_page_cover(self, page_id: int, image_bytes: bytes, filename: str) -> str:
         """teaser_image — ImageField страницы: путём-строкой не задаётся (400),
@@ -120,9 +155,9 @@ class SiteClient:
             requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
                            headers=self._headers,
                            files={"teaser_image": (filename, io.BytesIO(image_bytes), ctype)},
-                           timeout=120),
+                           timeout=self.upload_timeout),
             "загрузка обложки")
-        return response.json().get("teaser_image", "")
+        return self._json(response, "загрузка обложки").get("teaser_image", "")
 
     # --- файлы ---
 
@@ -136,6 +171,6 @@ class SiteClient:
                           headers=self._headers,
                           files={"file": (filename, io.BytesIO(data), ctype)},
                           data={"upload_to": upload_to},
-                          timeout=120),
+                          timeout=self.upload_timeout),
             "загрузка файла")
         return f"/media/{upload_to}{filename}"

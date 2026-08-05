@@ -1,16 +1,24 @@
+import json
+
 import pytest
 
 from app.sites.client import SiteAPIError, SiteClient, slugify
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text="", json_error=False):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
         self._payload = payload or {}
+        self._json_error = json_error
         self.text = text
 
     def json(self):
+        if self._json_error:
+            # requests.Response.json() поднимает подкласс ValueError
+            # (json.JSONDecodeError или requests.exceptions.JSONDecodeError,
+            # который сам от него унаследован) — воспроизводим это же исключение.
+            raise json.JSONDecodeError("Expecting value", self.text or "", 0)
         return self._payload
 
 
@@ -121,3 +129,135 @@ def test_error_response_raises(monkeypatch):
     with pytest.raises(SiteAPIError, match="403"):
         SiteClient("https://x.ru", "bad").create_page(
             title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+
+
+# --- SiteAPIError несёт статус ответа: 404 в исключении при HTTP-ошибке,
+# None при ошибке разбора тела (сайт вернул 200 с мусором) или сетевом сбое. ---
+
+def test_error_status_code_is_exposed_on_http_error(monkeypatch):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(404, text="Not Found"))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").create_page(
+            title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    assert exc_info.value.status_code == 404
+
+
+# --- «200 OK с мусором внутри»: HTML прокси, обрезанный JSON или пустое тело
+# при успешном статусе не должны долетать до вызывающего голым
+# json.JSONDecodeError — только SiteAPIError с status_code=None. Тот же класс
+# дефекта уже закрыт в app/ai/images.py для ответов RouterAI. ---
+
+_BAD_BODIES = pytest.mark.parametrize("bad_text", [
+    "<html><body>Please log in</body></html>",   # HTML вместо JSON
+    '{"id": 1, "url": "/blog/x/"',                # обрезанный JSON
+    "",                                            # пустое тело
+], ids=["html", "truncated-json", "empty"])
+
+
+@_BAD_BODIES
+def test_list_section_pages_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.get",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").list_section_pages("/blog/")
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_get_page_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.get",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").get_page(77)
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_create_page_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").create_page(
+            title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_set_page_cover_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.patch",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").set_page_cover(77, b"img", "cover.webp")
+    assert exc_info.value.status_code is None
+
+
+# --- upload_file обязан поднимать SiteAPIError на ошибочном статусе — раньше
+# проверялось только для create_page. ---
+
+@pytest.mark.parametrize("status", [413, 500])
+def test_upload_file_raises_on_error_status(monkeypatch, status):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(status, text="oops"))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").upload_file(b"d", "a.webp", "uploads/article-img/")
+    assert exc_info.value.status_code == status
+
+
+# --- таймауты: все методы обязаны передавать числовой таймаут в requests,
+# а не None (бесконечное ожидание съедает слот воркера часами). ---
+
+def test_all_methods_use_numeric_timeout(monkeypatch):
+    captured = []
+
+    def fake_get(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(200, {"results": [], "next": None})
+
+    def fake_post(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(201, {"id": 1, "url": "/blog/x/"})
+
+    def fake_patch(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(200, {"teaser_image": "/media/x.webp"})
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    monkeypatch.setattr("app.sites.client.requests.post", fake_post)
+    monkeypatch.setattr("app.sites.client.requests.patch", fake_patch)
+
+    client = SiteClient("https://x.ru", "token")
+    client.list_section_pages("/blog/")
+    client.get_page(1)
+    client.create_page(title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    client.set_page_cover(1, b"img", "cover.webp")
+    client.upload_file(b"data", "a.webp", "uploads/article-img/")
+
+    assert len(captured) == 5
+    for value in captured:
+        assert isinstance(value, (int, float)) and value > 0
+
+
+def test_timeout_and_upload_timeout_are_independently_configurable(monkeypatch):
+    """set_page_cover/upload_file раньше игнорировали self.timeout из
+    конструктора и жёстко использовали 120 — несогласованность, а не
+    решение. Теперь у загрузки свой явный параметр конструктора."""
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["get"] = kwargs.get("timeout")
+        return FakeResponse(200, {"results": [], "next": None})
+
+    def fake_post(url, **kwargs):
+        captured["upload"] = kwargs.get("timeout")
+        return FakeResponse(200, {}, text="Success")
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    monkeypatch.setattr("app.sites.client.requests.post", fake_post)
+
+    client = SiteClient("https://x.ru", "token", timeout=45, upload_timeout=200)
+    client.list_section_pages("/blog/")
+    client.upload_file(b"d", "a.webp", "uploads/article-img/")
+
+    assert captured["get"] == 45
+    assert captured["upload"] == 200

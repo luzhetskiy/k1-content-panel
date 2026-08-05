@@ -3527,19 +3527,27 @@ git commit -m "feat: модель сайта"
 `execution/backend/tests/test_sites_client.py`:
 
 ```python
+import json
+
 import pytest
 
 from app.sites.client import SiteAPIError, SiteClient, slugify
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text="", json_error=False):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
         self._payload = payload or {}
+        self._json_error = json_error
         self.text = text
 
     def json(self):
+        if self._json_error:
+            # requests.Response.json() поднимает подкласс ValueError
+            # (json.JSONDecodeError или requests.exceptions.JSONDecodeError,
+            # который сам от него унаследован) — воспроизводим это же исключение.
+            raise json.JSONDecodeError("Expecting value", self.text or "", 0)
         return self._payload
 
 
@@ -3650,6 +3658,138 @@ def test_error_response_raises(monkeypatch):
     with pytest.raises(SiteAPIError, match="403"):
         SiteClient("https://x.ru", "bad").create_page(
             title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+
+
+# --- SiteAPIError несёт статус ответа: 404 в исключении при HTTP-ошибке,
+# None при ошибке разбора тела (сайт вернул 200 с мусором) или сетевом сбое. ---
+
+def test_error_status_code_is_exposed_on_http_error(monkeypatch):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(404, text="Not Found"))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").create_page(
+            title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    assert exc_info.value.status_code == 404
+
+
+# --- «200 OK с мусором внутри»: HTML прокси, обрезанный JSON или пустое тело
+# при успешном статусе не должны долетать до вызывающего голым
+# json.JSONDecodeError — только SiteAPIError с status_code=None. Тот же класс
+# дефекта уже закрыт в app/ai/images.py для ответов RouterAI. ---
+
+_BAD_BODIES = pytest.mark.parametrize("bad_text", [
+    "<html><body>Please log in</body></html>",   # HTML вместо JSON
+    '{"id": 1, "url": "/blog/x/"',                # обрезанный JSON
+    "",                                            # пустое тело
+], ids=["html", "truncated-json", "empty"])
+
+
+@_BAD_BODIES
+def test_list_section_pages_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.get",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").list_section_pages("/blog/")
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_get_page_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.get",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").get_page(77)
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_create_page_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").create_page(
+            title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    assert exc_info.value.status_code is None
+
+
+@_BAD_BODIES
+def test_set_page_cover_rejects_invalid_json(monkeypatch, bad_text):
+    monkeypatch.setattr("app.sites.client.requests.patch",
+                        lambda *a, **kw: FakeResponse(200, text=bad_text, json_error=True))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").set_page_cover(77, b"img", "cover.webp")
+    assert exc_info.value.status_code is None
+
+
+# --- upload_file обязан поднимать SiteAPIError на ошибочном статусе — раньше
+# проверялось только для create_page. ---
+
+@pytest.mark.parametrize("status", [413, 500])
+def test_upload_file_raises_on_error_status(monkeypatch, status):
+    monkeypatch.setattr("app.sites.client.requests.post",
+                        lambda *a, **kw: FakeResponse(status, text="oops"))
+    with pytest.raises(SiteAPIError) as exc_info:
+        SiteClient("https://x.ru", "t").upload_file(b"d", "a.webp", "uploads/article-img/")
+    assert exc_info.value.status_code == status
+
+
+# --- таймауты: все методы обязаны передавать числовой таймаут в requests,
+# а не None (бесконечное ожидание съедает слот воркера часами). ---
+
+def test_all_methods_use_numeric_timeout(monkeypatch):
+    captured = []
+
+    def fake_get(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(200, {"results": [], "next": None})
+
+    def fake_post(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(201, {"id": 1, "url": "/blog/x/"})
+
+    def fake_patch(url, **kwargs):
+        captured.append(kwargs.get("timeout"))
+        return FakeResponse(200, {"teaser_image": "/media/x.webp"})
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    monkeypatch.setattr("app.sites.client.requests.post", fake_post)
+    monkeypatch.setattr("app.sites.client.requests.patch", fake_patch)
+
+    client = SiteClient("https://x.ru", "token")
+    client.list_section_pages("/blog/")
+    client.get_page(1)
+    client.create_page(title="T", url="/blog/x/", html="<p>a</p>", parent_id=25)
+    client.set_page_cover(1, b"img", "cover.webp")
+    client.upload_file(b"data", "a.webp", "uploads/article-img/")
+
+    assert len(captured) == 5
+    for value in captured:
+        assert isinstance(value, (int, float)) and value > 0
+
+
+def test_timeout_and_upload_timeout_are_independently_configurable(monkeypatch):
+    """set_page_cover/upload_file раньше игнорировали self.timeout из
+    конструктора и жёстко использовали 120 — несогласованность, а не
+    решение. Теперь у загрузки свой явный параметр конструктора."""
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["get"] = kwargs.get("timeout")
+        return FakeResponse(200, {"results": [], "next": None})
+
+    def fake_post(url, **kwargs):
+        captured["upload"] = kwargs.get("timeout")
+        return FakeResponse(200, {}, text="Success")
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    monkeypatch.setattr("app.sites.client.requests.post", fake_post)
+
+    client = SiteClient("https://x.ru", "token", timeout=45, upload_timeout=200)
+    client.list_section_pages("/blog/")
+    client.upload_file(b"d", "a.webp", "uploads/article-img/")
+
+    assert captured["get"] == 45
+    assert captured["upload"] == 200
 ```
 
 - [x] **Step 2: Запустить тест, убедиться что падает**
@@ -3677,6 +3817,21 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.sites'`
 - у списка staticpages пагинация `?page=N`, фильтры ?parent= и ?search= игнорируются,
   раздел вычленяется по префиксу url;
 - teaser_image — ImageField страницы, строкой не задаётся, только multipart.
+
+Замечания ревью (сверка с рабочими скриптами и app/ai/images.py):
+- `SiteAPIError.status_code` хранит HTTP-код ответа (None для ошибок разбора
+  тела и сетевых сбоев) — вызывающий код (Task 11/18) решает по нему, есть ли
+  смысл повторить запрос: 5xx и сетевые таймауты — да, 400/401/403/404/413 —
+  нет (та же граница, что и для RouterAI в app/ai/text.py). Сам клиент
+  ретраи не делает — это ответственность вызывающего кода;
+- тело успешного ответа не гарантированно JSON: прокси, страница логина или
+  обрыв соединения посреди тела отдают 200 с мусором. `.json()` всегда
+  обёрнут — иначе наружу летит голый json.JSONDecodeError вместо
+  SiteAPIError (тот же класс дефекта, что уже закрыт в app/ai/images.py для
+  ответов RouterAI);
+- `timeout` всегда берётся из атрибутов клиента, а не зашит числом в теле
+  метода: `self.timeout` — для чтения/создания страниц, `self.upload_timeout`
+  — для загрузки файлов и обложки (файлы крупнее, дефолт больше).
 """
 
 from __future__ import annotations
@@ -3707,7 +3862,12 @@ _TRANSLIT = {
 
 
 class SiteAPIError(RuntimeError):
-    pass
+    """status_code — HTTP-код ответа сайта; None для ошибок разбора тела
+    (сайт вернул 200, но не JSON) и для сетевых сбоев ниже уровня HTTP."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def slugify(text: str, limit: int = 60) -> str:
@@ -3721,10 +3881,12 @@ def strip_html_comments(html: str) -> str:
 
 
 class SiteClient:
-    def __init__(self, base_url: str, token: str, timeout: int = 60):
+    def __init__(self, base_url: str, token: str, timeout: int = 60,
+                upload_timeout: int = 120):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.upload_timeout = upload_timeout
 
     @property
     def _headers(self) -> dict:
@@ -3732,8 +3894,19 @@ class SiteClient:
 
     def _check(self, response, what: str):
         if not response.ok:
-            raise SiteAPIError(f"{what}: HTTP {response.status_code}: {response.text[:300]}")
+            raise SiteAPIError(f"{what}: HTTP {response.status_code}: {response.text[:300]}",
+                               status_code=response.status_code)
         return response
+
+    def _json(self, response, what: str):
+        """Тело успешного ответа не гарантированно JSON: прокси, страница
+        логина или обрыв соединения посреди тела отдают 200 с мусором. Без
+        обёртки сюда долетает голый json.JSONDecodeError вместо SiteAPIError —
+        тот же класс дефекта, что уже закрыт в app/ai/images.py."""
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise SiteAPIError(f"{what}: сайт вернул не JSON: {response.text[:300]}") from exc
 
     # --- страницы ---
 
@@ -3746,7 +3919,7 @@ class SiteClient:
                 requests.get(f"{self.base_url}{STATICPAGES_PATH}?page={page_number}",
                              headers=self._headers, timeout=self.timeout),
                 "список страниц")
-            body = response.json()
+            body = self._json(response, "список страниц")
             pages += [item for item in body.get("results", [])
                       if (item.get("url") or "").startswith(url_prefix)]
             if not body.get("next"):
@@ -3754,10 +3927,11 @@ class SiteClient:
             page_number += 1
 
     def get_page(self, page_id: int) -> dict:
-        return self._check(
+        response = self._check(
             requests.get(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
                          headers=self._headers, timeout=self.timeout),
-            f"страница {page_id}").json()
+            f"страница {page_id}")
+        return self._json(response, f"страница {page_id}")
 
     def create_page(self, title: str, url: str, html: str, parent_id: int | None,
                     meta_description: str = "", meta_keywords: str = "") -> dict:
@@ -3772,11 +3946,12 @@ class SiteClient:
             "meta_description": meta_description,
             "meta_keywords": meta_keywords,
         }
-        return self._check(
+        response = self._check(
             requests.post(f"{self.base_url}{STATICPAGES_PATH}", json=payload,
                           headers={**self._headers, "Content-Type": "application/json"},
                           timeout=self.timeout),
-            "создание страницы").json()
+            "создание страницы")
+        return self._json(response, "создание страницы")
 
     def set_page_cover(self, page_id: int, image_bytes: bytes, filename: str) -> str:
         """teaser_image — ImageField страницы: путём-строкой не задаётся (400),
@@ -3786,9 +3961,9 @@ class SiteClient:
             requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
                            headers=self._headers,
                            files={"teaser_image": (filename, io.BytesIO(image_bytes), ctype)},
-                           timeout=120),
+                           timeout=self.upload_timeout),
             "загрузка обложки")
-        return response.json().get("teaser_image", "")
+        return self._json(response, "загрузка обложки").get("teaser_image", "")
 
     # --- файлы ---
 
@@ -3802,7 +3977,7 @@ class SiteClient:
                           headers=self._headers,
                           files={"file": (filename, io.BytesIO(data), ctype)},
                           data={"upload_to": upload_to},
-                          timeout=120),
+                          timeout=self.upload_timeout),
             "загрузка файла")
         return f"/media/{upload_to}{filename}"
 ```
@@ -3810,7 +3985,7 @@ class SiteClient:
 - [x] **Step 4: Запустить тест, убедиться что проходит**
 
 Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_client.py -v`
-Expected: PASS — 9 passed
+Expected: PASS — 26 passed
 
 - [x] **Step 5: Commit**
 
@@ -3819,9 +3994,54 @@ git add execution/backend/app/sites execution/backend/tests/test_sites_client.py
 git commit -m "feat: клиент API целевого сайта"
 ```
 
+- [x] **Step 6: Замечания ревью — разбор ответа, код статуса, таймауты**
+
+Ревью нашло четыре проблемы (полное исследование — в отчёте по Task 10):
+
+1. Тело успешного (200) ответа не проверялось на JSON — HTML от прокси или
+   обрыв соединения посреди тела вылетали из `list_section_pages`,
+   `get_page`, `create_page` и `set_page_cover` сырым `json.JSONDecodeError`
+   вместо `SiteAPIError`. Тот же класс дефекта уже закрыт в
+   `app/ai/images.py` для ответов RouterAI. Обёрнуто в `_json()`. Код и
+   тесты выше уже отражают исправление.
+2. `SiteAPIError` не хранил код ответа — вызывающий код, которому нужно
+   повторять 5xx, но не 400/401/403/404/413, был бы вынужден разбирать
+   строку регуляркой. Добавлен атрибут `status_code` (`None` для сетевых
+   сбоев и ошибок разбора тела); граница ретраев вписана в Task 11. Код и
+   тесты выше уже отражают исправление.
+3. `set_page_cover` и `upload_file` игнорировали `self.timeout` из
+   конструктора и жёстко использовали 120 — несогласованность, а не
+   решение; мутация «заменить все таймауты на `None`» проходила
+   незамеченной. Добавлен отдельный параметр конструктора
+   `upload_timeout` (дефолт 120), все методы теперь берут таймаут из
+   атрибутов клиента. Код и тесты выше уже отражают исправление.
+4. `upload_file` не был покрыт тестом на ошибочный статус — проверялось
+   только создание страницы. Добавлены тесты на 413 и 500.
+
+Run: `cd execution && docker compose run --rm --no-deps backend pytest tests/test_sites_client.py -v`
+Expected: PASS — 26 passed
+
+```bash
+git add execution/backend/app/sites execution/backend/tests/test_sites_client.py orchestration/2026-08-04-plan1-core-and-articles.md
+git commit -m "fix: замечания ревью по клиенту сайта — разбор ответа, код статуса, таймауты"
+```
+
 ---
 
 ### Task 11: Синхронизация эталона и API сайтов
+
+**Требование по ретраям (замечание ревью Task 10):** `SiteClient` сам не
+повторяет запросы к сайту — это ответственность вызывающего кода (здесь, в
+`open_client`/`sync_site`, и в Task 18). Есть смысл повторять только 5xx и
+сетевые таймауты; 400, 401, 403, 404, 413 повторять нельзя — повтор с тем же
+запросом гарантированно даёт тот же результат (неверный токен, отсутствующая
+родительская страница, файл слишком велик, некорректные данные), а время и
+попытки тратятся впустую. Граница ретраев — `exc.status_code` из
+`SiteAPIError` (Task 10): `None` (сетевой сбой или сайт вернул не JSON) или
+`>= 500` → повторять, иначе — нет. Решение зеркалит `_NON_RETRYABLE` в
+`app/ai/text.py` (Task 7), где по той же причине не повторяются
+`AuthenticationError`, `PermissionDeniedError`, `BadRequestError` и
+`NotFoundError` от RouterAI.
 
 **Files:**
 - Create: `execution/backend/app/sites/reference.py`

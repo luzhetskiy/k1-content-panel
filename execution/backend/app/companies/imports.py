@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.companies.import_xlsx import XlsxParseError, parse_workbook
-from app.models.company import Company, CompanyCandidate, CompanyImport
+from app.companies.selection import taken_site_keys
+from app.models.company import CompanyCandidate, CompanyImport
 
 
 def import_file(db: Session, data: bytes, filename: str,
@@ -90,10 +91,7 @@ class Facets:
 def get_facets(db: Session, site_id: int) -> Facets:
     """Различные region_raw/category_raw в пуле, у которых для этого сайта
     есть хотя бы один ещё не взятый кандидат."""
-    taken_keys = {
-        c.site_key for c in
-        db.scalars(select(Company).where(Company.site_id == site_id)).all()
-    }
+    taken_keys = taken_site_keys(db, site_id)
     candidates = db.scalars(select(CompanyCandidate)).all()
     available = [c for c in candidates if c.site_key not in taken_keys]
     regions = sorted({c.region_raw for c in available if c.region_raw})

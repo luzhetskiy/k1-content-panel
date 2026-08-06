@@ -65,6 +65,14 @@ def test_add_next_candidate_skips_already_in_batch(db_session):
     assert next_candidate.site_key == "b.ru"
 
 
+def test_select_breaks_ties_deterministically_by_id(db_session):
+    c1 = _candidate(db_session, site_key="a.ru", reviews_count=5)
+    c2 = _candidate(db_session, site_key="b.ru", reviews_count=5)
+    result = select_candidates(db_session, site_id=1, region_raw="Самара",
+                               category_raw="Дома", count=10)
+    assert [c.id for c in result] == sorted([c1.id, c2.id])
+
+
 def test_add_next_candidate_returns_none_when_exhausted(db_session):
     _candidate(db_session, site_key="a.ru")
     result = add_next_candidate(

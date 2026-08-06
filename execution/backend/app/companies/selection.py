@@ -9,14 +9,16 @@ from sqlalchemy.orm import Session
 from app.models.company import Company, CompanyCandidate
 
 
-def _taken_site_keys(db: Session, site_id: int) -> set[str]:
+def taken_site_keys(db: Session, site_id: int) -> set[str]:
     return {c.site_key for c in
            db.scalars(select(Company).where(Company.site_id == site_id)).all()}
 
 
 def select_candidates(db: Session, site_id: int, region_raw: str, category_raw: str,
                       count: int) -> list[CompanyCandidate]:
-    taken = _taken_site_keys(db, site_id)
+    """Кандидаты для региона+категории, отсортированные по убыванию отзывов,
+    без уже взятых для сайта."""
+    taken = taken_site_keys(db, site_id)
     matching = db.scalars(
         select(CompanyCandidate).where(
             CompanyCandidate.region_raw == region_raw,
@@ -24,7 +26,7 @@ def select_candidates(db: Session, site_id: int, region_raw: str, category_raw: 
         )
     ).all()
     available = [c for c in matching if c.site_key not in taken]
-    available.sort(key=lambda c: -c.reviews_count)
+    available.sort(key=lambda c: (-c.reviews_count, c.id))
     return available[:count]
 
 
@@ -32,7 +34,7 @@ def add_next_candidate(db: Session, site_id: int, region_raw: str, category_raw:
                        already_in_batch: set[str], excluded: set[str]) -> CompanyCandidate | None:
     """Следующий по рейтингу кандидат, не входящий ни в партию, ни в список
     вычеркнутых менеджером, ни уже взятый для сайта где-либо ещё."""
-    taken = _taken_site_keys(db, site_id)
+    taken = taken_site_keys(db, site_id)
     matching = db.scalars(
         select(CompanyCandidate).where(
             CompanyCandidate.region_raw == region_raw,
@@ -43,4 +45,4 @@ def add_next_candidate(db: Session, site_id: int, region_raw: str, category_raw:
     available = [c for c in matching if c.site_key not in skip]
     if not available:
         return None
-    return max(available, key=lambda c: c.reviews_count)
+    return max(available, key=lambda c: (c.reviews_count, c.id))

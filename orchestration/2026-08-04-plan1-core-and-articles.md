@@ -11254,7 +11254,7 @@ git commit -m "feat: страница входа
 **Files:**
 - Create: `execution/frontend/src/pages/ArticlesPage.tsx`
 
-- [ ] **Step 1: Реализация**
+- [x] **Step 1: Реализация**
 
 `execution/frontend/src/pages/ArticlesPage.tsx`:
 
@@ -11274,6 +11274,19 @@ const STATUS: Record<string, { color: string; label: string }> = {
   running: { color: 'processing', label: 'Генерируется' },
   done: { color: 'success', label: 'Готово' },
   failed: { color: 'error', label: 'Ошибка' },
+}
+
+// Находка Task 22, п.1: «по {N} картинки» верно только для 2-4 — для 1 нужно
+// «картинка», для 5+ и для 11-14 — «картинок». reference_images приходит из
+// синхронизации эталонной статьи сайта и может быть любым числом, поэтому
+// склонение считаем по стандартному правилу русского языка, а не полагаемся
+// на форму по умолчанию.
+function pluralizeImages(n: number): string {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  if (mod10 === 1 && mod100 !== 11) return 'картинка'
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'картинки'
+  return 'картинок'
 }
 
 export default function ArticlesPage() {
@@ -11300,13 +11313,24 @@ export default function ArticlesPage() {
   }, [batches])
 
   const submit = async (values: { site_id: number; count: number }) => {
-    const batch = await createBatch(values.site_id, values.count)
-    setOpen(false)
-    form.resetFields()
-    navigate(`/articles/${batch.id}`)
+    try {
+      const batch = await createBatch(values.site_id, values.count)
+      setOpen(false)
+      form.resetFields()
+      navigate(`/articles/${batch.id}`)
+    } catch {
+      // Находка Task 22, п.2 — тот же класс проблемы, что и в LoginPage.tsx
+      // (Task 21): antd Form не ждёt и не перехватывает промис из onFinish,
+      // без catch отказ createBatch (например, случайный 500 или обрыв сети)
+      // стал бы unhandled rejection в консоли браузера. Сообщение об ошибке
+      // уже показывает интерцептор api.ts — здесь catch нужен только чтобы
+      // погасить промис; модалка остаётся открытой с заполненной формой, что
+      // само по себе разумное поведение при ошибке.
+    }
   }
 
-  const selectedSite = sites.find(s => s.id === Form.useWatch('site_id', form))
+  const selectedSiteId = Form.useWatch('site_id', form)
+  const selectedSite = sites.find(s => s.id === selectedSiteId)
 
   return (
     <>
@@ -11347,7 +11371,7 @@ export default function ArticlesPage() {
       </Card>
 
       <Modal open={open} onCancel={() => setOpen(false)} onOk={form.submit}
-             title="Новая партия статей" okText="Подобрать темы" destroyOnClose>
+             title="Новая партия статей" okText="Подобрать темы" destroyOnHidden>
         <Form form={form} layout="vertical" onFinish={submit}
               initialValues={{ count: 5 }} requiredMark={false}>
           <Form.Item name="site_id" label="Сайт"
@@ -11367,7 +11391,8 @@ export default function ArticlesPage() {
             <div style={{ color: '#71717a', fontSize: 13 }}>
               Черновики будут созданы на <b>{selectedSite.domain}</b> в разделе{' '}
               <b>{selectedSite.url_prefix}</b>, по {selectedSite.reference_images}{' '}
-              картинки в статье (столько же, сколько в эталонной статье сайта).
+              {pluralizeImages(selectedSite.reference_images)} в статье (столько же,
+              сколько в эталонной статье сайта).
             </div>
           )}
           {selectedSite && !selectedSite.is_ready && (
@@ -11385,12 +11410,51 @@ export default function ArticlesPage() {
 }
 ```
 
-- [ ] **Step 2: Ручная проверка**
+Находки при реализации (Task 22):
+
+1. **Русское склонение количества картинок.** Форма «картинки» из образца плана
+   верна только для 2-4. Добавлена `pluralizeImages(n)` по стандартному правилу
+   (mod10/mod100) вместо перефразирования без словоформы — короткая фраза читается
+   естественнее, а функция тривиальна и покрывает все случаи (проверено вручную для
+   1, 3, 11 — «картинка», «картинки», «картинок»).
+2. **`submit()` не ловил отказ `createBatch`.** Тот же класс проблемы, что и в
+   `LoginPage.tsx` (Task 21): без `try/catch` отказ стал бы unhandled rejection в
+   консоли. Добавлен пустой `catch` с комментарием — по аналогии с уже принятым
+   решением в LoginPage, консистентность подхода важнее буквального копирования.
+3. **`Form.useWatch('site_id', form)` внутри `.find()`.** В коде из плана хук
+   вызывался внутри callback, переданного в `sites.find(...)`, то есть переменное
+   число раз за рендер в зависимости от того, на каком элементе массива нашлось
+   совпадение (или ни на одном) — нарушение правил хуков React. Исправлено: `useWatch`
+   вынесен в отдельную переменную `selectedSiteId` перед `.find()`, вызывается ровно
+   один раз на рендер. Отдельно проверено эмпирически (см. Step 2): предупреждений от
+   antd про `useWatch` на неподключённой форме при открытии/закрытии модалки не
+   возникает.
+4. **`destroyOnClose` устарел в установленной версии antd (5.29.3).** В браузерной
+   консоли реально появлялось `Warning: [antd: Modal] destroyOnClose is deprecated.
+   Please use destroyOnHidden instead.` Заменено на `destroyOnHidden` — то же
+   поведение (форма пересоздаётся при каждом открытии модалки), без предупреждения.
+
+- [x] **Step 2: Ручная проверка**
 
 Открой `http://localhost:3000/articles`. Проверь: кнопка «Новая партия» открывает форму,
 выбор сайта показывает домен подсказкой, отправка создаёт партию и переводит на её экран.
 
-- [ ] **Step 3: Commit**
+Выполнено реально (headless Chromium через Playwright, т.к. `chromium-cli` в среде не
+установлен) на dev-сервере в docker compose, под `admin@k1.local`, с тестовыми сайтами,
+заведёнными напрямую в БД (`is_active=true`, часть с заполненным `reference_html`/
+`reference_images`, часть без). Экран открылся, кнопка «Новая партия» открывает модалку,
+выбор готового сайта в `Select` показывает подсказку с доменом, разделом и корректно
+склонённым числом картинок (проверено для 1, 3 и 11 — «картинка», «картинки», «картинок»),
+выбор неготового сайта показывает `Alert` «Сайт не готов к генерации». Отправка формы с
+готовым сайтом и количеством 5 создала партию через `POST /api/article-batches` и перевела
+на `/articles/{id}` (страница `BatchPage` на момент проверки — временная заглушка, это
+ожидаемо, она не входит в эту задачу). Модалка открыта/закрыта несколько раз подряд —
+предупреждений от antd про `Form.useWatch` на неподключённой форме в консоли не возникло
+(до правки п.4 в консоли было только предупреждение про устаревший `destroyOnClose`,
+после правки пропало и оно). Скриншоты каждого шага сохранены во временной директории
+сессии (в репозиторий не входят).
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add execution/frontend/src/pages/ArticlesPage.tsx

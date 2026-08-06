@@ -11791,14 +11791,14 @@ git commit -m "feat: экран партии — согласование тем
 **Files:**
 - Create: `execution/frontend/src/pages/AdminSitesPage.tsx`
 
-- [ ] **Step 1: Реализация**
+- [x] **Step 1: Реализация**
 
 `execution/frontend/src/pages/AdminSitesPage.tsx`:
 
 ```tsx
 import { useEffect, useState } from 'react'
 import {
-  Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag,
+  Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag,
   Typography, Upload, message,
 } from 'antd'
 import { PlusOutlined, UploadOutlined } from '@ant-design/icons'
@@ -11818,20 +11818,43 @@ export default function AdminSitesPage() {
 
   const openForm = (site: SiteFull | null) => {
     setEditing(site)
-    form.resetFields()
-    // Токен приходит маской — подставлять её в поле нельзя, иначе маска
-    // уедет обратно на сервер как новое значение.
-    form.setFieldsValue(site ? { ...site, api_token: '' } : {
-      publish_target: 'pages', cover_mode: 'prompt', is_active: true,
-    })
     setOpen(true)
   }
 
+  // Найдено при ручной проверке: с destroyOnHidden Modal размонтирует <Form>,
+  // пока закрыт, и form.resetFields()/setFieldsValue() вызванные синхронно
+  // в openForm() (до применения setOpen) попадали на ещё не подключенный
+  // к DOM экземпляр формы — antd молча принимал значения, но ругался в
+  // консоль ("Instance created by useForm is not connected to any Form
+  // element"). Тот же класс проблемы, что и с unhandled rejection в
+  // предыдущих задачах: функционально работает, но засоряет консоль.
+  // Переносим установку значений в эффект по open — на этот момент Modal
+  // уже примонтировал форму в этом же цикле рендера.
+  useEffect(() => {
+    if (!open) return
+    form.resetFields()
+    // Токен приходит маской — подставлять её в поле нельзя, иначе маска
+    // уедет обратно на сервер как новое значение.
+    form.setFieldsValue(editing ? { ...editing, api_token: '' } : {
+      publish_target: 'pages', cover_mode: 'prompt', is_active: true,
+    })
+  }, [open])
+
   const submit = async (values: Partial<SiteFull>) => {
-    if (editing) await updateSite(editing.id, values)
-    else await createSite(values)
-    setOpen(false)
-    load()
+    try {
+      if (editing) await updateSite(editing.id, values)
+      else await createSite(values)
+      setOpen(false)
+      load()
+    } catch {
+      // Находка Task 21-23 (LoginPage/ArticlesPage/BatchPage) — тот же класс
+      // проблемы: antd Form не ждёт и не перехватывает промис из onFinish,
+      // без catch отказ createSite/updateSite (например, дублирующийся домен
+      // или случайный 500) стал бы unhandled rejection в консоли браузера.
+      // Сообщение об ошибке уже показывает интерцептор api.ts — здесь catch
+      // нужен только чтобы погасить промис; модалка остаётся открытой
+      // с заполненной формой, что само по себе разумное поведение при ошибке.
+    }
   }
 
   const sync = async (site: SiteFull) => {
@@ -11845,6 +11868,13 @@ export default function AdminSitesPage() {
       // что именно не так — токен, id раздела или id эталона.
       message.error(result.detail, 8)
     }
+    // sync_site (app/api/admin_sites.py) сознательно всегда отвечает 200
+    // с {ok, detail} для всех диагностируемых отказов чужого сайта (плохой
+    // токен, не тот id эталона, недоступный раздел и т.п.) — именно чтобы
+    // сюда пришёл предсказуемый результат, а не исключение. syncSite() может
+    // отклониться только при по-настоящему неожиданном сбое (сеть, 500),
+    // который уже покрыт глобальным интерцептором api.ts — отдельный
+    // try/catch здесь не нужен.
   }
 
   return (
@@ -11890,19 +11920,47 @@ export default function AdminSitesPage() {
                   <Upload
                     showUploadList={false}
                     beforeUpload={async file => {
-                      await uploadWatermark(r.id, file as File)
-                      message.success('Водяной знак загружен')
-                      load()
+                      try {
+                        await uploadWatermark(r.id, file as File)
+                        message.success('Водяной знак загружен')
+                        load()
+                      } catch {
+                        // Тот же класс проблемы, что и в submit() выше: Upload
+                        // тоже не ждёт и не обрабатывает отклонённый промис
+                        // beforeUpload — без catch отказ загрузки (например,
+                        // файл не картинка и бэкенд вернул 4xx) стал бы
+                        // unhandled rejection, хотя текст ошибки уже показан
+                        // интерцептором api.ts.
+                      }
                       return false
                     }}
                   >
                     <Button size="small" icon={<UploadOutlined />}>Знак</Button>
                   </Upload>
                   <Button size="small" type="link" onClick={() => openForm(r)}>Правка</Button>
-                  <Button size="small" type="link" danger
-                          onClick={async () => { await deleteSite(r.id); load() }}>
-                    Удалить
-                  </Button>
+                  {/* Обязательная находка: было мгновенное необратимое удаление
+                      по одному клику на маленькой ссылке в плотной строке
+                      таблицы — delete_site (app/api/admin_sites.py) это
+                      жёсткий db.delete без мягкого удаления, восстановить
+                      карточку можно только руками в БД или заведением заново
+                      (включая повторный ввод токена и повторную синхронизацию
+                      эталона). Для сравнения — в BatchPage.tsx (Task 23) кнопка
+                      «Повторить генерацию» одной статьи, действие несравнимо
+                      менее затратное, уже защищена Popconfirm; здесь для более
+                      разрушительного действия защиты не было вовсе. */}
+                  <Popconfirm
+                    title="Удалить сайт?"
+                    description={<>
+                      Токен, тематика, таксономия и путь к водяному знаку
+                      будут удалены безвозвратно. Чтобы вернуть сайт, придётся
+                      завести карточку заново, ввести токен и синхронизировать
+                      эталон с разделом.
+                    </>}
+                    okText="Удалить" okType="danger" cancelText="Отмена"
+                    onConfirm={async () => { await deleteSite(r.id); load() }}
+                  >
+                    <Button size="small" type="link" danger>Удалить</Button>
+                  </Popconfirm>
                 </Space>
               ),
             },
@@ -11911,7 +11969,7 @@ export default function AdminSitesPage() {
       </Card>
 
       <Modal open={open} onCancel={() => setOpen(false)} onOk={form.submit} width={720}
-             title={editing ? `Сайт ${editing.domain}` : 'Новый сайт'} destroyOnClose>
+             title={editing ? `Сайт ${editing.domain}` : 'Новый сайт'} destroyOnHidden>
         <Form form={form} layout="vertical" onFinish={submit} requiredMark={false}>
           <Form.Item name="name" label="Название" rules={[{ required: true }]}>
             <Input />
@@ -11961,8 +12019,8 @@ export default function AdminSitesPage() {
                        ? `Синхронизирована ${dayjs(editing.reference_synced_at)
                             .format('DD.MM.YYYY HH:mm')}, картинок в ней:
                             ${editing.reference_images}`
-                       : 'Её разметка — шаблон для всех статей сайта, а число картинок
-                          в ней задаёт число картинок в новых статьях'}
+                       : `Её разметка — шаблон для всех статей сайта, а число картинок
+                          в ней задаёт число картинок в новых статьях`}
                      rules={[{ required: true, message: 'Эталон обязателен' }]}>
             <InputNumber style={{ width: '100%' }} />
           </Form.Item>
@@ -12000,22 +12058,124 @@ export default function AdminSitesPage() {
 }
 ```
 
-- [ ] **Step 2: Завести четыре рабочих сайта**
+Находки ревью, зафиксированные в коде выше:
 
-Через форму заведи сайты с их реальными токенами из `.env` и значениями таксономии
-из спеки §5: bolars.ru (3/1/1), bolars-shop.ru (4/1/1), vetonit-center.ru (3/1/1),
-stroybaza-samara.ru (3/2/1, `articles_parent_id` = 25).
+1. **Синтаксическая ошибка исходного текста плана.** Многострочная строка
+   в одинарных кавычках (`extra` у поля «ID эталонной статьи», ветка без
+   `editing.reference_synced_at`) была разбита на две физические строки без
+   переноса — валидно для JSX-атрибутов вроде `placeholder="..."`, но не для
+   обычного JS string literal внутри `{}`. `tsc --noEmit` падал с
+   `TS1002: Unterminated string literal`. Заменено на template literal
+   (backtick), где перенос строки — часть синтаксиса.
+2. **Обязательная находка (см. ниже) — удаление сайта без подтверждения**
+   исправлена через `Popconfirm`.
+3. **`submit()`/`beforeUpload` без `try/catch`** — тот же класс проблемы,
+   что и в Task 21-23 (LoginPage/ArticlesPage/BatchPage): antd `Form`/`Upload`
+   не обрабатывают отклонённый промис, поэтому отказ запроса становился бы
+   unhandled rejection в консоли, хотя сообщение об ошибке уже показывает
+   глобальный интерцептор `api.ts`. Решено чинить так же, как и в предыдущих
+   трёх задачах (пустой `catch` ради консольной гигиены) — для консистентности
+   с уже трижды принятым в проекте решением. `sync()` НЕ получил try/catch:
+   докстринг `sync_site` (`app/api/admin_sites.py`) явно говорит, что
+   эндпоинт всегда отвечает 200 с `{ok, detail}` для всех диагностируемых
+   отказов чужого сайта именно для того, чтобы фронт показывал текст, а не
+   падал в общий обработчик — `syncSite()` может отклониться только при
+   по-настоящему неожиданном сбое (сеть, 500), который и так покрыт
+   интерцептором.
+4. **Найдено при ручной проверке (не было в исходной находке плана):**
+   `openForm()` вызывал `form.resetFields()`/`form.setFieldsValue()`
+   синхронно, до `setOpen(true)`. С `destroyOnHidden` (см. п.5) `<Form>`
+   внутри `Modal` в этот момент ещё не примонтирован — antd принимал
+   значения, но ругался в консоль браузера
+   («Instance created by useForm is not connected to any Form element»).
+   Функционально не ломало (значения применялись верно — проверено вручную:
+   поле токена при правке пустое, как и задумано), но забивало консоль.
+   Перенесено в `useEffect` по `open`: на момент срабатывания эффекта Modal
+   уже успевает примонтировать форму в этом же цикле рендера.
+5. **`destroyOnClose` заменён на `destroyOnHidden`** — `destroyOnClose`
+   помечен deprecated в установленной версии antd 5 (предупреждение в
+   консоли при каждом открытии модалки); `ArticlesPage.tsx` (Task 22) уже
+   использует актуальное имя пропа — приведено к единообразию.
 
-Для каждого заполни «О чём сайт и для кого» и «Тон материалов» — без них темы будут
-подбираться мимо тематики. Укажи id эталонной статьи и нажми
-«Проверить и синхронизировать».
+### Обязательная находка — удаление сайта без подтверждения
 
-Expected: сообщение вида «Раздел /blog/, статей в нём N, картинок в эталоне K». Для
-stroybaza-samara.ru N > 0 и K > 0; в таблице появляется префикс раздела и время
-синхронизации. Если раздел на сайте не `/blog/`, а другой — в сообщении будет именно
-он: префикс берётся с родительской страницы, а не подставляется по умолчанию.
+Было: клик по маленькой ссылке `Удалить` в плотной строке таблицы сразу
+слал `DELETE /admin/sites/{id}` — `delete_site` (`app/api/admin_sites.py`)
+это `db.delete(_get_or_404(db, site_id)); db.commit()`, жёсткое необратимое
+удаление всей карточки сайта (токен, описание тематики, таксономия, путь
+к водяному знаку). Восстановить можно только руками в БД или заведением
+заново с нуля. Для сравнения кнопка «Повторить генерацию» одной статьи
+в `BatchPage.tsx` (Task 23) — действие несравнимо менее затратное — уже
+была защищена `Popconfirm`.
 
-- [ ] **Step 3: Commit**
+Починено оборачиванием кнопки в `Popconfirm` с текстом, объясняющим
+необратимость (токен, тематика, таксономия, водяной знак — всё пропадёт,
+карточку придётся заводить заново). Проверено эмпирически Playwright'ом
+(headless Chromium, `npx playwright`, экземпляр установлен и скачан внутри
+задачи для ручной проверки, так как в окружении нет готового браузерного
+драйвера/`chromium-cli`):
+- клик по «Удалить» открывает подтверждение, само удаление не происходит;
+- клик по «Отмена» — строка сайта остаётся в таблице;
+- клик по «Удалить» в подтверждении — только тогда уходит `DELETE`,
+  строка пропадает из таблицы.
+
+### Step 2 — не выполнялся буквально
+
+Исходный текст Step 2 просил завести через форму четыре реальных рабочих
+сайта (bolars.ru, bolars-shop.ru, vetonit-center.ru, stroybaza-samara.ru)
+с их настоящими токенами API из `.env` и реально синхронизировать их
+с настоящими внешними сайтами клиента.
+
+Это не было сделано, и вот почему:
+1. В `execution/` нет файла `.env` — физически нет токенов, которыми можно
+   было бы это выполнить.
+2. Даже если бы токены были, заведение боевых интеграций с реальными
+   продакшн-сайтами клиента (реальные сетевые запросы к чужим системам
+   с реальными секретами) — это бизнес-действие уровня оператора при
+   реальном разворачивании сервиса, а не шаг проверки кода в рамках
+   автономной задачи ревью.
+
+Вместо этого страница проверена на фиктивных данных напрямую в браузере
+(см. «Обязательная находка» выше и раздел ниже):
+- создан тестовый сайт (`qa-test-site.example`, `base_url` сначала
+  `http://127.0.0.1:9999` — порт, который никто не слушает внутри
+  контейнера `api`);
+- правка карточки — поле токена при открытии формы редактирования
+  корректно пустое (маска с сервера в поле не подставляется);
+- загрузка водяного знака и удаление — оба пути проверены (см. находку
+  выше);
+- ветка `ok: false` синхронизации проверена дважды: сначала с полностью
+  недоступным `base_url` (обнаружился побочный баг бэкенда — см. ниже),
+  затем — после переключения `base_url` на локальный `http.server`,
+  отвечающий HTTP 404 — эндпоинт `/admin/sites/{id}/sync` действительно
+  вернул `200 {"ok": false, "detail": "страница 25: HTTP 404: ..."}`,
+  и это тело корректно показалось тостом `message.error` на странице.
+
+Ветка `ok: true` (успешная синхронизация с реальным разделом и эталонной
+статьёй) не проверялась и не может быть проверена в этом окружении —
+для неё нужен реально отвечающий по протоколу сайта (`/api/v1/staticpages/`)
+внешний сервер, которого здесь нет. Заведение четырёх боевых сайтов
+(bolars.ru, bolars-shop.ru, vetonit-center.ru, stroybaza-samara.ru
+с таксономией из спеки §5) остаётся отдельным действием человека-оператора
+при реальном разворачивании сервиса, вне рамок этой задачи.
+
+**Побочная находка вне рамок Task 24 (backend-баг, не исправлялся):**
+при полностью недоступном `base_url` (соединение отклонено, а не просто
+HTTP-ошибка) `sync_site` падает 500 вместо документированного `ok: false`.
+Причина — `app/sites/client.py`: все методы `SiteClient` оборачивают
+только HTTP-уровень (`_check` — не-2xx-ответ) и разбор JSON (`_json`), но
+не сетевые исключения `requests` (`ConnectionError`, `Timeout`, ошибки
+DNS) — те вылетают наружу как есть, а не как `SiteAPIError` с
+`status_code=None`, хотя именно такое поведение описано в докстринге
+`sync_site` («5xx и сетевые сбои повторяются... `SiteAPIError.status_code`
+— `None` для сетевых сбоев»). Файл `app/sites/client.py` не входит
+в Files этой задачи (Task 24 — только фронтенд), поэтому не тронут;
+находка зафиксирована здесь как обнаруженная при ручной проверке,
+чинить или нет — решение за отдельной задачей/ревью бэкенда.
+
+- [x] **Step 2: (не выполнялся буквально — см. раздел выше)**
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add execution/frontend/src/pages/AdminSitesPage.tsx

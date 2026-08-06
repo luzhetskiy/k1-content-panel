@@ -39,9 +39,21 @@ class ArticleBuildError(RuntimeError):
 
 
 def image_filename(article_id: int, position: int) -> str:
-    """position=0 — обложка, дальше контентные по порядку."""
+    """position=0 — обложка, дальше контентные по порядку.
+
+    Префикс "cp-article-" (а не просто "article_") — намеренно: на
+    stroybaza-samara.ru в той же папке filemanager (ARTICLE_IMG_DIR) уже
+    лежат файлы article_1-*.webp..article_6-*.webp, залитые старым CLI-
+    пайплайном (execution/articles/, батч по номеру темы в манифесте, а не
+    по id статьи). Т.к. filemanager при совпадении имени молча
+    перезаписывает файл без суффикса, а id статей здесь — сквозной
+    автоинкремент по всей таблице Article, три первые статьи нового сервиса
+    на этом сайте получили id 4/5/6 и своими картинками затёрли/были
+    затёрты картинками старых статей article_4/5/6 (пиломатериалы,
+    пароизоляция, герметик) — баг был обнаружен на проде. Новый префикс не
+    пересекается со старой схемой ни при каком id."""
     suffix = "cover" if position == 0 else str(position)
-    return f"article_{article_id}-{suffix}.webp"
+    return f"cp-article-{article_id}-{suffix}.webp"
 
 
 def image_paths_for(article_id: int, count: int) -> list[str]:

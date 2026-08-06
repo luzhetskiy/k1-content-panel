@@ -108,14 +108,14 @@ def make_builder(db_session, prepared, site_client=None, body=None):
 
 
 def test_image_filename_is_deterministic():
-    assert image_filename(7, 0) == "article_7-cover.webp"
-    assert image_filename(7, 2) == "article_7-2.webp"
+    assert image_filename(7, 0) == "cp-article-7-cover.webp"
+    assert image_filename(7, 2) == "cp-article-7-2.webp"
 
 
 def test_image_paths_use_article_img_dir():
     assert image_paths_for(7, 2) == [
-        "/media/uploads/article-img/article_7-1.webp",
-        "/media/uploads/article-img/article_7-2.webp",
+        "/media/uploads/article-img/cp-article-7-1.webp",
+        "/media/uploads/article-img/cp-article-7-2.webp",
     ]
 
 

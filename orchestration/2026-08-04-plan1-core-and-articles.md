@@ -11468,9 +11468,10 @@ git commit -m "feat: экран списка партий статей"
 **Files:**
 - Create: `execution/frontend/src/pages/BatchPage.tsx`
 
-- [ ] **Step 1: Реализация**
+- [x] **Step 1: Реализация**
 
-`execution/frontend/src/pages/BatchPage.tsx`:
+`execution/frontend/src/pages/BatchPage.tsx` — реализовано с двумя отступлениями от
+черновика плана (обе — реальные находки ревью, детали ниже кода):
 
 ```tsx
 import { useEffect, useState } from 'react'
@@ -11496,11 +11497,31 @@ export default function BatchPage() {
   const batchId = Number(id)
   const [batch, setBatch] = useState<Batch | null>(null)
   const [topics, setTopics] = useState<string[]>([])
-  const [saving, setSaving] = useState(false)
+  // Находка №1 ревью Task 23: изначально было отдельное состояние `saving`,
+  // которое включалось только внутри persist() и не покрывало последующий
+  // runBatch(). Если темы не менялись, persist() вообще не вызывался —
+  // кнопка «Запустить генерацию» ни разу не становилась занятой, и второй
+  // клик до ответа runBatch() отправлял бы второй запрос ещё до того, как
+  // первый успел перевести batch.status в "running" на бэкенде
+  // (app/api/article_batches.py, run()). Бэкенд эту гонку сужает (синхронный
+  // перевод в "running" до постановки в очередь, см. комментарий там же), но
+  // не отменяет полностью — окно между кликом и ответом сервера всё ещё
+  // открыто, особенно на медленной сети, когда пользователь скорее всего
+  // решит, что первый клик не сработал, и кликнет снова. `starting`
+  // накрывает ВЕСЬ start() целиком — persist, runBatch и финальный load(), —
+  // поэтому отдельное `saving` для одного лишь persist() было бы избыточным
+  // состоянием, которое никто не читает: persist() вызывается только отсюда.
+  const [starting, setStarting] = useState(false)
 
   const load = () => getBatch(batchId).then(b => {
     setBatch(b)
-    if (EDITABLE.includes(b.status)) setTopics(b.articles.map(a => a.topic))
+    // Находка №2 ревью Task 23 (см. также комментарий у `editable` ниже):
+    // темы в форму подставляем только когда партия действительно
+    // редактируема — то есть ещё и нет ни одной опубликованной статьи.
+    // Иначе бессмысленно готовить состояние формы, которая не будет
+    // показана.
+    const hasPublished = b.articles.some(a => a.status === 'published')
+    if (EDITABLE.includes(b.status) && !hasPublished) setTopics(b.articles.map(a => a.topic))
     return b
   })
 
@@ -11517,25 +11538,50 @@ export default function BatchPage() {
 
   if (!batch) return null
 
-  const editable = EDITABLE.includes(batch.status)
+  // Находка №2 ревью Task 23: EDITABLE.includes(batch.status) одного статуса
+  // недостаточно. batch.status становится "failed" не только когда подбор
+  // тем не удался (тогда статей ещё нет вовсе), но и когда партия честно
+  // частично собралась — часть Article уже status="published" с реальными
+  // remote_page_id/remote_url на сайте, — а потом сборка оборвалась по
+  // таймауту или ошибке конфигурации (app/tasks.py, обработчик
+  // SoftTimeLimitExceeded). В этом случае бэкендный save_topics
+  // (app/api/article_batches.py) откажет 400 при ЛЮБОЙ попытке сохранить
+  // темы — правка тем для партии с опубликованными статьями осмысленно
+  // запрещена (Task 18: удалить/переписать статьи, часть из которых уже
+  // реально существует на сайте, — потерять журнал публикаций). Не полагаемся
+  // на то, что бэкенд откажет: заранее не показываем форму редактирования,
+  // которая гарантированно упадёт, а сразу показываем табличный режим с
+  // кнопкой повтора для конкретных упавших статей.
+  const hasPublished = batch.articles.some(a => a.status === 'published')
+  const editable = EDITABLE.includes(batch.status) && !hasPublished
 
   const persist = async (next: string[]) => {
-    setSaving(true)
-    try {
-      setBatch(await saveTopics(batchId, next))
-      setTopics(next)
-    } finally {
-      setSaving(false)
-    }
+    setBatch(await saveTopics(batchId, next))
+    setTopics(next)
   }
 
   const start = async () => {
-    if (topics.join('|') !== batch.articles.map(a => a.topic).join('|')) {
+    setStarting(true)
+    try {
+      // Лёгкий пункт (план Task 23): раньше здесь темы сохранялись только
+      // если `topics.join('|') !== batch.articles.map(a => a.topic).join('|')`
+      // отличались. Сравнение через склейку с разделителем '|' даёт ложные
+      // совпадения: если тема реально содержит символ '|' (например,
+      // «AI | будущее контента» — не экзотика для заголовка статьи), два
+      // РАЗНЫХ массива тем могут дать одинаковую строку после join('|')
+      // (["a|b", "c"] и ["a", "b|c"]), и реально изменённые темы не будут
+      // сохранены перед запуском — в производство уйдут старые формулировки.
+      // Решение: убрать сравнение вовсе и всегда звать persist(topics) перед
+      // runBatch. saveTopics — недорогая операция (обновление одной таблицы
+      // статей в рамках одной партии), лишний HTTP-вызов, когда темы и так
+      // не менялись, дешевле, чем риск потерять правки менеджера.
       await persist(topics)
+      await runBatch(batchId)
+      message.success(`Запущено. Черновики появятся на ${batch.site_domain}`)
+      await load()
+    } finally {
+      setStarting(false)
     }
-    await runBatch(batchId)
-    message.success(`Запущено. Черновики появятся на ${batch.site_domain}`)
-    load()
   }
 
   return (
@@ -11558,14 +11604,33 @@ export default function BatchPage() {
                message="Подбираем темы — обычно занимает до минуты" />
       )}
 
+      {/* Находка №2: явно объясняем, почему редактирование тем недоступно,
+          вместо того чтобы пользователь наткнулся на это только через отказ
+          бэкенда при попытке сохранить. */}
+      {batch.status === 'failed' && hasPublished && (
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }}
+               message="Часть статей уже опубликована"
+               description="Партия прервалась после того, как часть статей была реально
+                            опубликована на сайте. Правка списка тем для такой партии
+                            недоступна — повтори генерацию для конкретной упавшей статьи
+                            в таблице ниже." />
+      )}
+
       {editable ? (
         <Card title="Согласование тем" extra={
           <Space>
-            <Button icon={<PlusOutlined />} onClick={() => setTopics([...topics, ''])}>
+            <Button icon={<PlusOutlined />} disabled={starting}
+                    onClick={() => setTopics([...topics, ''])}>
               Добавить тему
             </Button>
-            <Button type="primary" loading={saving}
-                    disabled={topics.filter(t => t.trim()).length === 0} onClick={start}>
+            {/* Находка №1: loading и disabled завязаны на `starting`, который
+                выставлен на всё время start() — сохранение тем (если нужно),
+                запуск партии и финальную перезагрузку данных. Кнопка недоступна
+                для повторного клика весь этот период, а не только на время
+                persist(). */}
+            <Button type="primary" loading={starting}
+                    disabled={starting || topics.filter(t => t.trim()).length === 0}
+                    onClick={start}>
               Запустить генерацию
             </Button>
           </Space>
@@ -11576,13 +11641,14 @@ export default function BatchPage() {
                 <Input
                   value={topic}
                   placeholder="Заголовок статьи"
+                  disabled={starting}
                   onChange={e => {
                     const next = [...topics]
                     next[index] = e.target.value
                     setTopics(next)
                   }}
                 />
-                <Button icon={<DeleteOutlined />}
+                <Button icon={<DeleteOutlined />} disabled={starting}
                         onClick={() => setTopics(topics.filter((_, i) => i !== index))} />
               </Space.Compact>
             ))}
@@ -11637,14 +11703,81 @@ export default function BatchPage() {
 }
 ```
 
-- [ ] **Step 2: Ручная проверка**
+**Находка №1 ревью Task 23 (обязательная, подтвердилась):** состояние `saving` из
+черновика плана покрывало только вызов `persist()` и не покрывало `runBatch()` после
+него — при неизменных темах кнопка вообще ни разу не становилась занятой на весь
+`start()`. Почил: единое состояние `starting`, выставляемое в начале `start()` и
+снимаемое в `finally` после `persist` + `runBatch` + `load()`; кнопка «Запустить
+генерацию» и все поля/кнопки формы (`Input`, «Добавить тему», кнопки удаления)
+получили `disabled={starting}` — блокируется вся форма, а не только кнопка запуска.
 
-Создай партию на 2 статьи. Проверь: темы появляются и редактируются, лишняя удаляется,
-своя добавляется, «Запустить генерацию» переключает экран в таблицу прогресса, статусы
-обновляются сами, ссылка на черновик открывает страницу на сайте, у упавшей статьи
-раскрывается текст ошибки и работает кнопка повтора.
+**Находка №2 ревью Task 23 (обязательная, подтвердилась):** `editable` теперь равно
+`EDITABLE.includes(batch.status) && !hasPublished`, где `hasPublished =
+batch.articles.some(a => a.status === 'published')`. Если в партии `status="failed"`
+есть хоть одна опубликованная статья, показывается табличный режим, а не форма
+редактирования тем, плюс добавлен поясняющий `Alert` («Часть статей уже
+опубликована»), явно указывающий использовать повтор конкретной статьи.
 
-- [ ] **Step 3: Commit**
+**Лёгкий пункт (сравнение тем через `join('|')`):** решение — убрать сравнение вовсе и
+всегда вызывать `persist(topics)` перед `runBatch()`. `join('|')` даёт ложные
+совпадения для тем, содержащих символ `|` (`["a|b","c"]` и `["a","b|c"]` дают
+одинаковую строку), из-за чего реально изменённые темы могли бы не сохраниться перед
+запуском. `saveTopics` — недорогой PUT одной партии, лишний HTTP-вызов, когда темы не
+менялись, дешевле риска отправить в генерацию устаревший список. Побочный эффект:
+раз persist вызывается всегда, отдельное состояние `saving` стало не нужно (см. находку
+№1) и убрано.
+
+- [x] **Step 2: Ручная проверка**
+
+Выполнено эмпирически через headless-браузер (Playwright/Chromium, локально
+установленный из кеша `~/Library/Caches/ms-playwright`, реального браузерного UI-тула в
+рабочем окружении не было) поверх поднятых `docker compose up -d api frontend`, с тремя
+тестовыми партиями, заведёнными напрямую в БД (`docker compose run --rm backend
+python3 -c "..."`, по образцу `tests/test_api_batches.py`), и админом
+`admin@k1.local` для логина.
+
+- **Базовый флоу (партия из 2 статей, `topics_review`):** темы отрисовались в двух
+  полях ввода; «Добавить тему» добавило третье пустое поле; удаление первой темы
+  оставило корректные оставшиеся две (`['Тема два', 'Новая тема руками']`) —
+  `Space.Compact key={index}` не путает состояние строк при удалении.
+- **Переключение в таблицу прогресса и обновление статусов:** после «Запустить
+  генерацию» экран переключился на табличный режим со статусами «Ожидает»; на другой
+  партии, где статья была переведена в `status="published"` с `remote_url`, ссылка
+  «открыть» отрисовалась с корректным `href="https://x-batchpage.ru/poleznye-stati/a/"`
+  и `target="_blank"` (сам переход не выполнялся — реального внешнего сайта нет).
+- **Ошибка и повтор:** у статьи с `status="failed"` и `error_text` раскрывающаяся
+  строка показала точный текст ошибки («Таймаут генерации текста после 3 попыток»);
+  клик по кнопке повтора (через `Popconfirm`) вызвал `POST /api/articles/{id}/retry` и
+  строка обновилась на статус «Генерируется» — синхронный перевод статуса на бэкенде
+  (Task 18) виден и на фронтенде сразу после `load()`.
+- **Находка №1 (двойной клик), эмпирическая проверка:** сеть намеренно замедлена через
+  CDP (`Network.emulateNetworkConditions`, latency 800мс, throughput ~50 Кбит/с) для
+  расширения окна гонки; по кнопке «Запустить генерацию» отправлены два настоящих
+  клика мыши подряд без пауз (`page.mouse.click` дважды по одним координатам, в обход
+  собственного ожидания «доступности элемента» у Playwright, которое иначе
+  маскировало бы именно то, что проверяется). Через 150мс после кликов кнопка была
+  `disabled: true`; итоговый список сетевых запросов на `/api/article-batches/8/topics`
+  и `/api/article-batches/8/run` содержал ровно ОДНУ пару запросов, а не две. Прямая
+  проверка очереди Celery (`redis-cli lrange celery 0 -1`) после теста показала ровно
+  один элемент `app.tasks.run_batch` с `[8]` — второй клик не породил вторую задачу.
+  До фикса (находка №1) второй клик успевал бы уйти в промежутке между ответом
+  `persist()` и стартом `runBatch()`, отправляя вторую пару запросов.
+- **Находка №2 (партия с опубликованной + упавшей статьёй), эмпирическая проверка:**
+  партия с `batch.status="failed"`, одной статьёй `status="published"`
+  (`remote_page_id=42, remote_url=...`) и одной `status="failed"`
+  (`error_text="Таймаут генерации текста после 3 попыток"`) показала табличный режим
+  с предупреждающим `Alert` «Часть статей уже опубликована» и кнопкой повтора только
+  у упавшей строки — форма редактирования тем НЕ отрисовалась (`Согласование тем`:
+  0 совпадений в DOM). Скриншот сохранён в скретчпад-директории сессии в процессе
+  проверки (не входит в состав коммита).
+
+По завершении проверки тестовый сайт, все три тестовые партии со статьями и очередь
+Celery удалены (`docker compose run --rm backend python3 -c "..."`, `redis-cli del
+celery`), контейнеры остановлены (`docker compose down`); временные заглушки
+отсутствующих страниц (`JobsPage`, 4 admin-страницы) удалены до коммита — `git status`
+показывал только `execution/frontend/src/pages/BatchPage.tsx`.
+
+- [x] **Step 3: Commit**
 
 ```bash
 git add execution/frontend/src/pages/BatchPage.tsx

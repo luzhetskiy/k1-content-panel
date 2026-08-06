@@ -1,0 +1,70 @@
+x-backend-base: &backend-base
+  build: ./backend
+  restart: unless-stopped
+  volumes:
+    - media:/app/media
+  environment: &backend-env
+    # Форма `:?` — обязательное значение: незаданная переменная в форме
+    # `${VAR}` разворачивается в пустую строку, и прод молча поднимется,
+    # подписывая токены пустым секретом. `:?` роняет запуск с внятным текстом.
+    DATABASE_URL: postgresql+psycopg://app:${DB_PASSWORD:?DB_PASSWORD не задан}@postgres:5432/content
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: ${JWT_SECRET:?JWT_SECRET не задан}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY не задан}
+    COOKIE_SECURE: "true"
+    MEDIA_DIR: /app/media
+    TZ: Europe/Samara
+
+services:
+  migrate:
+    <<: *backend-base
+    restart: "no"
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend-base
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *backend-base
+    # concurrency=2: одновременно идут максимум две партии, внутри каждой
+    # картинки уже генерируются в несколько потоков.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports: ["127.0.0.1:8080:80"]
+    depends_on: [api]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: content
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD не задан}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d content"]
+      interval: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+
+volumes:
+  postgres_data:
+  redis_data:
+  media:

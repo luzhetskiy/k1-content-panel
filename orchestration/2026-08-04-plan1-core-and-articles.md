@@ -12836,7 +12836,7 @@ git commit -m "feat: экраны промптов, настроек, польз
 - Create: `execution/docker-compose.prod.yml`, `execution/.env.prod.example`
 - Create: `DEPLOY.md`
 
-- [ ] **Step 1: Образ фронтенда**
+- [x] **Step 1: Образ фронтенда**
 
 `execution/frontend/Dockerfile`:
 
@@ -12891,7 +12891,7 @@ server {
 }
 ```
 
-- [ ] **Step 2: Продовый compose**
+- [x] **Step 2: Продовый compose**
 
 `execution/docker-compose.prod.yml`:
 
@@ -12978,7 +12978,7 @@ JWT_SECRET=
 ENCRYPTION_KEY=
 ```
 
-- [ ] **Step 3: DEPLOY.md**
+- [x] **Step 3: DEPLOY.md**
 
 Создай `DEPLOY.md` по образцу `../inntec-inbox/DEPLOY.md` со следующими разделами:
 подготовка VPS (docker, docker compose), клонирование репозитория, заполнение
@@ -12990,7 +12990,7 @@ ENCRYPTION_KEY=
 неполадки (нерасшифровываемые токены после смены `ENCRYPTION_KEY`, worker без
 задач, 403 от API сайта).
 
-- [ ] **Step 4: Проверить продовую сборку локально**
+- [x] **Step 4: Проверить продовую сборку локально**
 
 Run:
 ```bash

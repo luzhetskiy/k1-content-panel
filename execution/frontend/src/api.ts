@@ -1,6 +1,28 @@
 import axios from 'axios'
 import { message } from 'antd'
 
+// Правка из находки Task 21 (изначально этот блок был написан в Task 20).
+// Раньше «тихую» ветку 401 выбирали по location.pathname.startsWith('/login') —
+// то есть по тому, НА КАКОЙ СТРАНИЦЕ идёт запрос, а не по тому, КАКОЙ ЗАПРОС
+// упал. На /login это ломалось: там одновременно живут два разных запроса,
+// падающих 401 —
+//   1. фоновый me() из AuthProvider (auth.tsx), которым просто проверяют,
+//      жива ли сессия; 401 здесь ожидаем и не должен показывать тост;
+//   2. login() из LoginPage при вводе неверного пароля; 401 здесь — реальная
+//      ошибка, которую пользователь обязан увидеть.
+// Оба запроса происходят на одном и том же pathname ('/login'), поэтому
+// проверка по странице не отличала их и тихо проглатывала оба — при неверном
+// пароле пользователь не видел вообще никакого сообщения. Различаем теперь
+// сам запрос, а не текущий URL: помечаем именно вызов me() опциональным полем
+// конфига axios-запроса (silentAuthCheck), которое переживает round-trip и
+// доступно в error.config интерцептора.
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    // true только у фонового me() — см. комментарий выше и export const me().
+    silentAuthCheck?: boolean
+  }
+}
+
 const api = axios.create({ baseURL: '/api' })
 
 api.interceptors.response.use(
@@ -8,16 +30,14 @@ api.interceptors.response.use(
   error => {
     const status = error.response?.status
     const onLoginPage = location.pathname.startsWith('/login')
-    if (status === 401 && !onLoginPage) {
+    if (status === 401 && error.config?.silentAuthCheck) {
+      // Ожидаемый случай, а не ошибка: это ответ именно на me(), которым
+      // AuthProvider при каждом монтировании молча проверяет, жива ли сессия
+      // (cookie httpOnly из JS не читается — это единственный способ
+      // спросить бэкенд). Метка на запросе, а не текущая страница: так
+      // login() с той же /login отсюда не попадает и обрабатывается ниже.
+    } else if (status === 401 && !onLoginPage) {
       location.href = '/login'
-    } else if (status === 401 && onLoginPage) {
-      // Ожидаемый случай, а не ошибка: AuthProvider (auth.tsx) при каждом монтировании
-      // зовёт me(), чтобы узнать, жива ли сессия — cookie httpOnly из JS не читается,
-      // это единственный способ спросить бэкенд. При обычном первом открытии /login
-      // неавторизованным пользователем бэкенд закономерно отвечает 401
-      // (get_current_user, app/api/deps.py), и это не повод показывать тост с ошибкой.
-      // Без этой ветки 401 на /login проваливался бы в общий else ниже и красный
-      // тост «Ошибка сервера» всплывал бы при каждом обычном заходе на страницу входа.
     } else if (status === 403) {
       message.error('Нет доступа')
     } else {
@@ -77,7 +97,8 @@ export const login = (email: string, password: string) => {
   return api.post<Profile>('/auth/login', form).then(r => r.data)
 }
 export const logout = () => api.post('/auth/logout')
-export const me = () => api.get<Profile>('/auth/me').then(r => r.data)
+export const me = () =>
+  api.get<Profile>('/auth/me', { silentAuthCheck: true }).then(r => r.data)
 
 export const getSites = () => api.get<SiteBrief[]>('/sites').then(r => r.data)
 export const getAdminSites = () => api.get<SiteFull[]>('/admin/sites').then(r => r.data)

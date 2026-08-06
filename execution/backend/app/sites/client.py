@@ -147,6 +147,20 @@ class SiteClient:
             "создание страницы")
         return self._json(response, "создание страницы")
 
+    def update_page_text(self, page_id: int, html: str) -> dict:
+        """PATCH тела уже существующей страницы. Используется вне обычного
+        потока сборки (build_for создаёт страницу один раз и больше не
+        трогает) — для ручного исправления уже опубликованного контента,
+        например замены путей картинок после коллизии имён в filemanager."""
+        payload = {"text": strip_html_comments(html).strip()}
+        response = self._check(
+            requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
+                           json=payload,
+                           headers={**self._headers, "Content-Type": "application/json"},
+                           timeout=self.timeout),
+            f"обновление страницы {page_id}")
+        return self._json(response, f"обновление страницы {page_id}")
+
     def set_page_cover(self, page_id: int, image_bytes: bytes, filename: str) -> str:
         """teaser_image — ImageField страницы: путём-строкой не задаётся (400),
         только multipart прямо в поле."""

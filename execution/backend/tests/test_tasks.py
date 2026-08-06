@@ -44,6 +44,27 @@ def patch_deps(monkeypatch, topics, existing=None):
             list_section_pages=lambda prefix: existing or []))
 
 
+def patch_deps_sequence(monkeypatch, topic_rounds, existing=None):
+    """Как patch_deps, но каждый вызов complete_json отдаёт следующий список
+    из topic_rounds (последний — для всех вызовов сверх длины списка) —
+    для теста добора тем, где раунды должны отличаться."""
+    calls = {"n": 0}
+
+    def complete_json(prompt):
+        index = min(calls["n"], len(topic_rounds) - 1)
+        calls["n"] += 1
+        return JsonResult(topic_rounds[index], 10, 20, 0.2)
+
+    monkeypatch.setattr(
+        "app.tasks.build_text_client",
+        lambda db: SimpleNamespace(model="m", complete_json=complete_json))
+    monkeypatch.setattr(
+        "app.tasks.open_site_client",
+        lambda db, site: SimpleNamespace(
+            list_section_pages=lambda prefix: existing or []))
+    return calls
+
+
 def test_generate_topics_fills_articles(db_session, batch, monkeypatch):
     # Не "Тема А"/"Тема Б"/"Тема В": буквы-суффиксы А/В транслитерируются в
     # "a"/"v" — предлоги из _STOPWORDS (app/articles/topics.py) — и после
@@ -69,6 +90,42 @@ def test_generate_topics_drops_duplicates(db_session, batch, monkeypatch):
     generate_topics_sync(db_session, batch.id)
     db_session.refresh(batch)
     assert [a.topic for a in batch.articles] == ["Как выбрать кровлю"]
+
+
+def test_generate_topics_tops_up_after_duplicates(db_session, batch, monkeypatch):
+    # batch.requested_count == 3 (см. фикстуру). Первый раунд отдаёт только
+    # одну новую тему (вторая — дубль уже существующей на сайте), второй
+    # раунд добирает недостающие две — итог должен закрыть все 3.
+    calls = patch_deps_sequence(
+        monkeypatch,
+        [
+            ["Чем утеплить каркасный дом", "Как выбрать кровлю"],
+            ["Монтаж вентилируемого фасада", "Укладка тротуарной плитки"],
+        ],
+        existing=[{"title": "Чем утеплить каркасный дом", "url": "/blog/a/"}])
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "topics_review"
+    assert [a.topic for a in batch.articles] == [
+        "Как выбрать кровлю", "Монтаж вентилируемого фасада",
+        "Укладка тротуарной плитки"]
+    assert calls["n"] == 2  # ровно один добор, не третий раунд впустую
+
+
+def test_generate_topics_stops_after_max_topup_rounds(db_session, batch, monkeypatch):
+    # Модель раз за разом предлагает один и тот же дубль — партия не должна
+    # долбить в неё бесконечно, а завершиться с тем, что реально набралось.
+    calls = patch_deps_sequence(
+        monkeypatch, [["Чем утеплить каркасный дом"]],
+        existing=[{"title": "Чем утеплить каркасный дом", "url": "/blog/a/"}])
+    generate_topics_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "topics_review"
+    assert batch.articles == []
+    assert calls["n"] == 3  # первый раунд + 2 добора (_TOPICS_TOPUP_ROUNDS), не больше
+
+    job = db_session.query(JobRun).filter_by(kind="generate_topics").one()
+    assert "из 3 запрошенных" in job.log_text
 
 
 def test_generate_topics_records_job_run(db_session, batch, monkeypatch):

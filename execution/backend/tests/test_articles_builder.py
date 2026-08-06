@@ -140,8 +140,8 @@ def test_build_uploads_content_images_and_cover(db_session, prepared):
     site_client = FakeSiteClient()
     make_builder(db_session, prepared, site_client).build()
     # 2 контентные картинки идут через filemanager, обложка — отдельным PATCH
-    assert site_client.uploaded == ["article_1-1.webp", "article_1-2.webp"]
-    assert site_client.cover == (501, "article_1-cover.webp")
+    assert site_client.uploaded == ["cp-article-1-1.webp", "cp-article-1-2.webp"]
+    assert site_client.cover == (501, "cp-article-1-cover.webp")
 
 
 def test_reference_comes_from_cache_without_network(db_session, prepared):
@@ -161,8 +161,8 @@ def test_image_count_follows_reference(db_session, prepared):
     site_client = FakeSiteClient()
     builder = make_builder(db_session, prepared, site_client)
     builder.build()
-    assert site_client.uploaded == ["article_1-1.webp", "article_1-2.webp",
-                                    "article_1-3.webp"]
+    assert site_client.uploaded == ["cp-article-1-1.webp", "cp-article-1-2.webp",
+                                    "cp-article-1-3.webp"]
     assert "3 иллюстраций" in builder.text_client.prompts[0]
 
 

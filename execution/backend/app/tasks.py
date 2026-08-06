@@ -30,6 +30,14 @@ from app.sites.client import SiteAPIError
 # статус ещё topics_pending/failed» в этом коде не возникает.
 _TOPICS_RUNNABLE_STATUSES = ("topics_pending", "failed")
 
+# Сколько ДОПОЛНИТЕЛЬНЫХ раундов генерации делать, если часть предложенных
+# тем отсеялась как дубли и partии не хватает до requested_count. 2 —
+# всего до 3 раундов (первый + 2 добора): достаточно, чтобы модель отошла
+# от только что отсеянных вариантов, но не раскручивает стоимость запроса
+# бесконечно, если тематика сайта реально исчерпана и модели предложить
+# больше нечего.
+_TOPICS_TOPUP_ROUNDS = 2
+
 
 def _start_job(db, kind: str, site_id: int | None, created_by_id: int | None,
                params: dict) -> JobRun:
@@ -89,26 +97,50 @@ def generate_topics_sync(db, batch_id: int) -> None:
         existing = [p.get("title", "") for p in
                     open_site_client(db, site).list_section_pages(site.articles_url_prefix)]
         template = resolve_prompt(db, "topics", site.id)
-        prompt = render_prompt(template, {
-            "count": batch.requested_count,
-            "site_name": site.name,
-            "site_description": site.site_description,
-            "tone_of_voice": site.tone_of_voice,
-            "existing_titles": existing,
-        })
-        result = build_text_client(db).complete_json(prompt)
-        if not isinstance(result.data, list):
-            raise LLMError("модель вернула не массив тем")
+        text_client = build_text_client(db)
 
-        proposed = [str(t).strip() for t in result.data if str(t).strip()]
-        kept, dropped = filter_duplicates(proposed, existing)
+        # known_titles растёт с каждым раундом (существующие на сайте + уже
+        # принятые в этой партии), поэтому следующий раунд просит модель не
+        # повторять и то, что она сама только что предложила, а не только
+        # то, что уже было на сайте до старта. total_proposed/dropped — для
+        # честного лога, а не для решения о повторе: решение только по
+        # len(kept) vs requested_count.
+        known_titles = list(existing)
+        kept: list[str] = []
+        dropped: list[str] = []
+        total_proposed = 0
+
+        for _ in range(_TOPICS_TOPUP_ROUNDS + 1):
+            remaining = batch.requested_count - len(kept)
+            if remaining <= 0:
+                break
+            prompt = render_prompt(template, {
+                "count": remaining,
+                "site_name": site.name,
+                "site_description": site.site_description,
+                "tone_of_voice": site.tone_of_voice,
+                "existing_titles": known_titles,
+            })
+            result = text_client.complete_json(prompt)
+            if not isinstance(result.data, list):
+                raise LLMError("модель вернула не массив тем")
+
+            proposed = [str(t).strip() for t in result.data if str(t).strip()]
+            total_proposed += len(proposed)
+            round_kept, round_dropped = filter_duplicates(proposed, known_titles)
+            kept.extend(round_kept)
+            dropped.extend(round_dropped)
+            known_titles.extend(round_kept)
+
         for topic in kept:
             db.add(Article(batch_id=batch.id, site_id=site.id, topic=topic))
         batch.status = "topics_review"
         db.commit()
-        _finish_job(db, job, "ok",
-                    f"предложено {len(proposed)}, отсеяно дублей {len(dropped)}, "
-                    f"принято {len(kept)}")
+        log = (f"предложено {total_proposed}, отсеяно дублей {len(dropped)}, "
+               f"принято {len(kept)}")
+        if len(kept) < batch.requested_count:
+            log += f" из {batch.requested_count} запрошенных — тем для добора не нашлось"
+        _finish_job(db, job, "ok", log)
     # Находка №1 ревью Task 17: AIConfigError (Task 13, app/ai/factory.py) не
     # входила в этот список — она моложе исходного except-списка. Без неё
     # build_text_client(db) при незаполненном ключе RouterAI (или неверном

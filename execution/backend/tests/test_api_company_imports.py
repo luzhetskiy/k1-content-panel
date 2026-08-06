@@ -48,3 +48,13 @@ def test_facets_endpoint_requires_site_id(manager_client, db_session):
     resp = manager_client.get(f"/api/company-imports/facets?site_id={site.id}")
     assert resp.status_code == 200
     assert resp.json() == {"regions": ["Самара"], "categories": ["Дома"]}
+
+
+def test_upload_requires_auth(client):
+    resp = client.post("/api/company-imports", files={"file": ("b.xlsx", b"x", "application/octet-stream")})
+    assert resp.status_code == 401
+
+
+def test_facets_requires_auth(client):
+    resp = client.get("/api/company-imports/facets?site_id=1")
+    assert resp.status_code == 401

@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel
-
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -38,5 +37,8 @@ def upload_import(file: UploadFile = File(...), db: Session = Depends(get_db),
 @router.get("/facets", response_model=FacetsOut)
 def facets(site_id: int, db: Session = Depends(get_db),
           _user: User = Depends(get_current_user)):
+    # Несуществующий site_id не даёт 404 — просто ни у одного кандидата нет
+    # взятых компаний для него, поэтому возвращается полный пул facets без
+    # исключений. Это осознанное поведение, а не недосмотр.
     result = get_facets(db, site_id)
     return FacetsOut(regions=result.regions, categories=result.categories)

@@ -10464,7 +10464,7 @@ git commit -m "feat: API пользователей с защитой после
 - Create: `execution/frontend/package.json`, `tsconfig.json`, `tsconfig.node.json`, `vite.config.ts`, `index.html`
 - Create: `execution/frontend/src/main.tsx`, `index.css`, `App.tsx`, `auth.tsx`, `api.ts`
 
-- [ ] **Step 1: package.json**
+- [x] **Step 1: package.json**
 
 `execution/frontend/package.json` — состав ровно как в `nst-tg-monitor`:
 
@@ -10500,7 +10500,7 @@ git commit -m "feat: API пользователей с защитой после
 
 `recharts` не ставим: графиков в плане 1 нет, журнал показывает суммы числами.
 
-- [ ] **Step 2: Конфигурация сборки**
+- [x] **Step 2: Конфигурация сборки**
 
 `execution/frontend/vite.config.ts`:
 
@@ -10576,13 +10576,18 @@ export default defineConfig({
 </html>
 ```
 
-- [ ] **Step 3: Стили**
+- [x] **Step 3: Стили**
 
-`execution/frontend/src/index.css` — копия файла `../nst-tg-monitor/frontend/src/index.css` без изменений (нейтральная палитра, ховер карточек, шапка таблицы, скроллбар, мобильные правила).
+`execution/frontend/src/index.css` — копия файла `../nst-tg-monitor/frontend/src/index.css` без изменений (нейтральная палитра, ховер карточек, шапка таблицы, скроллбар, мобильные правила). Реально скопирован командой `cp` и сверен `diff` — файлы побайтово идентичны.
 
-- [ ] **Step 4: Клиент API**
+- [x] **Step 4: Клиент API**
 
-`execution/frontend/src/api.ts`:
+`execution/frontend/src/api.ts` — с двумя правками против исходного черновика плана (обе обязательны, найдены при реализации Task 20):
+
+1. Интерцептор ошибок теперь не показывает тост при ожидаемом 401 на `/login` (AuthProvider дёргает `me()` при каждом монтировании, включая случай, когда пользователь ещё не залогинен и как раз открыл `/login`, — раньше это проваливалось в общий `else` и показывало «Ошибка сервера» при каждом обычном заходе на страницу входа).
+2. `getSettings`/`updateSettings` типизированы через `SettingsMap = Record<string, string> & { _errors?: Record<string, string> }`, а не плоский `Record<string, string>` — реальный бэкенд (`_current_settings`, `app/api/admin_settings.py`) добавляет ключ `_errors` как вложенный объект `{ключ: сообщение}`, если секретную настройку не удалось расшифровать.
+
+```ts
 
 ```ts
 import axios from 'axios'
@@ -10594,8 +10599,17 @@ api.interceptors.response.use(
   r => r,
   error => {
     const status = error.response?.status
-    if (status === 401 && !location.pathname.startsWith('/login')) {
+    const onLoginPage = location.pathname.startsWith('/login')
+    if (status === 401 && !onLoginPage) {
       location.href = '/login'
+    } else if (status === 401 && onLoginPage) {
+      // Ожидаемый случай, а не ошибка: AuthProvider (auth.tsx) при каждом монтировании
+      // зовёт me(), чтобы узнать, жива ли сессия — cookie httpOnly из JS не читается,
+      // это единственный способ спросить бэкенд. При обычном первом открытии /login
+      // неавторизованным пользователем бэкенд закономерно отвечает 401
+      // (get_current_user, app/api/deps.py), и это не повод показывать тост с ошибкой.
+      // Без этой ветки 401 на /login проваливался бы в общий else ниже и красный
+      // тост «Ошибка сервера» всплывал бы при каждом обычном заходе на страницу входа.
     } else if (status === 403) {
       message.error('Нет доступа')
     } else {
@@ -10640,6 +10654,15 @@ export interface JobRow {
 export interface UserRow {
   id: number; email: string; full_name: string; role: string; is_active: boolean
 }
+// Бэкенд (_current_settings, app/api/admin_settings.py) обычно отдаёт плоский
+// набор строк, но если секретную настройку не удалось расшифровать (например,
+// ENCRYPTION_KEY сменился), в ответ добавляется ключ "_errors" — это не строка,
+// а вложенный объект { ключ_настройки: текст_ошибки }. Плоский
+// Record<string, string> эту форму не описывает: TypeScript считал бы
+// settings['_errors'] строкой, хотя по факту это объект, и код читающий это
+// поле как строку упал бы в рантайме. Пересечение типов явно выделяет
+// "_errors" как опциональное поле другой формы, не трогая остальные ключи.
+export type SettingsMap = Record<string, string> & { _errors?: Record<string, string> }
 
 export const login = (email: string, password: string) => {
   const form = new URLSearchParams({ username: email, password })
@@ -10676,9 +10699,9 @@ export const runBatch = (id: number) =>
   api.post<Batch>(`/article-batches/${id}/run`).then(r => r.data)
 export const retryArticle = (id: number) => api.post(`/articles/${id}/retry`)
 
-export const getSettings = () => api.get<Record<string, string>>('/admin/settings').then(r => r.data)
+export const getSettings = () => api.get<SettingsMap>('/admin/settings').then(r => r.data)
 export const updateSettings = (d: Record<string, string>) =>
-  api.put<Record<string, string>>('/admin/settings', d).then(r => r.data)
+  api.put<SettingsMap>('/admin/settings', d).then(r => r.data)
 
 export const getPrompts = () => api.get<Prompt[]>('/admin/prompts').then(r => r.data)
 export const savePrompt = (d: Partial<Prompt>) =>
@@ -10699,7 +10722,7 @@ export const deleteUser = (id: number) => api.delete(`/admin/users/${id}`)
 export default api
 ```
 
-- [ ] **Step 5: Контекст авторизации**
+- [x] **Step 5: Контекст авторизации**
 
 `execution/frontend/src/auth.tsx`:
 
@@ -10726,7 +10749,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Cookie httpOnly из JS не читается — единственный способ узнать, жива ли
-    // сессия, это спросить бэкенд.
+    // сессия, это спросить бэкенд. Ожидаемый 401 здесь (пользователь ещё не
+    // залогинен, в том числе на /login) интерцептор api.ts обрабатывает молча —
+    // см. комментарий там же.
     me().then(setProfile).catch(() => setProfile(null)).finally(() => setLoading(false))
   }, [])
 
@@ -10742,7 +10767,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 ```
 
-- [ ] **Step 6: Точка входа и оболочка**
+- [x] **Step 6: Точка входа и оболочка**
 
 `execution/frontend/src/main.tsx`:
 
@@ -10769,10 +10794,16 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 `execution/frontend/src/App.tsx` — layout и тема переносятся из
 `../nst-tg-monitor/frontend/src/App.tsx`: акцент `#dca34c` и все производные оттенки
 остаются без изменений, меняются только пункты меню, логотип и роуты, добавляется
-фильтрация admin-пунктов и выход.
+фильтрация admin-пунктов и выход. Дополнительно (решение принято при реализации
+Task 20, в исходном черновике плана не было): добавлен клиентский `AdminRoute` guard
+на admin-маршрутах — пункты меню и без того скрыты от не-admin, но прямой переход по
+URL (`/admin/sites` и т.п.) ничем на уровне роутинга не блокировался. Дыры в
+безопасности в этом нет (бэкенд проверяет роль на каждый запрос), но без guard
+менеджер видел бы пустую оболочку admin-страницы и тост «Нет доступа» на каждый её
+запрос — редирект на `/articles` до рендера страницы дешевле и опрятнее.
 
 ```tsx
-import { useEffect, useState } from 'react'
+import { useEffect, useState, ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { ConfigProvider, Layout, Menu, Drawer, Button, Dropdown } from 'antd'
 import {
@@ -10869,6 +10900,20 @@ export default function App() {
   )
 }
 
+// Пункты меню уже скрыты от не-admin (items ниже), но прямой переход по URL
+// (например, менеджер набрал /admin/sites руками или перешёл по старой
+// ссылке) ничем на уровне роутинга раньше не блокировался — <Routes> внутри
+// Shell() рендерил страницу безусловно. Дыры в безопасности в этом нет:
+// бэкенд проверяет роль на каждый запрос (require_role("admin")) и вернул бы
+// 403 на все данные страницы. Но без редиректа менеджер сначала видел бы
+// пустую оболочку админской страницы и тост «Нет доступа» из интерцептора
+// api.ts на каждый её запрос — редирект на /articles до рендера страницы
+// дешевле и опрятнее для UX, поэтому добавлен уже в каркасе, а не отложен.
+function AdminRoute({ children }: { children: ReactNode }) {
+  const { isAdmin } = useAuth()
+  return isAdmin ? <>{children}</> : <Navigate to="/articles" replace />
+}
+
 function Shell() {
   const { profile, isAdmin } = useAuth()
   const [isMobile, setIsMobile] = useState(false)
@@ -10960,10 +11005,10 @@ function Shell() {
               </div>
             } />
             <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/admin/sites" element={<AdminSitesPage />} />
-            <Route path="/admin/prompts" element={<AdminPromptsPage />} />
-            <Route path="/admin/settings" element={<AdminSettingsPage />} />
-            <Route path="/admin/users" element={<AdminUsersPage />} />
+            <Route path="/admin/sites" element={<AdminRoute><AdminSitesPage /></AdminRoute>} />
+            <Route path="/admin/prompts" element={<AdminRoute><AdminPromptsPage /></AdminRoute>} />
+            <Route path="/admin/settings" element={<AdminRoute><AdminSettingsPage /></AdminRoute>} />
+            <Route path="/admin/users" element={<AdminRoute><AdminUsersPage /></AdminRoute>} />
           </Routes>
         </Content>
       </Layout>
@@ -10990,12 +11035,27 @@ function SideNav({ items, onNavigate }: {
 }
 ```
 
-- [ ] **Step 7: Проверить сборку**
+- [x] **Step 7: Проверить сборку**
 
 Run: `cd execution && docker compose up -d api && docker compose run --rm frontend sh -c "npm install && npm run build"`
 Expected: сборка падает на отсутствующих файлах страниц — это ожидаемо, страницы создаются в задачах 21–25. Отсутствие ошибок в `App.tsx`, `api.ts`, `auth.tsx` подтверждает корректность каркаса.
 
-- [ ] **Step 8: Commit**
+Реально прогнано. `npm install` отработал (161 пакет, сетевой доступ в окружении есть). Полный вывод `tsc` (единственный источник ошибок — отсутствующие модули страниц, других ошибок типов нет):
+
+```
+src/App.tsx(11,23): error TS2307: Cannot find module './pages/LoginPage' or its corresponding type declarations.
+src/App.tsx(12,26): error TS2307: Cannot find module './pages/ArticlesPage' or its corresponding type declarations.
+src/App.tsx(13,23): error TS2307: Cannot find module './pages/BatchPage' or its corresponding type declarations.
+src/App.tsx(14,22): error TS2307: Cannot find module './pages/JobsPage' or its corresponding type declarations.
+src/App.tsx(15,28): error TS2307: Cannot find module './pages/AdminSitesPage' or its corresponding type declarations.
+src/App.tsx(16,30): error TS2307: Cannot find module './pages/AdminPromptsPage' or its corresponding type declarations.
+src/App.tsx(17,31): error TS2307: Cannot find module './pages/AdminSettingsPage' or its corresponding type declarations.
+src/App.tsx(18,28): error TS2307: Cannot find module './pages/AdminUsersPage' or its corresponding type declarations.
+```
+
+Ручной прогон dev-сервера не выполнялся: страниц ещё нет, `Shell` не смонтируется (те же отсутствующие модули), содержательной проверки в браузере на этом этапе не получить — она осмысленна начиная с Task 21 (первая реальная страница, `LoginPage`).
+
+- [x] **Step 8: Commit**
 
 ```bash
 git add execution/frontend

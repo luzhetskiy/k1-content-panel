@@ -150,6 +150,16 @@ def remove_company(batch_id: int, company_id: int, db: Session = Depends(get_db)
     # вычеркнули — вместо следующего по рейтингу кандидата. Симметрично
     # design-докстрингу Company.batch_id (batch.py) — SET NULL, не CASCADE,
     # потому что запись о компании независима от партии.
+    #
+    # Это осознанное и постоянное исключение компании для данного сайта
+    # (не временное «может предложим позже») — согласуется с моделью дедупа
+    # всего фича-набора: «единожды взята для сайта — взята навсегда»
+    # (directions/2026-08-06-builders-import-design.md).
+    #
+    # Такие строки (batch_id=NULL, candidate_id НЕ NULL — пришли из реального
+    # CompanyCandidate через _company_from_candidate) отличимы от будущих
+    # Task 15 строк, мигрированных из старой CLI-базы: у тех candidate_id
+    # будет NULL, так как они никогда не проходили через отбор кандидатов.
     company.batch_id = None
     db.commit()
     db.refresh(batch)

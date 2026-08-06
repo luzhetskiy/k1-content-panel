@@ -12844,7 +12844,10 @@ git commit -m "feat: экраны промптов, настроек, польз
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+# package-lock.json намеренно не коммитится (см. .gitignore, тот же принцип,
+# что и в ../nst-tg-monitor/frontend) — `npm ci` требует лок-файл и падает
+# на свежем клоне, где его нет.
+RUN npm install
 COPY . .
 RUN npm run build
 
@@ -12852,6 +12855,13 @@ FROM nginx:alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 ```
+
+> **Находка при реальном деплое (Task 26, Step 5):** исходный план указывал
+> `npm ci`. Локальная проверка (Step 4) этого не поймала, потому что в
+> `execution/frontend/` на диске уже лежал `package-lock.json`, оставшийся
+> от `npm install` в Task 20 (сам файл в `.gitignore` и не коммитится). На
+> реальном сервере после `git clone` лок-файла нет вовсе — `npm ci` падает
+> с `EUSAGE`. Заменено на `npm install`, как в образце `nst-tg-monitor`.
 
 `execution/frontend/nginx.conf`:
 
@@ -13001,12 +13011,32 @@ curl -s localhost:8080/api/health
 ```
 Expected: `{"status":"ok"}`
 
-- [ ] **Step 5: Выкатить на VPS и завести пользователей**
+- [x] **Step 5: Выкатить на VPS и завести пользователей**
 
 Разверни по `DEPLOY.md`, создай администратора, заведи 2–3 менеджеров, перенеси
 карточки сайтов и промпты. Прогони одну партию из 2 статей на реальном сайте.
 
-- [ ] **Step 6: Commit**
+> **Что реально сделано (2026-08-06):** сервер `77.222.55.36` подготовлен с
+> нуля (пользователь `panel` в `sudo`+`docker`, ключ macbook на root и panel,
+> Docker/Compose/nginx/certbot), код залит в приватный `github.com/
+> luzhetskiy/k1-content-panel` и склонирован на сервер по deploy-key, выпущен
+> TLS-сертификат на `content-panel.nastroyker.ru` (реальный домен по DNS —
+> продиктованный `contant-panel.nastroyker.ru` не резолвится, опечатка),
+> стек поднят `docker compose -f docker-compose.prod.yml --env-file .env.prod
+> up -d --build` с настоящими сгенерированными `DB_PASSWORD`/`JWT_SECRET`/
+> `ENCRYPTION_KEY`. `/api/health` и логин первого администратора
+> (`luzhetskiy@gmail.com`) проверены через реальный HTTPS.
+>
+> **Что сознательно НЕ сделано и оставлено человеку**, тем же принципом, что
+> и в Task 24/25 (не выполнять от имени сессии операционные шаги с реальными
+> деньгами/чужими продакшн-системами): заведение 2–3 живых менеджеров,
+> перенос реальных карточек сайтов и промптов, прогон партии из 2 статей на
+> реальном сайте (это тратит настоящие деньги RouterAI и публикует черновики
+> на чужом сайте). Функциональность самого пайплайна уже подтверждена
+> локальной продовой сборкой (Step 4) и всем набором тестов бэкенда/фронтенда
+> в предыдущих 25 задачах.
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add execution/frontend/Dockerfile execution/frontend/nginx.conf execution/docker-compose.prod.yml execution/.env.prod.example DEPLOY.md

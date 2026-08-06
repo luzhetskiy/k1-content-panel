@@ -51,6 +51,13 @@ def test_facets_lists_distinct_region_and_category(db_session):
     assert set(facets.categories) == {"Дома", "Бани"}
 
 
+def test_import_file_records_failed_status_on_broken_file(db_session):
+    imp = import_file(db_session, b"not a real xlsx file", "broken.xlsx", uploaded_by_id=None)
+    assert imp.status == "failed"
+    assert imp.error_message
+    assert db_session.query(CompanyCandidate).count() == 0
+
+
 def test_facets_excludes_pairs_fully_taken_for_site(db_session):
     data = _wb_bytes([["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 1, 1, 4.0]])
     import_file(db_session, data, "builders.xlsx", uploaded_by_id=None)

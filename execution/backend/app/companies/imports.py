@@ -23,19 +23,34 @@ def import_file(db: Session, data: bytes, filename: str,
         db.add(imp)
         db.commit()
         return imp
+    except Exception:
+        # Файл не распознан даже как валидный xlsx (битый zip и т.п.) —
+        # openpyxl падает раньше, чем успевает сработать XlsxParseError.
+        imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
+                            status="failed",
+                            error_message="не удалось прочитать файл — проверьте, что это корректный xlsx")
+        db.add(imp)
+        db.commit()
+        return imp
 
     imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
                         row_count=len(rows), matched_count=len(rows), status="parsed")
     db.add(imp)
     db.flush()
 
+    existing_by_key = {
+        c.site_key: c for c in
+        db.scalars(select(CompanyCandidate).where(
+            CompanyCandidate.site_key.in_({row.site_key for row in rows})
+        )).all()
+    }
+
     for row in rows:
-        existing = db.scalars(
-            select(CompanyCandidate).where(CompanyCandidate.site_key == row.site_key)
-        ).first()
+        existing = existing_by_key.get(row.site_key)
         if existing is None:
             existing = CompanyCandidate(site_key=row.site_key)
             db.add(existing)
+            existing_by_key[row.site_key] = existing
         existing.website_raw = row.website_raw
         existing.name = row.name
         existing.region_raw = row.region_raw
@@ -53,7 +68,16 @@ def import_file(db: Session, data: bytes, filename: str,
         existing.raw_row_json = row.raw_row
         existing.updated_at = utcnow()
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        imp.status = "failed"
+        imp.error_message = "не удалось сохранить компании — проверьте данные файла"
+        db.add(imp)
+        db.commit()
+        return imp
+
     return imp
 
 

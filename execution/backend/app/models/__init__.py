@@ -1,5 +1,7 @@
 from app.models.article import Article, ArticleBatch, ArticleImage
-from app.models.company import CompanyCandidate, CompanyImport
+from app.models.company import (
+    Company, CompanyBatch, CompanyCandidate, CompanyImport, CompanyInfo,
+)
 from app.models.job import JobRun, LlmUsage
 from app.models.prompt_template import PromptTemplate
 from app.models.setting import Setting
@@ -11,7 +13,7 @@ from app.models.user import User
 # модель — добавляй сюда, а не в env.py/conftest.py по отдельности.
 __all__ = [
     "Article", "ArticleBatch", "ArticleImage",
-    "CompanyCandidate", "CompanyImport",
+    "Company", "CompanyBatch", "CompanyCandidate", "CompanyImport", "CompanyInfo",
     "JobRun", "LlmUsage",
     "PromptTemplate", "Setting", "Site", "User",
 ]

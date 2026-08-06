@@ -64,3 +64,23 @@ def test_duplicate_site_key_within_file_collapses_to_one_row():
     rows = parse_workbook(data)
     assert len(rows) == 1
     assert rows[0].reviews_count == 6   # последняя встреченная строка побеждает
+
+
+def test_short_row_does_not_crash():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Название", "Категории", "Регион", "Город", "Сайт"])   # короткий заголовок, без числовых колонок
+    ws.append(["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    rows = parse_workbook(buf.getvalue())
+    assert len(rows) == 1
+    assert rows[0].reviews_count == 0
+
+
+def test_empty_workbook_raises_parse_error():
+    wb = openpyxl.Workbook()
+    buf = io.BytesIO()
+    wb.save(buf)
+    with pytest.raises(XlsxParseError):
+        parse_workbook(buf.getvalue())

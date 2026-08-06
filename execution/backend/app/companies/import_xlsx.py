@@ -130,7 +130,11 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
     try:
         ws = wb.worksheets[0]
         rows_iter = ws.iter_rows(values_only=True)
-        header = _build_header_map(next(rows_iter))
+        try:
+            header_row = next(rows_iter)
+        except StopIteration:
+            raise XlsxParseError("файл пуст — нет строки заголовка")
+        header = _build_header_map(header_row)
 
         by_key: dict[str, ParsedRow] = {}
         for row in rows_iter:
@@ -148,6 +152,11 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
             phone = (_get(row, header, "phone_landline")
                      or _get(row, header, "phone_mobile") or "")
 
+            raw_row = {}
+            for k in header:
+                val = _get(row, header, k)
+                raw_row[str(k)] = val if isinstance(val, (str, int, float, type(None))) else str(val)
+
             by_key[key] = ParsedRow(
                 site_key=key,
                 website_raw=website_raw,
@@ -164,8 +173,7 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
                 lat=_to_float(_get(row, header, "lat")),
                 lon=_to_float(_get(row, header, "lon")),
                 yandex_url=str(_get(row, header, "yandex_card") or "").strip(),
-                raw_row={str(k): (v if isinstance(row[idx], (str, int, float, type(None))) else str(v))
-                        for k, idx in header.items() for v in [row[idx]]},
+                raw_row=raw_row,
             )
         return list(by_key.values())
     finally:

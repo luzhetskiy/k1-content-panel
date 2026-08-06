@@ -12192,7 +12192,7 @@ git commit -m "feat: экран управления сайтами"
 - Create: `execution/frontend/src/pages/AdminUsersPage.tsx`
 - Create: `execution/frontend/src/pages/JobsPage.tsx`
 
-- [ ] **Step 1: Экран промптов с тестовым прогоном**
+- [x] **Step 1: Экран промптов с тестовым прогоном**
 
 `execution/frontend/src/pages/AdminPromptsPage.tsx`:
 
@@ -12224,7 +12224,20 @@ export default function AdminPromptsPage() {
     for (const item of KEYS) {
       const override = rows.find(r => r.key === item.key && r.site_id === siteId)
       const global = rows.find(r => r.key === item.key && r.site_id === null)
-      next[item.key] = override?.text ?? global?.text ?? ''
+      // Обязательная находка №1: resolve_prompt (app/ai/prompts.py) игнорирует
+      // оверрайд сайта, если тот пуст ПОСЛЕ trim (`override.text.strip()`), и
+      // в этом случае реально используемым при генерации текстом становится
+      // global.text — это штатный, задокументированный способ «сбросить
+      // промпт сайта на глобальный», не удаляя саму запись PromptTemplate.
+      // Прежнее `override?.text ?? global?.text ?? ''` этого не учитывало:
+      // `??` не срабатывает на существующую пустую строку, только на
+      // null/undefined, поэтому админ, очистивший и сохранивший оверрайд,
+      // видел бы на экране пустое поле — хотя при следующей генерации статьи
+      // реально использовался бы непустой глобальный текст. Расхождение
+      // между тем, что видно, и тем, что реально произойдёт. Повторяем здесь
+      // ту же проверку .trim(), что и на бэкенде.
+      const overrideText = override && override.text.trim() ? override.text : undefined
+      next[item.key] = overrideText ?? global?.text ?? ''
     }
     setTexts(next)
   })
@@ -12233,9 +12246,17 @@ export default function AdminPromptsPage() {
   useEffect(() => { load() }, [siteId])
 
   const save = async (key: string) => {
-    await savePrompt({ key, site_id: siteId, text: texts[key] })
-    message.success(siteId ? 'Промпт сохранён для сайта' : 'Глобальный промпт сохранён')
-    load()
+    try {
+      await savePrompt({ key, site_id: siteId, text: texts[key] })
+      message.success(siteId ? 'Промпт сохранён для сайта' : 'Глобальный промпт сохранён')
+      load()
+    } catch {
+      // Устоявшийся в проекте паттерн (Task 21-24): onClick не оборачивается
+      // antd-формой, которая сама поглощает отказ onFinish, — без catch здесь
+      // отклонённый промис savePrompt (например, ошибка шаблона от
+      // check_template) стал бы unhandled rejection в консоли, хотя текст
+      // ошибки и так уже показан глобальным интерцептором api.ts.
+    }
   }
 
   const runTest = async (key: string) => {
@@ -12243,6 +12264,10 @@ export default function AdminPromptsPage() {
     setResult(null)
     try {
       setResult(await testPrompt(texts[key], KEYS.find(k => k.key === key)!.vars))
+    } catch {
+      // Тот же класс проблемы, что и в save() выше — testPrompt может
+      // отклониться (ошибка шаблона, сбой RouterAI), интерцептор уже покажет
+      // сообщение, catch здесь только гасит unhandled rejection.
     } finally {
       setBusy(false)
     }
@@ -12298,7 +12323,7 @@ export default function AdminPromptsPage() {
 }
 ```
 
-- [ ] **Step 2: Экран настроек**
+- [x] **Step 2: Экран настроек**
 
 > Бэкенд (Task 6) отдаёт секретное поле `routerai_api_key` либо маской
 > (`sk-...alue`), либо пустой строкой — никогда как значение, пригодное для
@@ -12319,21 +12344,42 @@ export default function AdminPromptsPage() {
 
 ```tsx
 import { useEffect, useState } from 'react'
-import { Button, Card, Form, Input, Select, Typography, message } from 'antd'
+import { Alert, Button, Card, Form, Input, Select, Typography, message } from 'antd'
 import { getSettings, updateSettings } from '../api'
 
 export default function AdminSettingsPage() {
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
+  // Обязательная находка №2: _errors — диагностика вида
+  // { имя_настройки: текст_ошибки }, а не обычное строковое поле формы.
+  // Она появляется в ответе GET (_current_settings, app/api/admin_settings.py),
+  // когда SettingsService.get_secret не может расшифровать секрет текущим
+  // ENCRYPTION_KEY (реалистичный сценарий — ключ шифрования сменили в .env,
+  // а секрет в БД остался зашифрован прежним). Держим её отдельно от полей
+  // формы: form.setFieldsValue({ ...v }) без разбора положило бы _errors
+  // как несвязанное с реальными Form.Item значение — оно бы просто молча
+  // терялось, а админ не узнал бы, что ключ битый и его нужно ввести заново.
+  const [errors, setErrors] = useState<Record<string, string> | null>(null)
 
-  useEffect(() => { getSettings().then(v => form.setFieldsValue({ ...v, routerai_api_key: '' })) }, [])
+  useEffect(() => {
+    getSettings().then(({ _errors, ...values }) => {
+      form.setFieldsValue({ ...values, routerai_api_key: '' })
+      setErrors(_errors && Object.keys(_errors).length > 0 ? _errors : null)
+    })
+  }, [])
 
   const submit = async (values: Record<string, string>) => {
     setLoading(true)
     try {
-      const saved = await updateSettings(values)
+      const { _errors, ...saved } = await updateSettings(values)
       form.setFieldsValue({ ...saved, routerai_api_key: '' })
+      setErrors(_errors && Object.keys(_errors).length > 0 ? _errors : null)
       message.success('Настройки сохранены')
+    } catch {
+      // Устоявшийся в проекте паттерн (Task 21-24): onFinish не перехватывается
+      // самой antd-формой — без catch отказ updateSettings (например, 422 на
+      // невалидном int-поле) стал бы unhandled rejection, хотя текст ошибки
+      // уже показан глобальным интерцептором api.ts.
     } finally {
       setLoading(false)
     }
@@ -12342,6 +12388,26 @@ export default function AdminSettingsPage() {
   return (
     <>
       <Typography.Title level={4} style={{ marginTop: 0 }}>Настройки RouterAI</Typography.Title>
+
+      {errors && (
+        <Alert
+          type="warning" showIcon style={{ maxWidth: 620, marginBottom: 16 }}
+          message="Не удалось расшифровать часть секретных настроек"
+          description={
+            <>
+              Скорее всего сменился ENCRYPTION_KEY в окружении сервера, а секрет
+              в базе остался зашифрован прежним ключом. Ниже перечисленные поля
+              нужно ввести заново и сохранить.
+              <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+                {Object.entries(errors).map(([key, text]) => (
+                  <li key={key}><b>{key}</b>: {text}</li>
+                ))}
+              </ul>
+            </>
+          }
+        />
+      )}
+
       <Card style={{ maxWidth: 620 }}>
         <Form form={form} layout="vertical" onFinish={submit} requiredMark={false}>
           <Form.Item name="routerai_base_url" label="Базовый URL">
@@ -12381,14 +12447,14 @@ export default function AdminSettingsPage() {
 }
 ```
 
-- [ ] **Step 3: Экран пользователей**
+- [x] **Step 3: Экран пользователей**
 
 `execution/frontend/src/pages/AdminUsersPage.tsx`:
 
 ```tsx
 import { useEffect, useState } from 'react'
 import {
-  Button, Card, Form, Input, Modal, Select, Space, Switch, Table, Tag, Typography,
+  Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography,
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { UserRow, createUser, deleteUser, getUsers, updateUser } from '../api'
@@ -12404,17 +12470,38 @@ export default function AdminUsersPage() {
 
   const openForm = (user: UserRow | null) => {
     setEditing(user)
-    form.resetFields()
-    form.setFieldsValue(user ? { ...user, password: '' }
-                             : { role: 'manager', is_active: true })
     setOpen(true)
   }
 
+  // Найдено при ручной проверке (тот же дефект, что и в AdminSitesPage.tsx,
+  // Task 24): с destroyOnHidden Modal размонтирует <Form>, пока закрыт, и
+  // form.resetFields()/setFieldsValue(), вызванные синхронно в openForm() до
+  // применения setOpen, попадали на ещё не подключенный к DOM экземпляр формы
+  // — antd молча принимал значения, но ругался в консоль ("Instance created
+  // by useForm is not connected to any Form element"). Функционально работало
+  // (поля заполнялись верно), но засоряло консоль при каждом открытии модалки.
+  // Перенесено в эффект по open — Modal к этому моменту уже монтирует форму
+  // в том же цикле рендера.
+  useEffect(() => {
+    if (!open) return
+    form.resetFields()
+    form.setFieldsValue(editing ? { ...editing, password: '' }
+                                 : { role: 'manager', is_active: true })
+  }, [open])
+
   const submit = async (values: Record<string, unknown>) => {
-    if (editing) await updateUser(editing.id, values)
-    else await createUser(values)
-    setOpen(false)
-    load()
+    try {
+      if (editing) await updateUser(editing.id, values)
+      else await createUser(values)
+      setOpen(false)
+      load()
+    } catch {
+      // Устоявшийся в проекте паттерн (Task 21-24): onFinish не перехватывается
+      // самой antd-формой — без catch отказ createUser/updateUser (например,
+      // «это последний активный администратор» или занятый email) стал бы
+      // unhandled rejection, хотя текст ошибки уже показан глобальным
+      // интерцептором api.ts. Модалка остаётся открытой с заполненной формой.
+    }
   }
 
   return (
@@ -12449,10 +12536,27 @@ export default function AdminUsersPage() {
               render: (_, r: UserRow) => (
                 <Space>
                   <Button size="small" type="link" onClick={() => openForm(r)}>Правка</Button>
-                  <Button size="small" type="link" danger
-                          onClick={async () => { await deleteUser(r.id); load() }}>
-                    Удалить
-                  </Button>
+                  {/* Обязательная находка №3 (тот же класс, что и удаление сайта
+                      в AdminSitesPage.tsx, Task 24): было мгновенное необратимое
+                      удаление одним кликом по маленькой ссылке в плотной строке
+                      таблицы. delete_user (app/api/admin_users.py) — жёсткий
+                      db.delete без мягкого удаления и без восстановления из
+                      интерфейса; единственная защита на бэкенде — от удаления
+                      последнего активного администратора, обычного менеджера
+                      или не-последнего админа ничто раньше не защищало на
+                      фронте. */}
+                  <Popconfirm
+                    title="Удалить пользователя?"
+                    description={<>
+                      Учётная запись {r.email} будет удалена безвозвратно. Партии
+                      и задачи, которые он создавал, останутся в журнале без
+                      привязки к автору.
+                    </>}
+                    okText="Удалить" okType="danger" cancelText="Отмена"
+                    onConfirm={async () => { await deleteUser(r.id); load() }}
+                  >
+                    <Button size="small" type="link" danger>Удалить</Button>
+                  </Popconfirm>
                 </Space>
               ),
             },
@@ -12461,7 +12565,7 @@ export default function AdminUsersPage() {
       </Card>
 
       <Modal open={open} onCancel={() => setOpen(false)} onOk={form.submit}
-             title={editing ? 'Изменение пользователя' : 'Новый пользователь'} destroyOnClose>
+             title={editing ? 'Изменение пользователя' : 'Новый пользователь'} destroyOnHidden>
         <Form form={form} layout="vertical" onFinish={submit} requiredMark={false}>
           <Form.Item name="email" label="Email" rules={[{ required: true }]}>
             <Input />
@@ -12488,7 +12592,7 @@ export default function AdminUsersPage() {
 }
 ```
 
-- [ ] **Step 4: Журнал задач**
+- [x] **Step 4: Журнал задач**
 
 `execution/frontend/src/pages/JobsPage.tsx`:
 
@@ -12509,6 +12613,21 @@ export default function JobsPage() {
 
   useEffect(() => {
     getJobs().then(setJobs)
+    // Лёгкий пункт плана: фоновый опрос без .catch() при обрыве сети даёт
+    // отдельный тост «Ошибка сервера» через глобальный интерцептор (api.ts)
+    // на каждый неудачный запрос — то есть каждые 10 секунд, пока сеть не
+    // восстановится. Решение: НЕ чинить здесь тем же приёмом, что и
+    // silentAuthCheck у me() (Task 21). Там 401 — ОЖИДАЕМЫЙ ответ на каждый
+    // вызов (это и есть сама проверка сессии), поэтому тост нужно было
+    // подавлять всегда. Здесь же ошибка НЕ ожидаема — это реальный сбой сети
+    // или сервера, о котором пользователь должен узнать; просто он узнает об
+    // этом несколько раз подряд, если разрыв длится дольше 10 секунд. Тосты
+    // antd самостоятельно исчезают через несколько секунд и не блокируют
+    // работу со страницей, а тот же самый непокрытый catch уже есть в
+    // ArticlesPage.tsx и BatchPage.tsx (их поллинг вне Files этой задачи —
+    // не трогаю). Ради единообразия между тремя похожими местами оставляю
+    // как есть и фиксирую это решение здесь, а не молча расхожусь с уже
+    // принятым для двух других экранов поведением.
     const timer = setInterval(() => getJobs().then(setJobs), 10000)
     return () => clearInterval(timer)
   }, [])
@@ -12561,23 +12680,145 @@ export default function JobsPage() {
 }
 ```
 
-- [ ] **Step 5: Собрать фронт целиком**
+Находки ревью, зафиксированные в коде выше:
+
+1. **Обязательная находка №1 (AdminPromptsPage.tsx)** — пустой (после trim)
+   оверрайд промпта сайта показывался как пустой текст, хотя `resolve_prompt`
+   (`app/ai/prompts.py`) в этом случае реально использует global-текст
+   (`override.text.strip()` пусто → игнорируется). Прежнее
+   `override?.text ?? global?.text ?? ''` не отличало «оверрайда нет» от
+   «оверрайд есть, но пуст» — `??` не срабатывает на существующую пустую
+   строку. Починено повторением той же проверки `.trim()`, что и на бэкенде:
+   `override && override.text.trim() ? override.text : undefined`. Проверено
+   и curl'ом напрямую к `resolve_prompt` (сверка байт-в-байт с ответом
+   бэкенда), и headless-браузером (Chromium, см. ниже): сохранён уникальный
+   оверрайд промпта `cover` для тестового сайта → виден на экране; оверрайд
+   очищен (сохранён пробелами) и сохранён; после перезагрузки/переключения
+   таба видно ИМЕННО глобальный текст промпта `cover`, а не пустоту.
+2. **Обязательная находка №2 (AdminSettingsPage.tsx)** — собственный
+   блокцитат плана над Step 2 требовал показывать `_errors` предупреждением,
+   код этого не делал. Починено: `_errors` деструктурируется из ответа
+   `getSettings()`/`updateSettings()` отдельно от полей формы (не уходит ни
+   в `form.setFieldsValue`, ни обратно в PUT), хранится в state и рендерится
+   через `Alert` (`type="warning"`) со списком «настройка → текст ошибки»
+   над формой. Проверено эмпирически: секрет `routerai_api_key` сохранён
+   через `SettingsService.set_secret` одним ключом Fernet, затем сырое
+   значение в таблице `settings` подменено на зашифрованное ДРУГИМ
+   сгенерированным ключом Fernet (эмуляция смены `ENCRYPTION_KEY` в `.env`
+   без миграции существующих секретов) — `GET /api/admin/settings` вернул
+   `_errors: {"routerai_api_key": "настройка 'routerai_api_key' зашифрована
+   другим ключом — ..."}`, Alert с этим текстом появился на экране, поле
+   `routerai_api_key` осталось пустым (не подставляется маска/ошибка).
+   После пересохранения ключа через форму `_errors` пропал — проверено и
+   через API, и в браузере.
+3. **Обязательная находка №3 (AdminUsersPage.tsx)** — удаление пользователя
+   одним кликом по маленькой ссылке без подтверждения; `delete_user`
+   (`app/api/admin_users.py`) — жёсткий `db.delete` без мягкого удаления,
+   и защищает только от удаления последнего активного администратора, не
+   от случайного клика по обычному менеджеру. Починено тем же способом, что
+   и удаление сайта в `AdminSitesPage.tsx` (Task 24) — `Popconfirm` с текстом
+   про необратимость. Проверено headless-браузером: клик по «Удалить»
+   открывает подтверждение и не удаляет; «Отмена» — строка остаётся; повторный
+   клик + «Удалить» в подтверждении — только тогда уходит `DELETE`, строка
+   пропадает из таблицы.
+4. **Найдено при ручной проверке (не было в исходной находке плана):**
+   тот же дефект, что и в `AdminSitesPage.tsx` (Task 24, находка №4 в его
+   списке) — `openForm()` вызывал `form.resetFields()`/`form.setFieldsValue()`
+   синхронно, до `setOpen(true)`. С `destroyOnHidden` `<Form>` внутри `Modal`
+   в этот момент ещё не примонтирован — antd принимал значения корректно
+   (поле email при создании пустое, при правке заполнено — проверено), но
+   ругался в консоль браузера ровно то же предупреждение, что и в Task 24
+   («Instance created by useForm is not connected to any Form element»).
+   Перенесено в `useEffect` по `open`, тем же способом, что и там. Проверено
+   headless-браузером: после фикса предупреждение в консоли при открытии
+   модалки создания/правки больше не появляется.
+5. **`destroyOnClose` заменён на `destroyOnHidden`** — тот же deprecated-проп
+   antd 5, что уже приводили к актуальному имени в `AdminSitesPage.tsx`
+   (Task 24); в исходном тексте плана для `AdminUsersPage.tsx` остался старый
+   `destroyOnClose` (предупреждение в консоли при каждом открытии модалки) —
+   приведено к единообразию.
+6. **`submit`/`save`/`runTest` без `try/catch`** — тот же класс проблемы,
+   что и в Task 21-24: antd `Form` не ждёт и не обрабатывает отклонённый
+   промис из `onFinish`/обработчиков кнопок, без `catch` отказ запроса
+   (например, ошибка шаблона от `check_template`, 422 на невалидном
+   int-поле настроек, «последний активный администратор») становится
+   unhandled rejection в консоли, хотя сообщение уже показывает глобальный
+   интерцептор `api.ts`. Решено чинить так же, как и в предыдущих четырёх
+   задачах — для консистентности с уже сложившимся в проекте решением.
+   Добавлено на все четыре точки: `save`/`runTest` (AdminPromptsPage),
+   `submit` (AdminSettingsPage), `submit` (AdminUsersPage).
+7. **Лёгкий пункт — повторяющиеся тосты фонового опроса `JobsPage`**
+   (`setInterval(() => getJobs().then(setJobs), 10000)` без `.catch()`):
+   решено НЕ чинить тем же приёмом, что `silentAuthCheck` у `me()` (Task 21).
+   Там 401 — ожидаемый исход каждого вызова (сама проверка сессии), здесь же
+   сетевой сбой не ожидаем и пользователь должен о нём узнать; повторение
+   тоста каждые 10 с при затяжном обрыве — не идеально, но тосты antd сами
+   исчезают и не блокируют работу, а тот же непокрытый `.catch()` уже есть
+   и в `ArticlesPage.tsx`, и в `BatchPage.tsx` (их поллинг вне Files этой
+   задачи, не трогался). Решение и обоснование зафиксированы комментарием
+   прямо в `JobsPage.tsx`.
+
+- [x] **Step 5: Собрать фронт целиком**
 
 Run: `cd execution && docker compose run --rm frontend sh -c "npm install && npm run build"`
-Expected: PASS — сборка проходит без ошибок TypeScript
+Result: PASS — `tsc && vite build` проходит без единой ошибки TypeScript
+(это последняя фронтенд-страница плана — `App.tsx` теперь импортирует только
+реально существующие компоненты, заглушек не осталось).
 
-- [ ] **Step 6: Сквозная ручная проверка**
+- [x] **Step 6: (не выполнялся буквально — см. раздел ниже)**
 
-Пройди путь целиком на реальном сайте: настройки RouterAI → промпт «Темы» с кнопкой
-«Тест» → новая партия на 2 статьи для stroybaza-samara.ru → согласование тем → запуск →
-черновики на сайте → журнал показывает стоимость.
+### Step 6 — не выполнялся буквально
 
-**Это приёмка плана.** Открой созданный черновик и сравни его с эталонной статьей сайта:
-структура, набор тегов и классов должны совпадать, картинки — открываться, водяной
-знак — стоять на контентных картинках и отсутствовать на обложке. Расхождения
-устраняются правкой промпта `article_body` на экране «Промпты», а не правкой кода.
+Исходный текст Step 6 просил пройти путь целиком на РЕАЛЬНОМ сайте
+stroybaza-samara.ru: настройки RouterAI → промпт «Темы» с реальной кнопкой
+«Тест» (платный вызов LLM) → новая партия на 2 статьи → согласование →
+запуск (платная генерация текста и картинок) → черновики на живом клиентском
+сайте → сверка с эталонной статьёй.
 
-- [ ] **Step 7: Commit**
+Это не было сделано, и вот почему (та же причина, что и в Task 24, но со
+ставками выше — здесь не просто создание записи о сайте, а реальная трата
+денег и реальная публикация контента на чужом продакшн-ресурсе):
+1. В окружении нет `.env` с настоящим `routerai_api_key` и токенами сайтов
+   — физически нечем это выполнить.
+2. Даже если бы были — это боевая операция с реальными деньгами и реальным
+   клиентским сайтом, а не проверка кода в рамках автономной задачи ревью.
+
+Вместо этого каждый из четырёх экранов проверен по отдельности на
+фиктивных данных — headless Chromium (Playwright 1.48, скачан и запущен
+внутри контейнера `frontend` только на время ручной проверки; официально
+Alpine не поддерживается пакетом `playwright` — родной bundled chromium не
+запускается на musl, поэтому браузер поставлен пакетом Alpine
+`apk add chromium` и передан в `chromium.launch({ executablePath:
+'/usr/bin/chromium-browser' })`) плюс прямые curl-запросы к API:
+
+- **AdminPromptsPage**: выбор сайта в Select, переключение табов, сохранение
+  и очистка оверрайда — находка №1 воспроизведена и подтверждена починенной
+  (см. выше); кнопка «Тест» реально дошла до `POST /admin/prompts/test` →
+  `build_text_client` → `client.complete_text()` на настоящий `https://
+  routerai.ru` с ЗАВЕДОМО НЕВАЛИДНЫМ ключом API — получен честный `502
+  RouterAI: RouterAI отклонил ключ API (401)`, показанный тостом через
+  интерцептор; реальных денег это не стоило (провайдер отклоняет запрос на
+  этапе аутентификации до генерации токенов).
+- **AdminSettingsPage**: находка №2 воспроизведена через порчу зашифрованного
+  значения `routerai_api_key` в БД другим ключом Fernet и подтверждена
+  починенной (см. выше); после пересохранения `_errors` пропадает.
+- **AdminUsersPage**: находка №3 (Popconfirm) и попутная находка №4
+  (`useForm`/`destroyOnHidden`) воспроизведены и подтверждены починенными
+  headless-браузером (клик → подтверждение → отмена/подтверждение → строка
+  в таблице).
+- **JobsPage**: открыт с пустым журналом (`GET /api/jobs` → `[]` в тестовой
+  БД) — таблица и статистика рендерятся без ошибок на нулевых данных.
+
+Все тестовые сущности (сайт `e2e-qa-site.example`, пользователи
+`qa2@k1.local`/`e2e-delete-me@k1.local`, испорченная запись секрета) удалены
+после проверки, тестовый Chromium и временный npm-префикс `/tmp/pw` не
+персистентны (контейнер `frontend` эфемерный, при пересоздании исчезнут
+сами). Ветка успешной генерации статьи целиком на реальном RouterAI и
+реальная публикация черновика на клиентском сайте (собственно приёмка
+плана 1) остаются отдельным действием человека-оператора при реальном
+разворачивании сервиса, вне рамок этой задачи.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add execution/frontend/src/pages

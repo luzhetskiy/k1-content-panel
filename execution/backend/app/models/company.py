@@ -112,7 +112,7 @@ class Company(Base):
     # нет вовсе (batch_id=NULL) — они не производные от партии данные, а
     # такой же самостоятельный журнал публикации, как сама Company.
     batch_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("company_batches.id", ondelete="SET NULL"), nullable=True)
+        Integer, ForeignKey("company_batches.id", ondelete="SET NULL"), nullable=True, index=True)
     candidate_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("company_candidates.id", ondelete="SET NULL"), nullable=True)
     site_key: Mapped[str] = mapped_column(String(300))
@@ -136,7 +136,7 @@ class Company(Base):
 
 
 class CompanyInfo(Base):
-    """Данные для шаблона builder_template_html. Поля из YANDEX_FIELDS
+    """Данные для шаблона builder_template_html. Поля из YANDEX_INFO_FIELDS
     приходят из выгрузки Яндекс.Карт и достоверны — RouterAI (Task 13) их не
     трогает, переписывает только about_company/specialization/
     projects_services/benefits."""

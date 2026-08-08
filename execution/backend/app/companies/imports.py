@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -12,6 +13,8 @@ from app.clock import utcnow
 from app.companies.import_xlsx import XlsxParseError, parse_workbook
 from app.companies.selection import taken_site_keys
 from app.models.company import CompanyCandidate, CompanyImport
+
+logger = logging.getLogger(__name__)
 
 
 def import_file(db: Session, data: bytes, filename: str,
@@ -73,6 +76,8 @@ def import_file(db: Session, data: bytes, filename: str,
         db.commit()
     except Exception:
         db.rollback()
+        logger.exception("import_file: не удалось сохранить импорт %r (%d кандидатов)",
+                         filename, len(existing_by_key))
         imp.status = "failed"
         imp.error_message = "не удалось сохранить компании — проверьте данные файла"
         db.add(imp)

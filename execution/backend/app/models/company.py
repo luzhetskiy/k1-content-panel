@@ -52,7 +52,7 @@ class CompanyCandidate(Base):
     category_raw: Mapped[str] = mapped_column(String(300), default="")
     city: Mapped[str] = mapped_column(String(200), default="")
     address: Mapped[str] = mapped_column(String(500), default="")
-    phone: Mapped[str] = mapped_column(String(50), default="")
+    phone: Mapped[str] = mapped_column(String(500), default="")
     email: Mapped[str] = mapped_column(String(200), default="")
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     reviews_count: Mapped[int] = mapped_column(Integer, default=0)

@@ -20,6 +20,42 @@ from app.tasks import retry_company, run_company_batch
 router = APIRouter(prefix="/api", tags=["companies"])
 
 
+# Бюджет времени на одну компанию в партии. Сумма таймаутов худшего случая
+# по всем шагам CompanyBuilder.build() (app/companies/builder.py): скрейпинг
+# сайта компании (app/companies/scrape.py, REQUEST_TIMEOUT_SECONDS=12, без
+# повтора — сознательное решение Task 9), текстовый вызов RouterAI (120с
+# таймаута × 3 попытки + паузы backoff(2,4) = 366с, тот же расчёт, что и для
+# статей — см. app/ai/factory.py), создание страницы (SiteClient.timeout=60),
+# перезаливка логотипа (requests.get(timeout=12) + upload_file на
+# upload_timeout=120), создание тизера (SiteClient.timeout=60).
+# 12 + 366 + 60 + 12 + 120 + 60 = 630. Это граница «компания зависла», а не
+# ожидаемая длительность — типовая компания без внешнего логотипа и с быстрым
+# ответом RouterAI укладывается в разы быстрее.
+COMPANY_TIME_BUDGET_SECONDS = 630
+# Запас на подготовку: открытие клиента сайта.
+COMPANY_BATCH_OVERHEAD_SECONDS = 60
+# Тот же потолок и то же обоснование, что и BATCH_TIME_LIMIT_CAP_SECONDS в
+# app/api/article_batches.py — два воркера, задача на сутки останавливает
+# остальную работу надолго; при упоре в потолок партия помечается failed
+# (не running), повторный запуск (run) пропускает уже опубликованные
+# компании (run_company_batch_sync), так что партия продолжается с места
+# остановки.
+COMPANY_BATCH_TIME_LIMIT_CAP_SECONDS = 6 * 60 * 60
+# Разрыв между мягким и жёстким лимитом — столько есть у обработчика
+# SoftTimeLimitExceeded в app/tasks.py, чтобы записать отказ в журнал и
+# закрыть сессию БД до принудительного завершения процесса.
+COMPANY_TIME_LIMIT_GAP_SECONDS = 180
+
+
+def _company_time_limits(company_count: int) -> tuple[int, int]:
+    """Общая для /run (company_count = len(batch.companies)) и /retry
+    (company_count=1, повтор — всегда ровно одна компания, без усреднения
+    по партии, аналогично _retry_time_limits для статей)."""
+    soft = min(COMPANY_BATCH_OVERHEAD_SECONDS + COMPANY_TIME_BUDGET_SECONDS * company_count,
+               COMPANY_BATCH_TIME_LIMIT_CAP_SECONDS)
+    return soft, soft + COMPANY_TIME_LIMIT_GAP_SECONDS
+
+
 class BatchIn(BaseModel):
     site_id: int
     region_raw: str
@@ -229,7 +265,8 @@ def run(batch_id: int, db: Session = Depends(get_db),
     # внутри самой Celery-задачи.
     batch.status = "running"
     db.commit()
-    run_company_batch.apply_async(args=[batch.id])
+    soft, hard = _company_time_limits(len(batch.companies))
+    run_company_batch.apply_async(args=[batch.id], soft_time_limit=soft, time_limit=hard)
     return _to_out(db, batch)
 
 
@@ -245,5 +282,6 @@ def retry(company_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, detail)
     company.status = "generating"
     db.commit()
-    retry_company.apply_async(args=[company.id])
+    soft, hard = _company_time_limits(1)
+    retry_company.apply_async(args=[company.id], soft_time_limit=soft, time_limit=hard)
     return {"ok": True}

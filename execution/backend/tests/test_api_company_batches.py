@@ -169,10 +169,10 @@ def no_celery(monkeypatch):
     sent = []
     monkeypatch.setattr(
         "app.api.company_batches.run_company_batch.apply_async",
-        lambda args, **kwargs: sent.append(("run", args[0])) or type("R", (), {"id": "t"})())
+        lambda args, **kwargs: sent.append(("run", args[0], kwargs)) or type("R", (), {"id": "t"})())
     monkeypatch.setattr(
         "app.api.company_batches.retry_company.apply_async",
-        lambda args, **kwargs: sent.append(("retry", args[0])) or type("R", (), {"id": "t"})())
+        lambda args, **kwargs: sent.append(("retry", args[0], kwargs)) or type("R", (), {"id": "t"})())
     return sent
 
 
@@ -185,7 +185,11 @@ def test_run_dispatches_task_and_marks_running(manager_client, site_id, candidat
     resp = manager_client.post(f"/api/company-batches/{batch['id']}/run")
     assert resp.status_code == 200
     assert resp.json()["status"] == "running"
-    assert no_celery == [("run", batch["id"])]
+    assert len(no_celery) == 1
+    assert no_celery[0][:2] == ("run", batch["id"])
+    kwargs = no_celery[0][2]
+    assert kwargs["soft_time_limit"] > 0
+    assert kwargs["time_limit"] > kwargs["soft_time_limit"]
 
 
 def test_run_twice_dispatches_once(manager_client, site_id, candidates, no_celery):
@@ -208,3 +212,11 @@ def test_run_rejects_empty_batch(manager_client, site_id):
     }).json()
     resp = manager_client.post(f"/api/company-batches/{batch['id']}/run")
     assert resp.status_code == 400
+
+
+def test_company_time_limits_scale_with_count():
+    from app.api.company_batches import _company_time_limits
+    soft1, hard1 = _company_time_limits(1)
+    soft5, hard5 = _company_time_limits(5)
+    assert soft5 > soft1
+    assert hard5 > soft5 > 0

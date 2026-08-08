@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -74,6 +75,10 @@ def migrate(db: Session, cli_db_path: Path) -> MigrationReport:
                 region=row["region"] or "", category_normalized=row["sphere"] or "",
                 rating=row["rating"], reviews_count=row["reviews_count"] or 0,
                 yandex_url=row["yandex_url"] or "",
+                # status по наличию page_url, а не по published: в реальных
+                # данных CLI (execution/db.py, update_page_url) published
+                # всегда пишется как 0 — мёртвая колонка, не сигнал. page_url
+                # надёжно отличает реально опубликованные страницы.
                 status="published" if row["page_url"] else "failed",
                 remote_url=row["page_url"] or "",
                 error_text="" if row["page_url"] else "перенесено из CLI без готовой страницы",
@@ -123,8 +128,11 @@ def main() -> None:
 
     print(f"Перенесено компаний: {report.migrated}")
     if report.unmatched_sites:
-        print(f"Не найден Site для доменов (заведи их в /admin/sites и запусти повторно): "
-             f"{', '.join(report.unmatched_sites)}")
+        print(f"ВНИМАНИЕ: не найден Site для доменов (заведи их в /admin/sites — "
+             f"проверь также, не отличается ли домен наличием www. — и запусти "
+             f"скрипт повторно, миграция идемпотентна): "
+             f"{', '.join(report.unmatched_sites)}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

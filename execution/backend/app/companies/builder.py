@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import logging
+
+import requests
 from sqlalchemy.orm import Session
 
 from app.ai.factory import build_text_client
@@ -11,10 +14,12 @@ from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
 from app.companies.scrape import ScrapeError, fetch_company_text
 from app.companies.template import fill_builder_template
-from app.models.company import YANDEX_INFO_FIELDS, Company, CompanyInfo
+from app.models.company import YANDEX_INFO_FIELDS, Company, CompanyBatch, CompanyInfo
 from app.models.job import LlmUsage
 from app.models.site import Site
 from app.sites.client import SERVICE_IMG_DIR, SiteAPIError, slugify
+
+logger = logging.getLogger(__name__)
 
 AI_TEXT_FIELDS = ("about_company", "specialization", "projects_services", "benefits")
 
@@ -46,6 +51,7 @@ class CompanyBuilder:
         self.db.commit()
         try:
             self._require_template()
+            batch = self._require_batch()
             info = self._require_info()
             scraped_text = self._scrape()
             ai_fields = self._generate_text(info, scraped_text)
@@ -53,7 +59,7 @@ class CompanyBuilder:
             self._relocate_logo(info)
             html = fill_builder_template(self.site.builder_template_html, self._info_dict(info))
             page = self._create_page(info, html)
-            self._create_teaser(info, page)
+            self._create_teaser(info, page, batch)
         except (ScrapeError, LLMError, PromptError, SiteAPIError) as exc:
             self.db.rollback()
             self.company.status = "failed"
@@ -69,6 +75,15 @@ class CompanyBuilder:
             raise SiteAPIError(
                 "у сайта не задан шаблон карточки строителя — заполни "
                 "builder_template_html на карточке сайта")
+
+    def _require_batch(self) -> CompanyBatch:
+        batch = self.company.batch
+        if batch is None:
+            raise SiteAPIError(
+                "у компании нет партии (batch_id пуст) — карточка-тизер "
+                "требует teaser_category_id/teaser_city_id/teaser_location_id, "
+                "которые сервис берёт только из партии")
+        return batch
 
     def _require_info(self) -> CompanyInfo:
         info = self.company.info
@@ -111,13 +126,14 @@ class CompanyBuilder:
         зависит от чужого хостинга. Уже локальные пути (/media/...) не трогаем."""
         if not info.builder_logo_src or info.builder_logo_src.startswith("/"):
             return
-        import requests
-
         try:
             response = requests.get(info.builder_logo_src, timeout=12)
             response.raise_for_status()
         except requests.RequestException:
-            return   # логотип не критичен — шаблон уйдёт в текстовый fallback
+            logger.warning(
+                "не удалось перезалить логотип компании %s (%s) — оставляю "
+                "внешнюю ссылку как есть", self.company.id, info.builder_logo_src)
+            return
         filename = logo_filename(self.company.id)
         info.builder_logo_src = self.site_client.upload_file(
             response.content, filename, SERVICE_IMG_DIR)
@@ -141,10 +157,9 @@ class CompanyBuilder:
         self.db.commit()
         return page
 
-    def _create_teaser(self, info: CompanyInfo, page: dict) -> None:
+    def _create_teaser(self, info: CompanyInfo, page: dict, batch: CompanyBatch) -> None:
         contacts = info.contacts or [{}]
-        contact = contacts[0] if contacts else {}
-        batch = self.company.batch
+        contact = contacts[0]
         teaser_id = self.site_client.create_teaser(
             name=info.builder_name or self.company.name,
             slug=page.get("url", "").removeprefix("/s/").rstrip("/"),

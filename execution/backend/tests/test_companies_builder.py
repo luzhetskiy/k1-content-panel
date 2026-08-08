@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -7,6 +7,7 @@ from app.companies.builder import CompanyBuilder, logo_filename, slug_for_compan
 from app.companies.scrape import ScrapeError
 from app.models.company import Company, CompanyBatch, CompanyInfo
 from app.models.site import Site
+from app.sites.client import SiteAPIError
 
 
 @pytest.fixture
@@ -146,3 +147,90 @@ def test_build_requires_builder_template(db_session, company):
 
     assert company.status == "failed"
     assert "шаблон" in company.error_text.lower()
+
+
+def test_build_fails_when_company_has_no_batch(db_session, site):
+    """Компании, мигрированные из старого CLI (Task 15, ещё не реализован),
+    получают batch_id=NULL — см. комментарий у Company.batch_id в
+    app/models/company.py. build() обязан завершиться штатным
+    status="failed", а не необработанным AttributeError на
+    self.company.batch.teaser_category_id."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.commit()
+    c = Company(id=7, site_id=1, batch_id=None, site_key="dom.ru",
+               website="https://dom.ru", name="ООО Дом", region="Самара")
+    c.batch = None
+    db_session.add(c)
+    db_session.add(CompanyInfo(company_id=c.id, builder_name="ООО Дом"))
+    db_session.commit()
+
+    builder = _builder(db_session, c, site)
+    builder.build()
+
+    assert c.status == "failed"
+    assert "партии" in c.error_text.lower()
+
+
+def test_build_fails_company_on_site_api_error(db_session, site, company):
+    """Ошибка сайта на создании страницы/тизера обязана попасть в
+    company.error_text через except-кортеж build() — до этого теста ни один
+    сценарий не проверял SiteAPIError, пришедший именно от site_client
+    (test_build_requires_builder_template проверяет только SiteAPIError,
+    поднятую самим билдером)."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара"))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(side_effect=SiteAPIError("создание страницы: HTTP 403: Forbidden")),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(),
+    )
+    builder = _builder(db_session, company, site, site_client=site_client)
+    builder.build()
+
+    assert company.status == "failed"
+    assert "403" in company.error_text
+    site_client.create_teaser.assert_not_called()
+
+
+def test_relocate_logo_downloads_and_reuploads_external_url(db_session, site, company):
+    """До этого теста builder_logo_src в фикстурах успеха всегда пуст, и
+    реальная логика _relocate_logo (скачать внешний логотип, перезалить на
+    целевой сайт, обновить builder_logo_src) не выполнялась ни разу."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               builder_logo_src="https://yandex.ru/logo.png",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
+    )
+    builder = _builder(db_session, company, site, site_client=site_client)
+
+    fake_response = Mock(content=b"logo-bytes")
+    fake_response.raise_for_status = Mock()
+    with patch("app.companies.builder.requests.get", return_value=fake_response) as get:
+        builder.build()
+
+    get.assert_called_once_with("https://yandex.ru/logo.png", timeout=12)
+    site_client.upload_file.assert_called_once_with(
+        b"logo-bytes", "cp-company-7-logo.webp", "uploads/service-img/")
+    assert company.status == "published"
+    assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-7-logo.webp"

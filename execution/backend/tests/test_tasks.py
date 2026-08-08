@@ -1,12 +1,17 @@
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
 from app.ai.text import JsonResult
 from app.models.article import Article, ArticleBatch
+from app.models.company import Company, CompanyBatch, CompanyInfo
 from app.models.job import JobRun
 from app.models.site import Site
-from app.tasks import generate_topics_sync, retry_article_sync, run_batch_sync
+from app.tasks import (
+    generate_topics_sync, retry_article_sync, retry_company_sync,
+    run_batch_sync, run_company_batch_sync,
+)
 
 
 @pytest.fixture
@@ -372,3 +377,81 @@ def test_generate_topics_retry_after_failure_is_allowed(db_session, batch, monke
     db_session.refresh(batch)
     assert batch.status == "topics_review"
     assert [a.topic for a in batch.articles] == ["Тема А"]
+
+
+# --- строители: run_company_batch_sync / retry_company_sync (Task 14) ---
+
+@pytest.fixture
+def company_site(db_session):
+    site = Site(name="С", domain="s.ru", base_url="https://s.ru", api_token_enc="e",
+               builder_template_html="<div id=\"builder\"></div>", builder_parent_id=10)
+    db_session.add(site)
+    db_session.commit()
+    return site
+
+
+def test_run_company_batch_marks_done_when_all_published(db_session, company_site):
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+    company = Company(site_id=company_site.id, batch_id=batch.id, site_key="dom.ru",
+                      website="https://dom.ru", name="ООО Дом", region="Самара")
+    db_session.add(company)
+    db_session.commit()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом"))
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company") as build_mock:
+        def _mark_published(db, c, site, client, job_id):
+            c.status = "published"
+        build_mock.side_effect = _mark_published
+        run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "done"
+
+
+def test_run_company_batch_skips_already_published(db_session, company_site):
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+    company = Company(site_id=company_site.id, batch_id=batch.id, site_key="dom.ru",
+                      website="https://dom.ru", name="ООО Дом", region="Самара",
+                      status="published")
+    db_session.add(company)
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company") as build_mock:
+        run_company_batch_sync(db_session, batch.id)
+
+    build_mock.assert_not_called()
+
+
+def test_retry_company_sync_rebuilds_single_company(db_session, company_site):
+    company = Company(site_id=company_site.id, site_key="dom.ru", website="https://dom.ru",
+                      name="ООО Дом", region="Самара", status="failed",
+                      error_text="старая ошибка")
+    db_session.add(company)
+    db_session.commit()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом"))
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company") as build_mock:
+        def _mark_published(db, c, site, client, job_id):
+            c.status = "published"
+            c.error_text = ""
+        build_mock.side_effect = _mark_published
+        retry_company_sync(db_session, company.id)
+
+    db_session.refresh(company)
+    assert company.status == "published"
+    assert company.error_text == ""

@@ -160,3 +160,51 @@ def test_create_batch_requires_auth(client, site_id):
         "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
     })
     assert resp.status_code == 401
+
+
+# --- /run, /retry (Task 14) ---
+
+@pytest.fixture
+def no_celery(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "app.api.company_batches.run_company_batch.apply_async",
+        lambda args, **kwargs: sent.append(("run", args[0])) or type("R", (), {"id": "t"})())
+    monkeypatch.setattr(
+        "app.api.company_batches.retry_company.apply_async",
+        lambda args, **kwargs: sent.append(("retry", args[0])) or type("R", (), {"id": "t"})())
+    return sent
+
+
+def test_run_dispatches_task_and_marks_running(manager_client, site_id, candidates, no_celery):
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    resp = manager_client.post(f"/api/company-batches/{batch['id']}/run")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "running"
+    assert no_celery == [("run", batch["id"])]
+
+
+def test_run_twice_dispatches_once(manager_client, site_id, candidates, no_celery):
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    manager_client.post(f"/api/company-batches/{batch['id']}/run")
+    resp = manager_client.post(f"/api/company-batches/{batch['id']}/run")
+    assert resp.status_code == 400
+    assert len(no_celery) == 1
+
+
+def test_run_rejects_empty_batch(manager_client, site_id):
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    resp = manager_client.post(f"/api/company-batches/{batch['id']}/run")
+    assert resp.status_code == 400

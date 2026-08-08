@@ -14,8 +14,10 @@ from app.articles.builder import build_for
 from app.articles.topics import filter_duplicates
 from app.celery_app import celery_app
 from app.clock import utcnow
+from app.companies.builder import build_for as build_for_company
 from app.db import SessionLocal
 from app.models.article import Article, ArticleBatch
+from app.models.company import Company, CompanyBatch
 from app.models.job import JobRun
 from app.models.site import Site
 from app.settings.crypto import SecretDecryptionError
@@ -302,5 +304,113 @@ def retry_article(article_id: int) -> None:
     db = SessionLocal()
     try:
         retry_article_sync(db, article_id)
+    finally:
+        db.close()
+
+
+# --- строители: сборка партии ---
+
+def run_company_batch_sync(db, batch_id: int) -> None:
+    batch = db.get(CompanyBatch, batch_id)
+    site = db.get(Site, batch.site_id) if batch.site_id is not None else None
+    if site is None:
+        # Находка №2 ревью Task 17 (тот же случай, что и у ArticleBatch): сайт
+        # партии мог быть удалён между постановкой задачи и её реальным
+        # запуском — site_id nullable, ON DELETE SET NULL.
+        batch.status = "failed"
+        batch.error_text = "сайт этой партии удалён — сборка компаний невозможна"
+        db.commit()
+        job = _start_job(db, "run_company_batch", None, batch.created_by_id,
+                         {"batch_id": batch_id, "companies": len(batch.companies)})
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
+    job = _start_job(db, "run_company_batch", site.id, batch.created_by_id,
+                     {"batch_id": batch_id, "companies": len(batch.companies)})
+    try:
+        site_client = open_site_client(db, site)
+        for company in batch.companies:
+            if company.status == "published":
+                continue
+            # Падение одной компании не должно отменять остальные: билдер сам
+            # пишет причину в error_text и оставляет компанию в failed.
+            build_for_company(db, company, site, site_client, job.id)
+            db.commit()
+    except SoftTimeLimitExceeded:
+        done = len([c for c in batch.companies if c.status == "published"])
+        batch.status = "failed"
+        batch.error_text = (f"превышен лимит времени партии, готово "
+                            f"{done}/{len(batch.companies)}")
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        # Ошибка конфигурации панели (RouterAI не настроен, или токен сайта
+        # расшифрован другим ключом) — одна и та же для всех компаний партии,
+        # обрывает партию целиком, а не только текущую компанию, в отличие от
+        # ScrapeError/LLMError/PromptError/SiteAPIError, с которыми builder.py
+        # справляется сам и никогда их наружу не отдаёт.
+        done = len([c for c in batch.companies if c.status == "published"])
+        batch.status = "failed"
+        batch.error_text = f"{exc}; готово {done}/{len(batch.companies)}"
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        return
+
+    batch.status = "done"
+    db.commit()
+    failed = [c for c in batch.companies if c.status == "failed"]
+    _finish_job(db, job, "ok" if not failed else "failed",
+               f"готово {len(batch.companies) - len(failed)}/{len(batch.companies)}")
+
+
+@celery_app.task(name="app.tasks.run_company_batch")
+def run_company_batch(batch_id: int) -> None:
+    db = SessionLocal()
+    try:
+        run_company_batch_sync(db, batch_id)
+    finally:
+        db.close()
+
+
+# --- строители: повтор одной компании ---
+
+def retry_company_sync(db, company_id: int) -> None:
+    company = db.get(Company, company_id)
+    site = db.get(Site, company.site_id) if company.site_id is not None else None
+    if site is None:
+        company.status = "failed"
+        company.error_text = "сайт этой компании удалён — повтор невозможен"
+        db.commit()
+        job = _start_job(db, "retry_company", None, None, {"company_id": company_id})
+        _finish_job(db, job, "failed", company.error_text)
+        return
+
+    job = _start_job(db, "retry_company", site.id, None, {"company_id": company_id})
+    try:
+        build_for_company(db, company, site, open_site_client(db, site), job.id)
+    except SoftTimeLimitExceeded:
+        company.status = "failed"
+        company.error_text = "превышен лимит времени задачи"
+        db.commit()
+        _finish_job(db, job, "failed", company.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        company.status = "failed"
+        company.error_text = str(exc)
+        db.commit()
+        _finish_job(db, job, "failed", str(exc))
+        return
+
+    db.commit()
+    _finish_job(db, job, "ok" if company.status == "published" else "failed",
+               company.error_text)
+
+
+@celery_app.task(name="app.tasks.retry_company")
+def retry_company(company_id: int) -> None:
+    db = SessionLocal()
+    try:
+        retry_company_sync(db, company_id)
     finally:
         db.close()

@@ -1,8 +1,6 @@
 """API партий строителей: создание с автоотбором кандидатов, просмотр,
-вычёркивание компании из партии, добор следующей по рейтингу.
-
-Только CRUD + правка списка на статусе selection_review — запуск партии
-(диспетчеризация Celery) сюда сознательно не входит, см. Task 14.
+вычёркивание компании из партии, добор следующей по рейтингу, запуск партии
+и повтор одной компании (диспетчеризация Celery, Task 14).
 """
 
 from datetime import datetime
@@ -17,6 +15,7 @@ from app.companies.selection import add_next_candidate, select_candidates
 from app.models.company import Company, CompanyBatch, CompanyCandidate, CompanyInfo
 from app.models.site import Site
 from app.models.user import User
+from app.tasks import retry_company, run_company_batch
 
 router = APIRouter(prefix="/api", tags=["companies"])
 
@@ -214,3 +213,37 @@ def add_next(batch_id: int, db: Session = Depends(get_db),
     db.commit()
     db.refresh(batch)
     return _to_out(db, batch)
+
+
+@router.post("/company-batches/{batch_id}/run", response_model=BatchOut)
+def run(batch_id: int, db: Session = Depends(get_db),
+       _user: User = Depends(get_current_user)):
+    batch = _get_or_404(db, batch_id)
+    if not batch.companies:
+        raise HTTPException(400, "в партии нет компаний")
+    if batch.status == "running":
+        raise HTTPException(400, "партия уже выполняется")
+    # Перевод в "running" синхронно, до apply_async — тот же приём, что и в
+    # article_batches.run() (Task 18): защищает от двойной постановки задачи
+    # в очередь при двойном клике / повторном запросе, а не только от гонки
+    # внутри самой Celery-задачи.
+    batch.status = "running"
+    db.commit()
+    run_company_batch.apply_async(args=[batch.id])
+    return _to_out(db, batch)
+
+
+@router.post("/companies/{company_id}/retry")
+def retry(company_id: int, db: Session = Depends(get_db),
+         _user: User = Depends(get_current_user)):
+    company = db.get(Company, company_id)
+    if company is None:
+        raise HTTPException(404, "компания не найдена")
+    if company.status in ("published", "generating"):
+        detail = ("компания уже опубликована" if company.status == "published"
+                  else "компания уже собирается — повторный запуск не требуется")
+        raise HTTPException(400, detail)
+    company.status = "generating"
+    db.commit()
+    retry_company.apply_async(args=[company.id])
+    return {"ok": True}

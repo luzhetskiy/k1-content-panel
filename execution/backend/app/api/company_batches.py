@@ -9,6 +9,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -120,7 +121,7 @@ def create_batch(payload: BatchIn, db: Session = Depends(get_db),
 
 @router.get("/company-batches", response_model=list[BatchOut])
 def list_batches(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
-    batches = db.query(CompanyBatch).order_by(CompanyBatch.id.desc()).all()
+    batches = db.scalars(select(CompanyBatch).order_by(CompanyBatch.id.desc())).all()
     return [_to_out(db, b) for b in batches]
 
 

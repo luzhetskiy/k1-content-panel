@@ -80,3 +80,70 @@ def test_add_next_returns_400_when_nothing_left(manager_client, site_id, candida
     }).json()
     resp = manager_client.post(f"/api/company-batches/{batch['id']}/companies/next")
     assert resp.status_code == 400
+
+
+def test_unknown_site_rejected(manager_client, candidates):
+    resp = manager_client.post("/api/company-batches", json={
+        "site_id": 999, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    })
+    assert resp.status_code == 404
+
+
+def test_create_batch_rejected_for_deactivated_site(manager_client, db_session, candidates):
+    site = Site(name="Неактивный", domain="inactive.ru", base_url="https://inactive.ru",
+               api_token_enc="e", is_active=False)
+    db_session.add(site)
+    db_session.commit()
+
+    resp = manager_client.post("/api/company-batches", json={
+        "site_id": site.id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    })
+    assert resp.status_code == 400
+
+
+def test_remove_company_not_in_batch_returns_404(manager_client, site_id, db_session):
+    db_session.add_all([
+        CompanyCandidate(site_key="a.ru", name="А", region_raw="Самара",
+                         category_raw="Дома", reviews_count=10),
+        CompanyCandidate(site_key="b.ru", name="Б", region_raw="Казань",
+                         category_raw="Дома", reviews_count=5),
+    ])
+    db_session.commit()
+
+    batch_a = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 1,
+    }).json()
+    batch_b = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Казань", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 1,
+    }).json()
+    company_id_from_b = batch_b["companies"][0]["id"]
+
+    # Компания вообще не существует.
+    assert manager_client.delete(
+        f"/api/company-batches/{batch_a['id']}/companies/999").status_code == 404
+    # Компания существует, но принадлежит другой партии.
+    resp = manager_client.delete(
+        f"/api/company-batches/{batch_a['id']}/companies/{company_id_from_b}")
+    assert resp.status_code == 404
+
+
+def test_read_nonexistent_batch_returns_404(manager_client):
+    resp = manager_client.get("/api/company-batches/999")
+    assert resp.status_code == 404
+
+
+def test_create_batch_requires_auth(client, site_id):
+    resp = client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    })
+    assert resp.status_code == 401

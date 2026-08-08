@@ -11,6 +11,8 @@ import { logout } from './api'
 import LoginPage from './pages/LoginPage'
 import ArticlesPage from './pages/ArticlesPage'
 import BatchPage from './pages/BatchPage'
+import BuildersPage from './pages/BuildersPage'
+import BuilderBatchPage from './pages/BuilderBatchPage'
 import JobsPage from './pages/JobsPage'
 import AdminSitesPage from './pages/AdminSitesPage'
 import AdminPromptsPage from './pages/AdminPromptsPage'
@@ -194,11 +196,8 @@ function Shell() {
             <Route path="/" element={<Navigate to="/articles" replace />} />
             <Route path="/articles" element={<ArticlesPage />} />
             <Route path="/articles/:id" element={<BatchPage />} />
-            <Route path="/builders" element={
-              <div style={{ color: '#71717a' }}>
-                Раздел «Строители» появится в плане 2. Пока процесс идёт через CLI.
-              </div>
-            } />
+            <Route path="/builders" element={<BuildersPage />} />
+            <Route path="/builders/:id" element={<BuilderBatchPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/admin/sites" element={<AdminRoute><AdminSitesPage /></AdminRoute>} />
             <Route path="/admin/prompts" element={<AdminRoute><AdminPromptsPage /></AdminRoute>} />

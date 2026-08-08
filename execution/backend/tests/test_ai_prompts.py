@@ -93,6 +93,9 @@ def test_default_prompts_render_with_real_contexts(db_session):
         "cover": {"topic": "тема", "cover_style": "стиль"},
         "content_image": {"topic": "тема", "paragraph": "иллюстрация 1 из 2",
                           "image_style": "стиль"},
+        "builder_text": {"company_name": "ООО Стройка", "city": "Пермь",
+                         "category": "застройщик", "site_name": "X", "tone_of_voice": "тон",
+                         "scraped_text": "О компании: строим дома с 2010 года."},
     }
     for key in PROMPT_KEYS:
         # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из
@@ -178,3 +181,11 @@ def test_check_template_without_key_checks_only_syntax():
 
 def test_prompt_variables_cover_every_key():
     assert set(PROMPT_VARIABLES) == set(PROMPT_KEYS)
+
+
+def test_builder_text_prompt_variables_declared():
+    from app.ai.prompts import PROMPT_KEYS, PROMPT_VARIABLES
+
+    assert "builder_text" in PROMPT_KEYS
+    assert PROMPT_VARIABLES["builder_text"] == frozenset(
+        {"company_name", "city", "category", "site_name", "tone_of_voice", "scraped_text"})

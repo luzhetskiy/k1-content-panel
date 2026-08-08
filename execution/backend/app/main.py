@@ -25,6 +25,8 @@ from app.api import (
     admin_users,
     article_batches,
     auth,
+    company_batches,
+    company_imports,
     jobs,
     sites,
     tasks_status,
@@ -34,7 +36,8 @@ from app.api.deps import get_db
 app = FastAPI(title="k1 content service")
 
 for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
-               admin_users, article_batches, jobs, tasks_status):
+               admin_users, article_batches, company_imports, company_batches,
+               jobs, tasks_status):
     app.include_router(module.router)
 
 

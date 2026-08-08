@@ -455,3 +455,103 @@ def test_retry_company_sync_rebuilds_single_company(db_session, company_site):
     db_session.refresh(company)
     assert company.status == "published"
     assert company.error_text == ""
+
+
+# --- строители: config-level ошибки и удалённый сайт (Gap 2 ревью Task 14) —
+# та же природа, что и у test_run_batch_ai_config_error_marks_batch_failed /
+# test_run_batch_secret_decryption_error_on_site_client_marks_failed /
+# test_retry_article_ai_config_error_marks_failed /
+# test_run_batch_without_site_marks_batch_failed /
+# test_retry_article_without_site_marks_article_failed выше — здесь то же
+# самое для run_company_batch_sync/retry_company_sync. Важно для Task 15:
+# CLI-мигрированные компании (batch_id=NULL) полагаются на этот же путь
+# retry_company_sync, если с ними что-то не так.
+
+def test_run_company_batch_ai_config_error_marks_batch_failed(db_session, company_site):
+    from app.ai.factory import AIConfigError
+
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+    company = Company(site_id=company_site.id, batch_id=batch.id, site_key="dom.ru",
+                      website="https://dom.ru", name="ООО Дом", region="Самара")
+    db_session.add(company)
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company", side_effect=AIConfigError("ключ не задан")):
+        run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "ключ не задан" in batch.error_text
+
+
+def test_run_company_batch_secret_decryption_error_marks_failed(db_session, company_site):
+    from app.settings.crypto import SecretDecryptionError
+
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+    company = Company(site_id=company_site.id, batch_id=batch.id, site_key="dom.ru",
+                      website="https://dom.ru", name="ООО Дом", region="Самара")
+    db_session.add(company)
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", side_effect=SecretDecryptionError("другой ключ шифрования")):
+        run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "другой ключ шифрования" in batch.error_text
+
+
+def test_run_company_batch_without_site_marks_batch_failed(db_session):
+    batch = CompanyBatch(site_id=None, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+
+    run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "сайт" in batch.error_text.lower()
+
+
+def test_retry_company_ai_config_error_marks_failed(db_session, company_site):
+    from app.ai.factory import AIConfigError
+
+    company = Company(site_id=company_site.id, site_key="dom.ru", website="https://dom.ru",
+                      name="ООО Дом", region="Самара", status="generating")
+    db_session.add(company)
+    db_session.commit()
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company", side_effect=AIConfigError("ключ не задан")):
+        retry_company_sync(db_session, company.id)
+
+    db_session.refresh(company)
+    assert company.status == "failed"
+    assert "ключ не задан" in company.error_text
+
+
+def test_retry_company_without_site_marks_failed(db_session):
+    company = Company(site_id=None, site_key="dom.ru", website="https://dom.ru",
+                      name="ООО Дом", region="Самара", status="generating")
+    db_session.add(company)
+    db_session.commit()
+
+    retry_company_sync(db_session, company.id)
+
+    db_session.refresh(company)
+    assert company.status == "failed"
+    assert "сайт" in company.error_text.lower()

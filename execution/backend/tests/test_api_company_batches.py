@@ -214,6 +214,70 @@ def test_run_rejects_empty_batch(manager_client, site_id):
     assert resp.status_code == 400
 
 
+def test_retry_dispatches_task_and_marks_generating(manager_client, site_id, candidates, no_celery, db_session):
+    from app.models.company import Company
+
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    company_id = batch["companies"][0]["id"]
+    company = db_session.get(Company, company_id)
+    company.status = "failed"
+    company.error_text = "старая ошибка"
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/companies/{company_id}/retry")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert no_celery[-1][:2] == ("retry", company_id)
+
+    db_session.refresh(company)
+    assert company.status == "generating"
+
+
+def test_retry_rejects_company_already_generating(manager_client, site_id, candidates, no_celery, db_session):
+    from app.models.company import Company
+
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    company_id = batch["companies"][0]["id"]
+    company = db_session.get(Company, company_id)
+    company.status = "generating"
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/companies/{company_id}/retry")
+    assert resp.status_code == 400
+    assert no_celery == []
+
+
+def test_retry_rejects_published_company(manager_client, site_id, candidates, no_celery, db_session):
+    from app.models.company import Company
+
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    company_id = batch["companies"][0]["id"]
+    company = db_session.get(Company, company_id)
+    company.status = "published"
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/companies/{company_id}/retry")
+    assert resp.status_code == 400
+    assert no_celery == []
+
+
+def test_retry_rejects_unknown_company(manager_client, no_celery):
+    resp = manager_client.post("/api/companies/999999/retry")
+    assert resp.status_code == 404
+
+
 def test_company_time_limits_scale_with_count():
     from app.api.company_batches import _company_time_limits
     soft1, hard1 = _company_time_limits(1)

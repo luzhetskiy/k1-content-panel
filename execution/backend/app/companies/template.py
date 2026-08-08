@@ -5,8 +5,11 @@ fill_html из execution/step3_fill_template.py — та же разметка-�
 from __future__ import annotations
 
 import json
+import logging
 
 from bs4 import BeautifulSoup, Comment, NavigableString
+
+logger = logging.getLogger(__name__)
 
 
 def _remove_comments(soup: BeautifulSoup) -> None:
@@ -37,7 +40,12 @@ def fill_builder_template(template: str, info: dict) -> str:
         try:
             contacts = json.loads(contacts)
         except json.JSONDecodeError:
+            logger.warning("не удалось разобрать contacts как JSON: %r", contacts[:200])
             contacts = []
+    if not isinstance(contacts, list):
+        logger.warning("contacts не список (%s) — контакты не будут показаны",
+                       type(contacts).__name__)
+        contacts = []
     if not contacts:
         contacts = [{}]
 

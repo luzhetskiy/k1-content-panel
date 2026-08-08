@@ -62,3 +62,34 @@ def test_fill_uses_text_logo_fallback_when_no_logo_src():
     html = fill_builder_template(TEMPLATE, _info(builder_logo_src=""))
     assert "ООО Дом" in html
     assert 'id="builder-logo"' not in html   # img-логотип убран
+
+
+def test_fill_renders_multiple_contacts():
+    info = _info(contacts=[
+        {"address": "ул. Ленина 1", "phone_tel": "+78462770605", "phone_text": "+7 846 277-06-05"},
+        {"address": "ул. Мира 5", "phone_tel": "+78462770606", "phone_text": "+7 846 277-06-06"},
+    ])
+    html = fill_builder_template(TEMPLATE, info)
+    assert 'id="builder-contact-1"' in html
+    assert 'id="builder-contact-2"' in html
+    assert "ул. Ленина 1" in html
+    assert "ул. Мира 5" in html
+
+
+def test_fill_skips_contact_with_no_usable_fields():
+    info = _info(contacts=[{"note": "только заметка, без адреса/телефона/почты"}])
+    html = fill_builder_template(TEMPLATE, info)
+    assert "builder-contact-1" not in html
+    assert "только заметка" not in html
+
+
+def test_fill_handles_malformed_contacts_json_gracefully():
+    info = _info(contacts="{not valid json")
+    html = fill_builder_template(TEMPLATE, info)   # не должно бросить исключение
+    assert "builder-contact-1" not in html
+
+
+def test_fill_handles_non_list_contacts_gracefully():
+    info = _info(contacts={"address": "x"})
+    html = fill_builder_template(TEMPLATE, info)   # не должно бросить исключение (AttributeError)
+    assert "builder-contact-1" not in html

@@ -32,3 +32,22 @@ def test_fetch_company_text_wraps_network_error():
               side_effect=requests.ConnectionError("boom")):
         with pytest.raises(ScrapeError):
             fetch_company_text("https://dom.ru")
+
+
+def test_fetch_company_text_wraps_http_error():
+    response = Mock(text="<html></html>")
+    response.raise_for_status = Mock(side_effect=requests.HTTPError("404"))
+    with patch("app.companies.scrape.requests.get", return_value=response):
+        with pytest.raises(ScrapeError):
+            fetch_company_text("https://dom.ru")
+
+
+def test_fetch_company_text_strips_header_and_footer():
+    html = "<html><body><header><a>Меню</a></header><p>Строим дома.</p>" \
+          "<footer>© 2024</footer></body></html>"
+    response = Mock(text=html)
+    response.raise_for_status = Mock()
+    with patch("app.companies.scrape.requests.get", return_value=response):
+        text = fetch_company_text("https://dom.ru")
+    assert "Меню" not in text
+    assert "© 2024" not in text

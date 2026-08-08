@@ -7,7 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 
 REQUEST_TIMEOUT_SECONDS = 12
-TEXT_LIMIT_CHARS = 12_000
+TEXT_LIMIT_CHARS = 12_000  # срез по символам, не по токенам/словам — грубая, но достаточная защита от гигантских страниц
 
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

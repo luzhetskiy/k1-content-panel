@@ -35,7 +35,7 @@ def test_manager_cannot_read_prompts(manager_client, seeded):
 def test_admin_lists_global_prompts(admin_client, seeded):
     body = admin_client.get("/api/admin/prompts").json()
     keys = {item["key"] for item in body if item["site_id"] is None}
-    assert keys == {"topics", "article_body", "cover", "content_image"}
+    assert keys == {"topics", "article_body", "cover", "content_image", "builder_text"}
 
 
 def test_admin_saves_site_override(admin_client, seeded, db_session, site):
@@ -59,7 +59,7 @@ def test_saving_twice_updates_the_same_row(admin_client, seeded, db_session, sit
                             json={"key": "topics", "site_id": site.id, "text": "второй"})
     assert resp.status_code == 200
     assert resolve_prompt(db_session, "topics", site.id) == "второй"
-    assert len(admin_client.get("/api/admin/prompts").json()) == 5
+    assert len(admin_client.get("/api/admin/prompts").json()) == 6
 
 
 def test_saving_global_prompt_replaces_default(admin_client, seeded, db_session):
@@ -69,7 +69,7 @@ def test_saving_global_prompt_replaces_default(admin_client, seeded, db_session)
                             json={"key": "cover", "site_id": None, "text": "новый глобальный"})
     assert resp.status_code == 200
     assert resolve_prompt(db_session, "cover", None) == "новый глобальный"
-    assert len(admin_client.get("/api/admin/prompts").json()) == 4
+    assert len(admin_client.get("/api/admin/prompts").json()) == 5
 
 
 def test_unknown_key_rejected(admin_client, seeded):
@@ -179,7 +179,7 @@ def test_concurrent_first_seed_recovers(admin_client, db_session, monkeypatch):
     assert resp.status_code == 200
     assert calls["n"] == 2
     keys = [item["key"] for item in resp.json()]
-    assert sorted(keys) == ["article_body", "content_image", "cover", "topics"]
+    assert sorted(keys) == ["article_body", "builder_text", "content_image", "cover", "topics"]
 
 
 def test_test_endpoint_returns_rendered_prompt_and_answer(admin_client, seeded, monkeypatch):

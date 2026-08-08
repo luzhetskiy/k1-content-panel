@@ -1,4 +1,5 @@
 import json
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -261,3 +262,36 @@ def test_timeout_and_upload_timeout_are_independently_configurable(monkeypatch):
 
     assert captured["get"] == 45
     assert captured["upload"] == 200
+
+
+def test_create_teaser_posts_expected_payload():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=201)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.post", return_value=response) as post:
+        teaser_id = client.create_teaser(
+            name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+        )
+    assert teaser_id == 42
+    payload = post.call_args.kwargs["json"]
+    assert payload["slug"] == "ooo-dom-samara"
+    assert payload["category"] == 3
+    assert payload["is_active"] is False
+
+
+def test_create_teaser_raises_on_error():
+    from app.sites.client import SiteAPIError
+
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=False, status_code=400, text="bad request")
+    with patch("app.sites.client.requests.post", return_value=response):
+        try:
+            client.create_teaser(
+                name="А", slug="a", address="", phone="", email="", website="",
+                page_url="/s/a/", category=1, city=1, location=1,
+            )
+            assert False, "ожидался SiteAPIError"
+        except SiteAPIError:
+            pass

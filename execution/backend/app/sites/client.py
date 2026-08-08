@@ -39,6 +39,7 @@ import requests
 STATICPAGES_PATH = "/api/v1/staticpages/"
 ARTICLES_PATH = "/api/v1/articles/"
 FILEMANAGER_PATH = "/api/v1/filemanager/"
+ADDRESSES_SERVICES_PATH = "/api/v1/addresses-services/"
 
 ARTICLE_IMG_DIR = "uploads/article-img/"
 SERVICE_IMG_DIR = "uploads/service-img/"
@@ -172,6 +173,24 @@ class SiteClient:
                            timeout=self.upload_timeout),
             "загрузка обложки")
         return self._json(response, "загрузка обложки").get("teaser_image", "")
+
+    def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
+                      website: str, page_url: str, category: int, city: int,
+                      location: int) -> int:
+        """Карточка-тизер услуги — /api/v1/addresses-services/, не обложка
+        страницы. is_active=False: включает менеджер вручную, симметрично
+        published=False у create_page."""
+        payload = {
+            "name": name, "slug": slug, "address": address, "phone": phone,
+            "email": email, "website": website, "page_url": page_url,
+            "is_active": False, "location": location, "category": category, "city": city,
+        }
+        response = self._check(
+            requests.post(f"{self.base_url}{ADDRESSES_SERVICES_PATH}", json=payload,
+                          headers={**self._headers, "Content-Type": "application/json"},
+                          timeout=self.timeout),
+            "создание тизера")
+        return self._json(response, "создание тизера")["id"]
 
     # --- файлы ---
 

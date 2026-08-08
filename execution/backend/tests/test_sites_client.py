@@ -295,3 +295,18 @@ def test_create_teaser_raises_on_error():
             assert False, "ожидался SiteAPIError"
         except SiteAPIError:
             pass
+
+
+def test_create_teaser_raises_when_response_missing_id():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=201)
+    response.json.return_value = {"slug": "ooo-dom"}   # нет "id"
+    with patch("app.sites.client.requests.post", return_value=response):
+        try:
+            client.create_teaser(
+                name="А", slug="a", address="", phone="", email="", website="",
+                page_url="/s/a/", category=1, city=1, location=1,
+            )
+            assert False, "ожидался SiteAPIError"
+        except SiteAPIError:
+            pass

@@ -175,7 +175,7 @@ class SiteClient:
         return self._json(response, "загрузка обложки").get("teaser_image", "")
 
     def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
-                      website: str, page_url: str, category: int, city: int,
+                      website: str, page_url: str, *, category: int, city: int,
                       location: int) -> int:
         """Карточка-тизер услуги — /api/v1/addresses-services/, не обложка
         страницы. is_active=False: включает менеджер вручную, симметрично
@@ -190,7 +190,11 @@ class SiteClient:
                           headers={**self._headers, "Content-Type": "application/json"},
                           timeout=self.timeout),
             "создание тизера")
-        return self._json(response, "создание тизера")["id"]
+        body = self._json(response, "создание тизера")
+        teaser_id = body.get("id")
+        if teaser_id is None:
+            raise SiteAPIError(f"создание тизера: ответ без id: {body}")
+        return teaser_id
 
     # --- файлы ---
 

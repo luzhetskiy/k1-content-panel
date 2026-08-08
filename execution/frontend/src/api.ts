@@ -92,6 +92,23 @@ export interface UserRow {
 // "_errors" как опциональное поле другой формы, не трогая остальные ключи.
 export type SettingsMap = Record<string, string> & { _errors?: Record<string, string> }
 
+export interface Facets { regions: string[]; categories: string[] }
+export interface CompanyImportResult {
+  id: number; filename: string; row_count: number; matched_count: number
+  error_count: number; status: string; error_message: string
+}
+export interface CompanyRow {
+  id: number; name: string; website: string; region: string
+  rating: number | null; reviews_count: number; status: string
+  remote_url: string; error_text: string
+}
+export interface CompanyBatchRow {
+  id: number; site_id: number; site_name: string
+  region_raw: string; category_raw: string; category_normalized: string
+  requested_count: number; status: string; error_text: string
+  created_at: string; companies: CompanyRow[]
+}
+
 export const login = (email: string, password: string) => {
   const form = new URLSearchParams({ username: email, password })
   return api.post<Profile>('/auth/login', form).then(r => r.data)
@@ -127,6 +144,32 @@ export const saveTopics = (id: number, topics: string[]) =>
 export const runBatch = (id: number) =>
   api.post<Batch>(`/article-batches/${id}/run`).then(r => r.data)
 export const retryArticle = (id: number) => api.post(`/articles/${id}/retry`)
+
+export const uploadCompanyImport = (file: File) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post<CompanyImportResult>('/company-imports', form).then(r => r.data)
+}
+export const getCompanyFacets = (siteId: number) =>
+  api.get<Facets>(`/company-imports/facets?site_id=${siteId}`).then(r => r.data)
+
+export const getCompanyBatches = () =>
+  api.get<CompanyBatchRow[]>('/company-batches').then(r => r.data)
+export const getCompanyBatch = (id: number) =>
+  api.get<CompanyBatchRow>(`/company-batches/${id}`).then(r => r.data)
+export const createCompanyBatch = (d: {
+  site_id: number; region_raw: string; category_raw: string
+  category_normalized: string; teaser_category_id: number
+  teaser_city_id: number; teaser_location_id: number; count: number
+}) => api.post<CompanyBatchRow>('/company-batches', d).then(r => r.data)
+export const removeBatchCompany = (batchId: number, companyId: number) =>
+  api.delete<CompanyBatchRow>(`/company-batches/${batchId}/companies/${companyId}`)
+    .then(r => r.data)
+export const addNextBatchCompany = (batchId: number) =>
+  api.post<CompanyBatchRow>(`/company-batches/${batchId}/companies/next`).then(r => r.data)
+export const runCompanyBatch = (id: number) =>
+  api.post<CompanyBatchRow>(`/company-batches/${id}/run`).then(r => r.data)
+export const retryCompany = (id: number) => api.post(`/companies/${id}/retry`)
 
 export const getSettings = () => api.get<SettingsMap>('/admin/settings').then(r => r.data)
 export const updateSettings = (d: Record<string, string>) =>

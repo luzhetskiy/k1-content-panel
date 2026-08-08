@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.companies.selection import add_next_candidate, select_candidates
-from app.models.company import Company, CompanyBatch, CompanyCandidate
+from app.models.company import Company, CompanyBatch, CompanyCandidate, CompanyInfo
 from app.models.site import Site
 from app.models.user import User
 
@@ -91,6 +91,38 @@ def _company_from_candidate(batch: CompanyBatch, candidate: CompanyCandidate) ->
     )
 
 
+def _company_info_from_candidate(company: Company, candidate: CompanyCandidate) -> CompanyInfo:
+    """CompanyInfo с достоверными фактами из выгрузки Яндекс.Карт — это то,
+    что билдер (app/companies/builder.py) считает YANDEX_INFO_FIELDS и никогда
+    не даёт RouterAI переписывать."""
+    contact = {
+        "address": candidate.address,
+        "phone_tel": candidate.phone,
+        "phone_text": candidate.phone,
+        "email": candidate.email,
+        "site_url": candidate.website_raw,
+        "site_text": candidate.site_key,
+    }
+    coordinates = (f"{candidate.lat:.6f}, {candidate.lon:.6f}"
+                  if candidate.lat is not None and candidate.lon is not None else "")
+    return CompanyInfo(
+        company_id=company.id,
+        builder_name=candidate.name,
+        city_name=candidate.city,
+        contacts=[contact] if any(contact.values()) else [],
+        address=candidate.address,
+        coordinates=coordinates,
+    )
+
+
+def _add_company_from_candidate(db: Session, batch: CompanyBatch, candidate: CompanyCandidate) -> Company:
+    company = _company_from_candidate(batch, candidate)
+    db.add(company)
+    db.flush()
+    db.add(_company_info_from_candidate(company, candidate))
+    return company
+
+
 @router.post("/company-batches", response_model=BatchOut)
 def create_batch(payload: BatchIn, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
@@ -113,7 +145,7 @@ def create_batch(payload: BatchIn, db: Session = Depends(get_db),
     candidates = select_candidates(db, payload.site_id, payload.region_raw,
                                    payload.category_raw, payload.count)
     for candidate in candidates:
-        db.add(_company_from_candidate(batch, candidate))
+        _add_company_from_candidate(db, batch, candidate)
     db.commit()
     db.refresh(batch)
     return _to_out(db, batch)
@@ -178,7 +210,7 @@ def add_next(batch_id: int, db: Session = Depends(get_db),
                                    already_in_batch=already, excluded=set())
     if candidate is None:
         raise HTTPException(400, "больше подходящих компаний не найдено")
-    db.add(_company_from_candidate(batch, candidate))
+    _add_company_from_candidate(db, batch, candidate)
     db.commit()
     db.refresh(batch)
     return _to_out(db, batch)

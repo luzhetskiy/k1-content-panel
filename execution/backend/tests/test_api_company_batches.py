@@ -35,6 +35,19 @@ def test_create_batch_selects_top_candidates(manager_client, site_id, candidates
     assert [c["name"] for c in body["companies"]] == ["А", "Б"]
 
 
+def test_create_batch_also_creates_company_info(manager_client, site_id, candidates, db_session):
+    resp = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    })
+    body = resp.json()
+    from app.models.company import Company
+    company = db_session.get(Company, body["companies"][0]["id"])
+    assert company.info is not None
+    assert company.info.builder_name == "А"
+
+
 def test_remove_company_from_batch(manager_client, site_id, candidates):
     batch = manager_client.post("/api/company-batches", json={
         "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",

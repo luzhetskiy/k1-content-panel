@@ -522,3 +522,50 @@ def test_regenerate_content_images_second_round_uses_next_version(db_session, pr
         article_id=prepared.article.id, kind="content").all()})
     assert versions == [1, 2, 3]
     assert image_filename(prepared.article.id, 1, version=3) in prepared.article.body_html
+
+
+def test_regenerate_content_images_site_push_failure_keeps_progress_and_clears_flag(
+        db_session, prepared):
+    """Находка ревью Task 4: update_page_text может упасть (SiteAPIError —
+    сеть/токен сайта) уже ПОСЛЕ того, как новые ArticleImage и замена путей
+    в body_html построчно закоммичены циклом. Без внешнего try/except это
+    исключение улетело бы наружу необработанным, и images_regenerating
+    остался бы True навсегда — статья выглядела бы «зависшей». Уже
+    закоммиченный прогресс (обе позиции успели перегенерироваться до
+    падения push'а) не должен теряться."""
+    from app.models.article import ArticleImage
+    from app.sites.client import SiteAPIError
+
+    class BrokenPushClient(FakeSiteClient):
+        def update_page_text(self, page_id, html):
+            raise SiteAPIError("обновление текста страницы: HTTP 500: Internal Server Error")
+
+    site_client = BrokenPushClient()
+    paths = image_paths_for(prepared.article.id, 2)
+    body = {
+        "title": "Чем утеплить каркасный дом",
+        "html": f"<p>{paths[0]}</p><p>{paths[1]}</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder = make_builder(db_session, prepared, site_client, body=body)
+    builder.build()
+
+    prepared.article.images_regenerating = True
+    db_session.commit()
+    builder.regenerate_content_images()
+
+    assert "перегенерировано 2/2" in prepared.article.error_text
+    assert "HTTP 500" in prepared.article.error_text
+    assert prepared.article.images_regenerating is False
+    assert prepared.article.status == "published"
+
+    new_path_1 = image_filename(prepared.article.id, 1, version=2)
+    new_path_2 = image_filename(prepared.article.id, 2, version=2)
+    assert new_path_1 in prepared.article.body_html
+    assert new_path_2 in prepared.article.body_html
+    assert paths[0] not in prepared.article.body_html
+    assert paths[1] not in prepared.article.body_html
+
+    images = db_session.query(ArticleImage).filter_by(
+        article_id=prepared.article.id, kind="content", version=2).all()
+    assert len(images) == 2

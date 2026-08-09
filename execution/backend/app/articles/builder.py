@@ -159,50 +159,81 @@ class ArticleBuilder:
                           key=lambda i: i.version).remote_path
             for position in positions
         }
-        prompts = {
-            position: self._image_prompt("content_image", {
-                "topic": self.article.topic,
-                "paragraph": f"иллюстрация {position} из {len(positions)}",
-                "image_style": self.site.image_style_prompt,
-            })
-            for position in positions
-        }
 
         updated = 0
-        first_error: Exception | None = None
-        # Та же логика, что в _generate_content_images: ждём ВСЕ futures,
-        # не теряем уже оплаченные успешные результаты соседей из-за одной
-        # упавшей генерации.
-        with ThreadPoolExecutor(max_workers=self.image_params["workers"]) as pool:
-            futures = [pool.submit(self._render_content_image, position, prompts[position])
-                      for position in positions]
-            for future in as_completed(futures):
-                try:
-                    position, prompt, data, cost = future.result()
-                except Exception as exc:  # noqa: BLE001 — см. комментарий выше
-                    if first_error is None:
-                        first_error = exc
-                    continue
-                filename = image_filename(self.article.id, position, version=next_version)
-                path = self.site_client.upload_file(data, filename, ARTICLE_IMG_DIR)
-                self.db.add(ArticleImage(article_id=self.article.id, kind="content",
-                                         position=position, version=next_version,
-                                         prompt=prompt, remote_path=path, cost=cost))
-                self._record_usage("image", 0, 0, cost)
-                self.article.body_html = self.article.body_html.replace(
-                    old_path_by_position[position], path)
-                updated += 1
-                self.db.commit()
+        try:
+            prompts = {
+                position: self._image_prompt("content_image", {
+                    "topic": self.article.topic,
+                    "paragraph": f"иллюстрация {position} из {len(positions)}",
+                    "image_style": self.site.image_style_prompt,
+                })
+                for position in positions
+            }
 
-        if updated:
-            self.site_client.update_page_text(self.article.remote_page_id, self.article.body_html)
+            first_error: Exception | None = None
+            # Та же логика, что в _generate_content_images: ждём ВСЕ futures,
+            # не теряем уже оплаченные успешные результаты соседей из-за
+            # одной упавшей генерации.
+            with ThreadPoolExecutor(max_workers=self.image_params["workers"]) as pool:
+                futures = [pool.submit(self._render_content_image, position, prompts[position])
+                          for position in positions]
+                for future in as_completed(futures):
+                    try:
+                        position, prompt, data, cost = future.result()
+                    except Exception as exc:  # noqa: BLE001 — см. комментарий выше
+                        if first_error is None:
+                            first_error = exc
+                        continue
+                    filename = image_filename(self.article.id, position, version=next_version)
+                    path = self.site_client.upload_file(data, filename, ARTICLE_IMG_DIR)
+                    self.db.add(ArticleImage(article_id=self.article.id, kind="content",
+                                             position=position, version=next_version,
+                                             prompt=prompt, remote_path=path, cost=cost))
+                    self._record_usage("image", 0, 0, cost)
+                    self.article.body_html = self.article.body_html.replace(
+                        old_path_by_position[position], path)
+                    updated += 1
+                    self.db.commit()
 
-        if first_error is not None:
+            if updated:
+                self.site_client.update_page_text(self.article.remote_page_id, self.article.body_html)
+
+            if first_error is not None:
+                self.article.error_text = (
+                    f"перегенерировано {updated}/{len(positions)} картинок, "
+                    f"ошибка: {first_error}")
+            else:
+                self.article.error_text = ""
+        except (LLMError, ImageError, SiteAPIError, PromptError) as exc:
+            # В отличие от build(), здесь НЕ откатываем уже закоммиченные
+            # построчно ArticleImage/body_html — это реальный, уже
+            # оплаченный прогресс (см. комментарий над циклом), и его потеря
+            # была бы хуже, чем зависшая статья. db.rollback() ниже трогает
+            # только текущую (ещё не закоммиченную) транзакцию — для уже
+            # закоммиченных строк он no-op, тот же принцип, что и в
+            # build()'овском except-блоке (см. его комментарий).
+            #
+            # Без этого except исключение (например SiteAPIError из
+            # update_page_text — сеть/токен сайта — или LLMError/PromptError
+            # из _image_prompt при построении промптов) улетело бы наружу
+            # необработанным: ArticleImage-строки и body_html уже
+            # закоммичены построчно внутри цикла выше, но
+            # images_regenerating остался бы True навсегда — статья
+            # выглядела бы «зависшей» в перегенерации без какой-либо
+            # ошибки в error_text, хотя часть (или все) картинок уже
+            # реально перегенерированы. Формат сообщения тот же, что и у
+            # частичного отказа генерации — админ должен видеть одинаковую
+            # форму ошибки независимо от того, что именно не удалось:
+            # сгенерировать картинку или запушить обновлённый текст на
+            # сайт.
+            self.db.rollback()
             self.article.error_text = (
                 f"перегенерировано {updated}/{len(positions)} картинок, "
-                f"ошибка: {first_error}")
-        else:
-            self.article.error_text = ""
+                f"ошибка: {exc}")
+            self.article.images_regenerating = False
+            self.db.commit()
+            return
         self.article.images_regenerating = False
         self.db.commit()
 

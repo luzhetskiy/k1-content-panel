@@ -37,6 +37,7 @@ class FakeSiteClient:
         self.created = None
         self.cover = None
         self.fetched_pages = []
+        self.updated_text = None
 
     def get_page(self, page_id):
         self.fetched_pages.append(page_id)
@@ -56,6 +57,10 @@ class FakeSiteClient:
     def set_page_cover(self, page_id, image_bytes, filename):
         self.cover = (page_id, filename)
         return "/media/staticpages/images/" + filename
+
+    def update_page_text(self, page_id, html):
+        self.updated_text = (page_id, html)
+        return {"id": page_id}
 
 
 @pytest.fixture
@@ -402,3 +407,118 @@ def test_llm_usage_model_matches_kind_not_always_text_client(db_session, prepare
     text_rows = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
     assert image_rows and all(r.model == "openai/gpt-image-2" for r in image_rows)
     assert text_rows and all(r.model == "anthropic/claude-sonnet-4-6" for r in text_rows)
+
+
+# --- Перегенерация картинок уже опубликованной статьи ---
+
+
+def test_regenerate_content_images_uploads_versioned_files_and_updates_body(
+        db_session, prepared):
+    from app.models.article import ArticleImage
+    from app.sites.client import ARTICLE_IMG_DIR
+
+    site_client = FakeSiteClient()
+    paths = image_paths_for(prepared.article.id, 2)
+    body = {
+        "title": "Чем утеплить каркасный дом",
+        "html": f"<article class='post'><p>Текст</p>"
+                f"<img src='{paths[0]}'><img src='{paths[1]}'></article>",
+        "meta_description": "описание", "meta_keywords": "утепление",
+    }
+    builder = make_builder(db_session, prepared, site_client, body=body)
+    builder.build()
+    assert paths[0] in prepared.article.body_html
+    assert paths[1] in prepared.article.body_html
+
+    prepared.article.images_regenerating = True
+    db_session.commit()
+    builder.regenerate_content_images()
+
+    new_path_1 = f"/media/{ARTICLE_IMG_DIR}{image_filename(prepared.article.id, 1, version=2)}"
+    new_path_2 = f"/media/{ARTICLE_IMG_DIR}{image_filename(prepared.article.id, 2, version=2)}"
+    assert new_path_1 in prepared.article.body_html
+    assert new_path_2 in prepared.article.body_html
+    assert paths[0] not in prepared.article.body_html
+    assert paths[1] not in prepared.article.body_html
+
+    assert site_client.uploaded == [
+        "cp-article-1-1.webp", "cp-article-1-2.webp",
+        "cp-article-1-1_v2.webp", "cp-article-1-2_v2.webp",
+    ]
+    assert site_client.updated_text == (501, prepared.article.body_html)
+    assert prepared.article.status == "published"
+    assert prepared.article.images_regenerating is False
+    assert prepared.article.error_text == ""
+
+    images = db_session.query(ArticleImage).filter_by(
+        article_id=prepared.article.id, kind="content").order_by(
+        ArticleImage.position, ArticleImage.version).all()
+    assert [(i.position, i.version, i.remote_path) for i in images] == [
+        (1, 1, paths[0]), (1, 2, new_path_1),
+        (2, 1, paths[1]), (2, 2, new_path_2),
+    ]
+
+
+def test_regenerate_content_images_partial_failure_keeps_old_path_for_failed_position(
+        db_session, prepared):
+    site_client = FakeSiteClient()
+    paths = image_paths_for(prepared.article.id, 2)
+    body = {
+        "title": "Чем утеплить каркасный дом",
+        "html": f"<p>{paths[0]}</p><p>{paths[1]}</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder = ArticleBuilder(
+        db=db_session, article=prepared.article, site=prepared.site,
+        text_client=SequencedTextClient(body), image_generator=FakeImageGenerator(),
+        site_client=site_client,
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 2},
+        watermark_bytes=b"", job_run_id=None,
+    )
+    builder.build()
+
+    builder.image_generator = PartialFailureImageGenerator(fail_on="2")
+    builder.text_client = SequencedTextClient(body)
+    builder.regenerate_content_images()
+
+    assert paths[0] not in prepared.article.body_html   # позиция 1 успела обновиться
+    assert paths[1] in prepared.article.body_html        # позиция 2 осталась старой
+    assert "перегенерировано 1/2" in prepared.article.error_text
+    assert prepared.article.images_regenerating is False
+    assert prepared.article.status == "published"
+
+
+def test_regenerate_content_images_without_existing_images_records_error(db_session, prepared):
+    prepared.article.status = "published"
+    prepared.article.body_html = "<p>текст без картинок</p>"
+    prepared.article.remote_page_id = 501
+    prepared.article.images_regenerating = True
+    db_session.commit()
+
+    builder = make_builder(db_session, prepared)
+    builder.regenerate_content_images()
+
+    assert "нет картинок" in prepared.article.error_text
+    assert prepared.article.images_regenerating is False
+    assert builder.image_generator.calls == []
+
+
+def test_regenerate_content_images_second_round_uses_next_version(db_session, prepared):
+    site_client = FakeSiteClient()
+    paths = image_paths_for(prepared.article.id, 2)
+    body = {
+        "title": "Чем утеплить каркасный дом",
+        "html": f"<p>{paths[0]}</p><p>{paths[1]}</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder = make_builder(db_session, prepared, site_client, body=body)
+    builder.build()
+    builder.regenerate_content_images()
+    builder.regenerate_content_images()
+
+    from app.models.article import ArticleImage
+
+    versions = sorted({i.version for i in db_session.query(ArticleImage).filter_by(
+        article_id=prepared.article.id, kind="content").all()})
+    assert versions == [1, 2, 3]
+    assert image_filename(prepared.article.id, 1, version=3) in prepared.article.body_html

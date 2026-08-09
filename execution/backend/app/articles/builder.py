@@ -115,6 +115,97 @@ class ArticleBuilder:
         self.article.error_text = ""
         self.db.commit()
 
+    def regenerate_content_images(self) -> None:
+        """Перегенерирует все content-картинки уже опубликованной статьи
+        новым раундом версий, заменяет их пути в body_html и пушит
+        обновлённый текст на уже созданную страницу сайта. Обложка
+        (kind="cover") не трогается — она не часть текста статьи, а
+        отдельный механизм страницы (teaser_image, см. _attach_cover).
+        Старые ArticleImage и файлы на сайте не удаляются: новый раунд
+        просто получает следующий version и новое имя файла
+        (image_filename с version>1, см. её докстринг).
+
+        Явный запрос к БД вместо self.article.images: и продовая сессия
+        (SessionLocal, app/db.py), и тестовая (backend/tests/conftest.py)
+        создаются с expire_on_commit=False, а новые ArticleImage ниже
+        добавляются через self.db.add(...) с article_id, выставленным
+        напрямую в конструкторе — не через relationship
+        (self.article.images.append(...)) — поэтому кэш коллекции
+        self.article.images, once загруженный (например, внутри build()'а
+        через _upload_content_images), не подхватывает их и остаётся со
+        старой версией даже после commit(). При повторном вызове
+        regenerate_content_images() на том же builder'е (см.
+        test_regenerate_content_images_second_round_uses_next_version) это
+        привело бы к тому, что next_version снова считался бы от устаревшего
+        списка картинок вместо актуального. Прямой запрос всегда читает
+        актуальное состояние БД, не завися от того, кто и когда трогал
+        relationship раньше в этой же сессии."""
+        content_images = self.db.query(ArticleImage).filter_by(
+            article_id=self.article.id, kind="content").all()
+        positions = sorted({i.position for i in content_images})
+        if not positions:
+            self.article.error_text = "нет картинок для перегенерации"
+            self.article.images_regenerating = False
+            self.db.commit()
+            return
+
+        next_version = max(i.version for i in content_images) + 1
+        # На случай, если предыдущий раунд был частичным (не все позиции
+        # успели перегенерироваться) — версии разных позиций могут
+        # разойтись, поэтому "старый путь" ищем на позицию, а не на
+        # next_version - 1 глобально.
+        old_path_by_position = {
+            position: max((i for i in content_images if i.position == position),
+                          key=lambda i: i.version).remote_path
+            for position in positions
+        }
+        prompts = {
+            position: self._image_prompt("content_image", {
+                "topic": self.article.topic,
+                "paragraph": f"иллюстрация {position} из {len(positions)}",
+                "image_style": self.site.image_style_prompt,
+            })
+            for position in positions
+        }
+
+        updated = 0
+        first_error: Exception | None = None
+        # Та же логика, что в _generate_content_images: ждём ВСЕ futures,
+        # не теряем уже оплаченные успешные результаты соседей из-за одной
+        # упавшей генерации.
+        with ThreadPoolExecutor(max_workers=self.image_params["workers"]) as pool:
+            futures = [pool.submit(self._render_content_image, position, prompts[position])
+                      for position in positions]
+            for future in as_completed(futures):
+                try:
+                    position, prompt, data, cost = future.result()
+                except Exception as exc:  # noqa: BLE001 — см. комментарий выше
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                filename = image_filename(self.article.id, position, version=next_version)
+                path = self.site_client.upload_file(data, filename, ARTICLE_IMG_DIR)
+                self.db.add(ArticleImage(article_id=self.article.id, kind="content",
+                                         position=position, version=next_version,
+                                         prompt=prompt, remote_path=path, cost=cost))
+                self._record_usage("image", 0, 0, cost)
+                self.article.body_html = self.article.body_html.replace(
+                    old_path_by_position[position], path)
+                updated += 1
+                self.db.commit()
+
+        if updated:
+            self.site_client.update_page_text(self.article.remote_page_id, self.article.body_html)
+
+        if first_error is not None:
+            self.article.error_text = (
+                f"перегенерировано {updated}/{len(positions)} картинок, "
+                f"ошибка: {first_error}")
+        else:
+            self.article.error_text = ""
+        self.article.images_regenerating = False
+        self.db.commit()
+
     # --- шаги ---
 
     def _set_status(self, status: str) -> None:

@@ -38,8 +38,15 @@ class ArticleBuildError(RuntimeError):
     частичного уникального индекса uq_article_site_slug (см. _apply_body)."""
 
 
-def image_filename(article_id: int, position: int) -> str:
-    """position=0 — обложка, дальше контентные по порядку.
+def image_filename(article_id: int, position: int, version: int = 1) -> str:
+    """position=0 — обложка, дальше контентные по порядку. version=1 — то,
+    что сгенерировано при первой публикации статьи (имя не меняется, чтобы
+    не сломать обратную совместимость со старыми файлами/тестами); version>1
+    — раунд перегенерации картинок уже опубликованной статьи (кнопка
+    «Перегенерировать картинки», directions/2026-08-09-...-design.md) —
+    добавляет суффикс _vN, чтобы не перезаписать предыдущий файл в
+    filemanager сайта (см. остальной докстринг ниже — та же коллизия имён,
+    которую он уже однажды вызвал).
 
     Префикс "cp-article-" (а не просто "article_") — намеренно: на
     stroybaza-samara.ru в той же папке filemanager (ARTICLE_IMG_DIR) уже
@@ -53,7 +60,8 @@ def image_filename(article_id: int, position: int) -> str:
     пароизоляция, герметик) — баг был обнаружен на проде. Новый префикс не
     пересекается со старой схемой ни при каком id."""
     suffix = "cover" if position == 0 else str(position)
-    return f"cp-article-{article_id}-{suffix}.webp"
+    version_suffix = "" if version <= 1 else f"_v{version}"
+    return f"cp-article-{article_id}-{suffix}{version_suffix}.webp"
 
 
 def image_paths_for(article_id: int, count: int) -> list[str]:

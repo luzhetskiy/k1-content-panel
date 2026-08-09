@@ -112,6 +112,12 @@ def test_image_filename_is_deterministic():
     assert image_filename(7, 2) == "cp-article-7-2.webp"
 
 
+def test_image_filename_adds_version_suffix_from_second_round():
+    assert image_filename(7, 2, version=1) == "cp-article-7-2.webp"
+    assert image_filename(7, 2, version=2) == "cp-article-7-2_v2.webp"
+    assert image_filename(7, 0, version=3) == "cp-article-7-cover_v3.webp"
+
+
 def test_image_paths_use_article_img_dir():
     assert image_paths_for(7, 2) == [
         "/media/uploads/article-img/cp-article-7-1.webp",

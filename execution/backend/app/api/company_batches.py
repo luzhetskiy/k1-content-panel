@@ -93,6 +93,19 @@ class BatchOut(BaseModel):
     companies: list[CompanyOut] = []
 
 
+class UnbatchedCompanyOut(BaseModel):
+    id: int
+    name: str
+    website: str
+    site_id: int | None
+    site_name: str
+    status: str
+    remote_url: str
+    error_text: str
+    source: str  # "migrated" | "removed_from_batch"
+    created_at: datetime
+
+
 def _to_out(db: Session, batch: CompanyBatch) -> BatchOut:
     site = db.get(Site, batch.site_id) if batch.site_id is not None else None
     return BatchOut(
@@ -268,6 +281,22 @@ def run(batch_id: int, db: Session = Depends(get_db),
     soft, hard = _company_time_limits(len(batch.companies))
     run_company_batch.apply_async(args=[batch.id], soft_time_limit=soft, time_limit=hard)
     return _to_out(db, batch)
+
+
+@router.get("/companies/unbatched", response_model=list[UnbatchedCompanyOut])
+def list_unbatched_companies(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    companies = db.scalars(
+        select(Company).where(Company.batch_id.is_(None)).order_by(Company.created_at.desc())
+    ).all()
+    site_ids = {c.site_id for c in companies if c.site_id is not None}
+    sites = {s.id: s for s in db.scalars(select(Site).where(Site.id.in_(site_ids))).all()} if site_ids else {}
+    return [UnbatchedCompanyOut(
+        id=c.id, name=c.name, website=c.website, site_id=c.site_id,
+        site_name=sites[c.site_id].name if c.site_id in sites else "—",
+        status=c.status, remote_url=c.remote_url, error_text=c.error_text,
+        source="migrated" if c.candidate_id is None else "removed_from_batch",
+        created_at=c.created_at,
+    ) for c in companies]
 
 
 @router.post("/companies/{company_id}/retry")

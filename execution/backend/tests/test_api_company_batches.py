@@ -284,3 +284,52 @@ def test_company_time_limits_scale_with_count():
     soft5, hard5 = _company_time_limits(5)
     assert soft5 > soft1
     assert hard5 > soft5 > 0
+
+
+# --- /companies/unbatched ---
+
+def test_unbatched_lists_migrated_and_removed_companies(manager_client, site_id, db_session):
+    from app.models.company import Company
+
+    candidate = CompanyCandidate(site_key="removed.ru", name="Убранная", region_raw="Самара",
+                                 category_raw="Дома", reviews_count=1)
+    db_session.add(candidate)
+    db_session.commit()
+
+    migrated = Company(site_id=site_id, batch_id=None, candidate_id=None,
+                       site_key="migrated.ru", website="https://migrated.ru", name="Мигрированная",
+                       status="published", remote_url="https://s.ru/migrated")
+    removed = Company(site_id=site_id, batch_id=None, candidate_id=candidate.id,
+                      site_key="removed.ru", website="https://removed.ru", name="Убранная",
+                      status="failed", error_text="упс")
+    db_session.add_all([migrated, removed])
+    db_session.commit()
+
+    resp = manager_client.get("/api/companies/unbatched")
+    assert resp.status_code == 200
+    body = resp.json()
+    by_name = {c["name"]: c for c in body}
+
+    assert by_name["Мигрированная"]["source"] == "migrated"
+    assert by_name["Мигрированная"]["site_name"] == "С"
+    assert by_name["Убранная"]["source"] == "removed_from_batch"
+    assert by_name["Убранная"]["site_name"] == "С"
+
+
+def test_unbatched_excludes_companies_with_a_batch(manager_client, site_id, candidates):
+    batch = manager_client.post("/api/company-batches", json={
+        "site_id": site_id, "region_raw": "Самара", "category_raw": "Дома",
+        "category_normalized": "Дома под ключ", "teaser_category_id": 3,
+        "teaser_city_id": 1, "teaser_location_id": 1, "count": 2,
+    }).json()
+    batched_names = {c["name"] for c in batch["companies"]}
+
+    resp = manager_client.get("/api/companies/unbatched")
+    assert resp.status_code == 200
+    unbatched_names = {c["name"] for c in resp.json()}
+    assert batched_names.isdisjoint(unbatched_names)
+
+
+def test_unbatched_requires_auth(client):
+    resp = client.get("/api/companies/unbatched")
+    assert resp.status_code == 401

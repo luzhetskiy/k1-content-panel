@@ -4,7 +4,9 @@ import {
   Alert, Button, Card, Input, Popconfirm, Space, Table, Tag, Typography, message,
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
-import { ArticleRow, Batch, getBatch, retryArticle, runBatch, saveTopics } from '../api'
+import {
+  ArticleRow, Batch, getBatch, regenerateArticleImages, retryArticle, runBatch, saveTopics,
+} from '../api'
 
 const EDITABLE = ['topics_pending', 'topics_review', 'failed']
 
@@ -54,7 +56,7 @@ export default function BatchPage() {
   useEffect(() => {
     if (!batch) return
     const active = batch.status === 'topics_pending' || batch.status === 'running'
-      || batch.articles.some(a => a.status === 'generating')
+      || batch.articles.some(a => a.status === 'generating' || a.images_regenerating)
     if (!active) return
     const timer = setInterval(load, 5000)
     return () => clearInterval(timer)
@@ -204,13 +206,33 @@ export default function BatchPage() {
                   : '—',
               },
               {
-                title: '', width: 60,
-                render: (_, r: ArticleRow) => r.status === 'failed' ? (
-                  <Popconfirm title="Повторить генерацию этой статьи?"
-                              onConfirm={async () => { await retryArticle(r.id); load() }}>
-                    <Button type="text" icon={<ReloadOutlined />} />
-                  </Popconfirm>
-                ) : null,
+                title: '', width: 220,
+                render: (_, r: ArticleRow) => {
+                  if (r.status === 'failed') {
+                    return (
+                      <Popconfirm title="Повторить генерацию этой статьи?"
+                                  onConfirm={async () => { await retryArticle(r.id); load() }}>
+                        <Button type="text" icon={<ReloadOutlined />} />
+                      </Popconfirm>
+                    )
+                  }
+                  if (r.status === 'published') {
+                    return (
+                      <Popconfirm title="Перегенерировать картинки в тексте статьи?"
+                                  onConfirm={async () => {
+                                    await regenerateArticleImages(r.id)
+                                    load()
+                                  }}>
+                        <Button size="small" icon={<ReloadOutlined />}
+                                loading={r.images_regenerating}
+                                disabled={r.images_regenerating}>
+                          Перегенерировать картинки
+                        </Button>
+                      </Popconfirm>
+                    )
+                  }
+                  return null
+                },
               },
             ]}
             expandable={{

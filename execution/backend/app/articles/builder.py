@@ -543,3 +543,28 @@ def build_for(db: Session, article: Article, site: Site, site_client,
         watermark_bytes=watermark,
         job_run_id=job_run_id,
     ).build()
+
+
+def regenerate_images_for(db: Session, article: Article, site: Site, site_client,
+                          job_run_id: int | None) -> None:
+    """Как build_for выше, но перегенерирует только контентные картинки уже
+    опубликованной статьи — не создаёт страницу заново и не трогает
+    обложку. Тот же открытый риск с порядком AIConfigError, что
+    задокументирован в build_for."""
+    watermark = b""
+    if site.watermark_path:
+        try:
+            with open(site.watermark_path, "rb") as f:
+                watermark = f.read()
+        except OSError:
+            watermark = b""
+
+    ArticleBuilder(
+        db=db, article=article, site=site,
+        text_client=build_text_client(db),
+        image_generator=build_image_generator(db),
+        site_client=site_client,
+        image_params=image_params(db),
+        watermark_bytes=watermark,
+        job_run_id=job_run_id,
+    ).regenerate_content_images()

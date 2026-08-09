@@ -95,7 +95,7 @@ export type SettingsMap = Record<string, string> & { _errors?: Record<string, st
 export interface Facets { regions: string[]; categories: string[] }
 export interface CompanyImportResult {
   id: number; filename: string; row_count: number; matched_count: number
-  error_count: number; status: string; error_message: string
+  error_count: number; status: string; error_message: string; uploaded_at: string
 }
 export interface CompanyRow {
   id: number; name: string; website: string; region: string
@@ -150,6 +150,8 @@ export const uploadCompanyImport = (file: File) => {
   form.append('file', file)
   return api.post<CompanyImportResult>('/company-imports', form).then(r => r.data)
 }
+export const getCompanyImports = () =>
+  api.get<CompanyImportResult[]>('/company-imports').then(r => r.data)
 export const getCompanyFacets = (siteId: number) =>
   api.get<Facets>(`/company-imports/facets?site_id=${siteId}`).then(r => r.data)
 

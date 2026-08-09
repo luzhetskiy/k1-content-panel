@@ -10,7 +10,7 @@ from app.ai.factory import AIConfigError, build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
 from app.api.admin_sites import open_client as open_site_client
-from app.articles.builder import build_for
+from app.articles.builder import build_for, regenerate_images_for
 from app.articles.topics import filter_duplicates
 from app.celery_app import celery_app
 from app.clock import utcnow
@@ -304,6 +304,67 @@ def retry_article(article_id: int) -> None:
     db = SessionLocal()
     try:
         retry_article_sync(db, article_id)
+    finally:
+        db.close()
+
+
+# --- перегенерация картинок опубликованной статьи ---
+
+def regenerate_article_images_sync(db, article_id: int) -> None:
+    article = db.get(Article, article_id)
+    if article.status != "published":
+        # Гонка с эндпоинтом (app/api/article_batches.py, regenerate_images):
+        # он уже отклоняет неопубликованные статьи синхронно, сюда можно
+        # попасть только если статус успел измениться между постановкой
+        # задачи и её реальным стартом. Тихий выход, тот же стиль, что и у
+        # generate_topics_sync при повторной постановке той же задачи.
+        article.images_regenerating = False
+        db.commit()
+        return
+
+    site = db.get(Site, article.site_id) if article.site_id is not None else None
+    if site is None:
+        article.images_regenerating = False
+        article.error_text = "сайт этой статьи удалён — перегенерация картинок невозможна"
+        db.commit()
+        job = _start_job(db, "regenerate_article_images", None, None,
+                         {"article_id": article_id})
+        _finish_job(db, job, "failed", article.error_text)
+        return
+
+    job = _start_job(db, "regenerate_article_images", site.id, None,
+                     {"article_id": article_id})
+    try:
+        regenerate_images_for(db, article, site, open_site_client(db, site), job.id)
+    except SoftTimeLimitExceeded:
+        article.images_regenerating = False
+        article.error_text = "превышен лимит времени задачи"
+        db.commit()
+        _finish_job(db, job, "failed", article.error_text)
+        return
+    except (AIConfigError, SecretDecryptionError) as exc:
+        article.images_regenerating = False
+        article.error_text = str(exc)
+        db.commit()
+        _finish_job(db, job, "failed", str(exc))
+        return
+
+    # Подстраховка: ArticleBuilder.regenerate_content_images() (Task 5) сама
+    # снимает этот флаг по завершении, но обёртка не должна полагаться на то,
+    # что он снят именно билдером — иначе тест, подменяющий
+    # regenerate_images_for целиком (без реального билдера), не может
+    # проверить, что флаг снимается, а сама обёртка перестаёт быть источником
+    # истины о собственном состоянии.
+    article.images_regenerating = False
+    db.commit()
+    _finish_job(db, job, "ok" if not article.error_text else "failed", article.error_text)
+
+
+@celery_app.task(name="app.tasks.regenerate_article_images")
+def regenerate_article_images(article_id: int) -> None:
+    db = SessionLocal()
+    try:
+        regenerate_article_images_sync(db, article_id)
     finally:
         db.close()
 

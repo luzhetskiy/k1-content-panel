@@ -336,6 +336,95 @@ def test_retry_article_without_site_marks_article_failed(db_session, admin, monk
     assert calls == []
 
 
+# --- перегенерация картинок опубликованной статьи ---
+
+
+def test_regenerate_article_images_sync_calls_builder_and_finishes_job(
+        db_session, batch, site, monkeypatch):
+    from app.tasks import regenerate_article_images_sync
+
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
+                      status="published", remote_page_id=501,
+                      images_regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr(
+        "app.tasks.regenerate_images_for",
+        lambda db, a, s, sc, job_id: calls.append((a.id, s.id, job_id)))
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    regenerate_article_images_sync(db_session, article.id)
+    db_session.refresh(article)
+
+    assert len(calls) == 1 and calls[0][0] == article.id and calls[0][1] == site.id
+    assert article.images_regenerating is False
+
+
+def test_regenerate_article_images_sync_skips_non_published_article(
+        db_session, batch, site, monkeypatch):
+    from app.tasks import regenerate_article_images_sync
+
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
+                      status="draft", images_regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    calls = []
+    monkeypatch.setattr("app.tasks.regenerate_images_for", lambda *a, **k: calls.append(1))
+
+    regenerate_article_images_sync(db_session, article.id)
+    db_session.refresh(article)
+
+    assert calls == []
+    assert article.images_regenerating is False
+
+
+def test_regenerate_article_images_sync_ai_config_error_marks_failed(
+        db_session, batch, site, monkeypatch):
+    from app.ai.factory import AIConfigError
+    from app.tasks import regenerate_article_images_sync
+
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
+                      status="published", remote_page_id=501,
+                      images_regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id):
+        raise AIConfigError("ключ RouterAI не задан — заполните routerai_api_key")
+
+    monkeypatch.setattr("app.tasks.regenerate_images_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    regenerate_article_images_sync(db_session, article.id)
+    db_session.refresh(article)
+
+    assert article.images_regenerating is False
+    assert "ключ" in article.error_text
+    assert article.status == "published"   # перегенерация не трогает статус статьи
+
+
+def test_regenerate_article_images_sync_without_site_marks_failed(db_session, admin):
+    from app.tasks import regenerate_article_images_sync
+
+    orphan_batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=admin.id)
+    db_session.add(orphan_batch)
+    db_session.commit()
+    article = Article(batch_id=orphan_batch.id, site_id=None, topic="Тема",
+                      status="published", remote_page_id=501,
+                      images_regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    regenerate_article_images_sync(db_session, article.id)
+    db_session.refresh(article)
+
+    assert article.images_regenerating is False
+    assert "удал" in article.error_text
+
+
 # --- находка №3 ревью Task 17: generate_topics_sync не защищена от
 # повторного запуска — без защиты каждый повтор задваивает Article.
 

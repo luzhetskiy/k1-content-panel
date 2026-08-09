@@ -67,7 +67,7 @@ export interface SiteFull {
 }
 export interface ArticleRow {
   id: number; topic: string; title: string; status: string
-  remote_url: string; error_text: string
+  remote_url: string; error_text: string; images_regenerating: boolean
 }
 export interface Batch {
   id: number; site_id: number; site_name: string; site_domain: string
@@ -144,6 +144,8 @@ export const saveTopics = (id: number, topics: string[]) =>
 export const runBatch = (id: number) =>
   api.post<Batch>(`/article-batches/${id}/run`).then(r => r.data)
 export const retryArticle = (id: number) => api.post(`/articles/${id}/retry`)
+export const regenerateArticleImages = (id: number) =>
+  api.post(`/articles/${id}/regenerate-images`)
 
 export const uploadCompanyImport = (file: File) => {
   const form = new FormData()

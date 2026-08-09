@@ -311,6 +311,13 @@ def retry_article(article_id: int) -> None:
 # --- перегенерация картинок опубликованной статьи ---
 
 def regenerate_article_images_sync(db, article_id: int) -> None:
+    """В отличие от retry_article_sync, ни одна ветка здесь НЕ трогает
+    article.status — картинки перегенерируются у уже опубликованной статьи,
+    её страница на сайте продолжает существовать и работать независимо от
+    исхода этого раунда. Отказ отражается только в images_regenerating/
+    error_text. Это намеренное расхождение с соседней retry_article_sync
+    (которая как раз обязана переводить статью в "failed"), а не пропуск —
+    не «чинить» по аналогии с ней."""
     article = db.get(Article, article_id)
     if article.status != "published":
         # Гонка с эндпоинтом (app/api/article_batches.py, regenerate_images):

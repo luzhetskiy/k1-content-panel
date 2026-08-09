@@ -1,21 +1,29 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Button, Card, Form, InputNumber, Modal, Select, Space, Table, Tag, Typography,
+  Button, Card, Form, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Typography,
   Upload, message,
 } from 'antd'
-import { PlusOutlined, UploadOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { UploadProps } from 'antd'
 import {
-  CompanyBatchRow, CompanyImportResult, Facets, SiteBrief, createCompanyBatch,
-  getCompanyBatches, getCompanyFacets, getCompanyImports, getSites, uploadCompanyImport,
+  CompanyBatchRow, CompanyImportResult, Facets, SiteBrief, UnbatchedCompanyRow,
+  createCompanyBatch, getCompanyBatches, getCompanyFacets, getCompanyImports,
+  getSites, getUnbatchedCompanies, retryCompany, uploadCompanyImport,
 } from '../api'
 
 const STATUS: Record<string, { color: string; label: string }> = {
   selection_review: { color: 'warning', label: 'Список на согласовании' },
   running: { color: 'processing', label: 'Генерируется' },
   done: { color: 'success', label: 'Готово' },
+  failed: { color: 'error', label: 'Ошибка' },
+}
+
+const COMPANY_STATUS: Record<string, { color: string; label: string }> = {
+  draft: { color: 'default', label: 'Ожидает' },
+  generating: { color: 'processing', label: 'Собирается' },
+  published: { color: 'success', label: 'Опубликован черновик' },
   failed: { color: 'error', label: 'Ошибка' },
 }
 
@@ -26,15 +34,18 @@ export default function BuildersPage() {
   const [open, setOpen] = useState(false)
   const [facets, setFacets] = useState<Facets>({ regions: [], categories: [] })
   const [lastImport, setLastImport] = useState<CompanyImportResult | null>(null)
+  const [unbatched, setUnbatched] = useState<UnbatchedCompanyRow[]>([])
   const [form] = Form.useForm()
 
   const load = () => getCompanyBatches().then(setBatches)
   const loadLastImport = () => getCompanyImports().then(imports => setLastImport(imports[0] ?? null))
+  const loadUnbatched = () => getUnbatchedCompanies().then(setUnbatched)
 
   useEffect(() => {
     load()
     getSites().then(setSites)
     loadLastImport()
+    loadUnbatched()
   }, [])
 
   useEffect(() => {
@@ -43,6 +54,13 @@ export default function BuildersPage() {
     const timer = setInterval(load, 5000)
     return () => clearInterval(timer)
   }, [batches])
+
+  useEffect(() => {
+    const active = unbatched.some(c => c.status === 'generating')
+    if (!active) return
+    const timer = setInterval(loadUnbatched, 5000)
+    return () => clearInterval(timer)
+  }, [unbatched])
 
   const onSiteChange = async (siteId: number) => {
     setFacets(await getCompanyFacets(siteId))
@@ -62,6 +80,11 @@ export default function BuildersPage() {
     } catch {
       // сообщение об ошибке уже показывает интерцептор api.ts
     }
+  }
+
+  const retryUnbatched = async (companyId: number) => {
+    await retryCompany(companyId)
+    loadUnbatched()
   }
 
   const uploadProps: UploadProps = {
@@ -137,6 +160,51 @@ export default function BuildersPage() {
           ]}
         />
       </Card>
+
+      {unbatched.length > 0 && (
+        <Card title="Компании без партии" style={{ marginTop: 16 }} styles={{ body: { padding: 0 } }}>
+          <Table
+            rowKey="id"
+            dataSource={unbatched}
+            pagination={{ pageSize: 20 }}
+            columns={[
+              { title: 'Компания', dataIndex: 'name' },
+              { title: 'Сайт', dataIndex: 'site_name', width: 200 },
+              {
+                title: 'Статус', dataIndex: 'status', width: 200,
+                render: (s: string) => (
+                  <Tag color={COMPANY_STATUS[s]?.color}>{COMPANY_STATUS[s]?.label ?? s}</Tag>
+                ),
+              },
+              {
+                title: 'Источник', dataIndex: 'source', width: 180,
+                render: (s: string) => s === 'migrated' ? 'Мигрировано из CLI' : 'Убрано из партии',
+              },
+              {
+                title: 'Черновик', width: 120,
+                render: (_, r: UnbatchedCompanyRow) => r.remote_url
+                  ? <a href={r.remote_url} target="_blank" rel="noreferrer">открыть</a>
+                  : '—',
+              },
+              {
+                title: '', width: 60,
+                render: (_, r: UnbatchedCompanyRow) => r.status === 'failed' ? (
+                  <Popconfirm title="Повторить сборку этой компании?"
+                              onConfirm={() => retryUnbatched(r.id)}>
+                    <Button type="text" icon={<ReloadOutlined />} />
+                  </Popconfirm>
+                ) : null,
+              },
+            ]}
+            expandable={{
+              expandedRowRender: (r: UnbatchedCompanyRow) => (
+                <Typography.Text type="danger">{r.error_text}</Typography.Text>
+              ),
+              rowExpandable: (r: UnbatchedCompanyRow) => Boolean(r.error_text),
+            }}
+          />
+        </Card>
+      )}
 
       <Modal open={open} onCancel={() => setOpen(false)} onOk={form.submit}
              title="Новая партия строителей" okText="Отобрать компании" destroyOnHidden>

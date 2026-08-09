@@ -173,6 +173,13 @@ export const runCompanyBatch = (id: number) =>
   api.post<CompanyBatchRow>(`/company-batches/${id}/run`).then(r => r.data)
 export const retryCompany = (id: number) => api.post(`/companies/${id}/retry`)
 
+export interface UnbatchedCompanyRow {
+  id: number; name: string; website: string; site_id: number | null; site_name: string
+  status: string; remote_url: string; error_text: string; source: string; created_at: string
+}
+export const getUnbatchedCompanies = () =>
+  api.get<UnbatchedCompanyRow[]>('/companies/unbatched').then(r => r.data)
+
 export const getSettings = () => api.get<SettingsMap>('/admin/settings').then(r => r.data)
 export const updateSettings = (d: Record<string, string>) =>
   api.put<SettingsMap>('/admin/settings', d).then(r => r.data)

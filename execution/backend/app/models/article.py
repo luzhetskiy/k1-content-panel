@@ -116,6 +116,7 @@ class Article(Base):
     meta_keywords: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="draft")
     error_text: Mapped[str] = mapped_column(Text, default="")
+    images_regenerating: Mapped[bool] = mapped_column(default=False)
     remote_page_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     remote_url: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -151,5 +152,6 @@ class ArticleImage(Base):
     prompt: Mapped[str] = mapped_column(Text, default="")
     remote_path: Mapped[str] = mapped_column(String(500), default="")
     cost: Mapped[float] = mapped_column(default=0.0)
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
     article: Mapped["Article"] = relationship(back_populates="images")

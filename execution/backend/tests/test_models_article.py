@@ -133,6 +133,23 @@ def test_empty_slug_does_not_collide_between_draft_articles(db_session):
     db_session.commit()   # не должно бросить IntegrityError
 
 
+def test_new_article_and_image_default_regeneration_fields(db_session, admin):
+    from app.models.article import Article, ArticleBatch, ArticleImage
+
+    batch = ArticleBatch(requested_count=1, created_by_id=admin.id)
+    db_session.add(batch)
+    db_session.commit()
+    article = Article(batch_id=batch.id, topic="Тема")
+    db_session.add(article)
+    db_session.commit()
+    image = ArticleImage(article_id=article.id, kind="content", position=1)
+    db_session.add(image)
+    db_session.commit()
+
+    assert article.images_regenerating is False
+    assert image.version == 1
+
+
 def test_same_slug_allowed_on_different_sites(db_session):
     """Уникальность slug — в рамках сайта, а не глобальная: у двух разных
     сайтов разделы независимы, совпадение url между ними — не проблема."""

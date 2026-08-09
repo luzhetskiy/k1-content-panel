@@ -313,6 +313,39 @@ def test_regenerate_images_starts_task_for_published_article(manager_client, db_
     assert article.images_regenerating is True
 
 
+def test_regenerate_images_time_limit_counts_distinct_positions_not_rows(
+        manager_client, db_session, site_id, no_celery):
+    """Регенерация не удаляет старые ArticleImage — вторая версия той же
+    позиции добавляет новую строку, не заменяет старую (app/articles/
+    builder.py, regenerate_content_images). Бюджет времени обязан считать
+    иллюстрации (уникальные position), а не строки — иначе COUNT(*) после
+    хотя бы одного раунда перегенерации задвоил бы бюджет для той же самой
+    одной картинки."""
+    from app.api.article_batches import _regen_time_limits
+    from app.models.article import Article, ArticleImage
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501)
+    db_session.add(article)
+    db_session.commit()
+    db_session.add_all([
+        ArticleImage(article_id=article.id, kind="content", position=1, version=1,
+                    remote_path="/media/x/cp-article-1-1.webp"),
+        ArticleImage(article_id=article.id, kind="content", position=1, version=2,
+                    remote_path="/media/x/cp-article-1-1_v2.webp"),
+    ])
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+
+    assert resp.status_code == 200
+    dispatch = next(entry for entry in no_celery if entry[0] == "regenerate")
+    soft_one, _ = _regen_time_limits(1)
+    assert dispatch[2]["soft_time_limit"] == soft_one
+
+
 def test_regenerate_images_twice_dispatches_once(manager_client, db_session, site_id, no_celery):
     from app.models.article import Article
 

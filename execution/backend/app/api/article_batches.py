@@ -2,14 +2,14 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
-from app.models.article import Article, ArticleBatch
+from app.models.article import Article, ArticleBatch, ArticleImage
 from app.models.site import Site
 from app.models.user import User
-from app.tasks import generate_topics, retry_article, run_batch
+from app.tasks import generate_topics, regenerate_article_images, retry_article, run_batch
 
 router = APIRouter(prefix="/api", tags=["articles"])
 
@@ -28,6 +28,7 @@ class ArticleOut(BaseModel):
     status: str
     remote_url: str
     error_text: str
+    images_regenerating: bool
 
 
 class BatchOut(BaseModel):
@@ -51,7 +52,8 @@ def _to_out(db: Session, batch: ArticleBatch) -> BatchOut:
         requested_count=batch.requested_count, status=batch.status,
         error_text=batch.error_text, created_at=batch.created_at,
         articles=[ArticleOut(id=a.id, topic=a.topic, title=a.title, status=a.status,
-                             remote_url=a.remote_url, error_text=a.error_text)
+                             remote_url=a.remote_url, error_text=a.error_text,
+                             images_regenerating=a.images_regenerating)
                   for a in batch.articles],
     )
 
@@ -174,6 +176,21 @@ _RETRY_PER_IMAGE_SECONDS = 366  # один последовательный те
 
 def _retry_time_limits(reference_images: int) -> tuple[int, int]:
     soft = _RETRY_FIXED_SECONDS + _RETRY_PER_IMAGE_SECONDS * reference_images
+    return soft, soft + TIME_LIMIT_GAP_SECONDS
+
+
+# Перегенерация не пересобирает текст и не создаёт страницу заново —
+# бюджет считается только по картинкам: N последовательных текстовых
+# промптов иллюстраций (_RETRY_PER_IMAGE_SECONDS каждый) плюс одна
+# параллельная пачка генерации самих картинок (365 с, см. app/ai/images.py)
+# плюс запас на загрузку файлов и update_page_text.
+_REGEN_OVERHEAD_SECONDS = 300
+_REGEN_IMAGE_BATCH_SECONDS = 365
+
+
+def _regen_time_limits(image_count: int) -> tuple[int, int]:
+    soft = (_REGEN_OVERHEAD_SECONDS + _RETRY_PER_IMAGE_SECONDS * image_count
+           + _REGEN_IMAGE_BATCH_SECONDS)
     return soft, soft + TIME_LIMIT_GAP_SECONDS
 
 
@@ -321,4 +338,31 @@ def retry(article_id: int, db: Session = Depends(get_db),
     site = db.get(Site, article.site_id) if article.site_id is not None else None
     soft, hard = _retry_time_limits(site.reference_images if site else 0)
     retry_article.apply_async(args=[article.id], soft_time_limit=soft, time_limit=hard)
+    return {"ok": True}
+
+
+@router.post("/articles/{article_id}/regenerate-images")
+def regenerate_images(article_id: int, db: Session = Depends(get_db),
+                      _user: User = Depends(get_current_user)):
+    article = db.get(Article, article_id)
+    if article is None:
+        raise HTTPException(404, "статья не найдена")
+    if article.status != "published":
+        raise HTTPException(
+            400, "перегенерация картинок доступна только для опубликованных статей")
+    # Тот же приём анти-гонки, что у run()/retry() выше: перевод в
+    # "выполняется" синхронно, до apply_async, — второй быстрый клик
+    # увидит уже True и не поставит вторую задачу в очередь.
+    if article.images_regenerating:
+        raise HTTPException(400, "перегенерация картинок уже выполняется")
+    article.images_regenerating = True
+    db.commit()
+
+    image_count = db.scalar(
+        select(func.count(func.distinct(ArticleImage.position)))
+        .where(ArticleImage.article_id == article.id, ArticleImage.kind == "content")
+    ) or 0
+    soft, hard = _regen_time_limits(image_count)
+    regenerate_article_images.apply_async(args=[article.id], soft_time_limit=soft,
+                                          time_limit=hard)
     return {"ok": True}

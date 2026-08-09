@@ -29,6 +29,10 @@ def no_celery(monkeypatch):
     monkeypatch.setattr("app.api.article_batches.retry_article.apply_async",
                         lambda args, **kwargs: sent.append(("retry", args[0], kwargs)) or
                         type("R", (), {"id": "task-3"})())
+    monkeypatch.setattr(
+        "app.api.article_batches.regenerate_article_images.apply_async",
+        lambda args, **kwargs: sent.append(("regenerate", args[0], kwargs)) or
+        type("R", (), {"id": "task-4"})())
     return sent
 
 
@@ -257,3 +261,87 @@ def test_jobs_cost_is_rounded_for_display(manager_client, db_session, site_id):
 
     body = manager_client.get("/api/jobs").json()
     assert body[0]["cost"] == 0.3
+
+
+def test_regen_time_limits_grow_with_image_count():
+    from app.api.article_batches import _regen_time_limits
+
+    soft_one, hard_one = _regen_time_limits(1)
+    soft_many, _ = _regen_time_limits(5)
+    assert soft_many > soft_one
+    assert hard_one > soft_one
+
+
+def test_regenerate_images_unknown_article_404(manager_client, no_celery):
+    resp = manager_client.post("/api/articles/999/regenerate-images")
+    assert resp.status_code == 404
+
+
+def test_regenerate_images_requires_published_article(manager_client, db_session,
+                                                       site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема", status="draft")
+    db_session.add(article)
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    assert resp.status_code == 400
+
+
+def test_regenerate_images_starts_task_for_published_article(manager_client, db_session,
+                                                              site_id, no_celery):
+    from app.models.article import Article, ArticleImage
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501)
+    db_session.add(article)
+    db_session.commit()
+    db_session.add(ArticleImage(article_id=article.id, kind="content", position=1,
+                                remote_path="/media/x/cp-article-1-1.webp"))
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+
+    assert resp.status_code == 200
+    assert any(entry[:2] == ("regenerate", article.id) for entry in no_celery)
+    db_session.refresh(article)
+    assert article.images_regenerating is True
+
+
+def test_regenerate_images_twice_dispatches_once(manager_client, db_session, site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501)
+    db_session.add(article)
+    db_session.commit()
+
+    first = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    second = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    dispatches = [entry for entry in no_celery if entry[0] == "regenerate"]
+    assert len(dispatches) == 1
+
+
+def test_batch_detail_includes_images_regenerating_flag(manager_client, db_session,
+                                                         site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501, images_regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    body = manager_client.get(f"/api/article-batches/{batch_id}").json()
+    assert body["articles"][0]["images_regenerating"] is True

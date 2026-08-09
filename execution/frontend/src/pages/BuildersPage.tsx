@@ -8,8 +8,8 @@ import { PlusOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { UploadProps } from 'antd'
 import {
-  CompanyBatchRow, Facets, SiteBrief, createCompanyBatch, getCompanyBatches,
-  getCompanyFacets, getSites, uploadCompanyImport,
+  CompanyBatchRow, CompanyImportResult, Facets, SiteBrief, createCompanyBatch,
+  getCompanyBatches, getCompanyFacets, getCompanyImports, getSites, uploadCompanyImport,
 } from '../api'
 
 const STATUS: Record<string, { color: string; label: string }> = {
@@ -25,13 +25,16 @@ export default function BuildersPage() {
   const [sites, setSites] = useState<SiteBrief[]>([])
   const [open, setOpen] = useState(false)
   const [facets, setFacets] = useState<Facets>({ regions: [], categories: [] })
+  const [lastImport, setLastImport] = useState<CompanyImportResult | null>(null)
   const [form] = Form.useForm()
 
   const load = () => getCompanyBatches().then(setBatches)
+  const loadLastImport = () => getCompanyImports().then(imports => setLastImport(imports[0] ?? null))
 
   useEffect(() => {
     load()
     getSites().then(setSites)
+    loadLastImport()
   }, [])
 
   useEffect(() => {
@@ -73,6 +76,7 @@ export default function BuildersPage() {
           message.success(
             `Загружено: ${result.matched_count} компаний из ${result.row_count} строк`)
         }
+        loadLastImport()
         onSuccess?.(result)
       } catch (e) {
         onError?.(e as Error)
@@ -93,6 +97,17 @@ export default function BuildersPage() {
           </Button>
         </Space>
       </Space>
+
+      {lastImport && (
+        <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
+          Последняя загрузка: «{lastImport.filename}» —{' '}
+          {dayjs(lastImport.uploaded_at).format('DD.MM.YYYY HH:mm')},
+          компаний: {lastImport.matched_count} из {lastImport.row_count} строк
+          {lastImport.status === 'failed' && (
+            <Typography.Text type="danger"> — ошибка: {lastImport.error_message}</Typography.Text>
+          )}
+        </Typography.Paragraph>
+      )}
 
       <Card styles={{ body: { padding: 0 } }}>
         <Table

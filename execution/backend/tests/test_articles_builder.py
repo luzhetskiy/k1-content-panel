@@ -569,3 +569,63 @@ def test_regenerate_content_images_site_push_failure_keeps_progress_and_clears_f
     images = db_session.query(ArticleImage).filter_by(
         article_id=prepared.article.id, kind="content", version=2).all()
     assert len(images) == 2
+
+
+def test_regenerate_content_images_prompt_failure_keeps_llmusage_for_earlier_positions(
+        db_session, prepared):
+    """Находка ревью Task 4 (round 2), воспроизведена эмпирически: промпты
+    для позиций строились через dict comprehension без commit() между
+    позициями. _image_prompt() пишет LlmUsage через self.db.add(...), но
+    сам ничего не коммитит — если промпт позиции 1 уже посчитался (и
+    LlmUsage добавлен в сессию), а на позиции 2 _image_prompt() бросил
+    LLMError, self.db.rollback() во внешнем except стирал вместе с
+    неудачной попыткой ещё и уже оплаченную запись LlmUsage за позицию 1.
+    Явный цикл с commit() после каждой позиции (см. builder.py) должен
+    сохранять эту запись."""
+    from app.models.job import JobRun, LlmUsage
+
+    class PromptFailureTextClient(FakeTextClient):
+        """complete_text падает на call_to_fail-ном по счёту вызове (1-based)."""
+
+        def __init__(self, body, call_to_fail):
+            super().__init__(body)
+            self._text_calls = 0
+            self.call_to_fail = call_to_fail
+
+        def complete_text(self, prompt):
+            self._text_calls += 1
+            self.prompts.append(prompt)
+            if self._text_calls == self.call_to_fail:
+                from app.ai.text import LLMError
+
+                raise LLMError("сорвался провайдер текста: HTTP 500")
+            return TextResult(f"промпт-{self._text_calls}", 10, 20, 0.05)
+
+    site_client = FakeSiteClient()
+    paths = image_paths_for(prepared.article.id, 2)
+    body = {
+        "title": "Чем утеплить каркасный дом",
+        "html": f"<p>{paths[0]}</p><p>{paths[1]}</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    # job_run_id=None на build(), чтобы её собственные LlmUsage-записи (тело
+    # статьи, обложка) не примешивались к записям регенерации ниже — так
+    # можно однозначно проверить именно то, что осталось после отката
+    # регенерации, без риска спутать с чужими строками того же job_run_id.
+    builder = make_builder(db_session, prepared, site_client, body=body)
+    builder.build()
+
+    job = JobRun(kind="build_article", site_id=prepared.site.id, created_by_id=None)
+    db_session.add(job)
+    db_session.commit()
+    builder.job_run_id = job.id
+    builder.text_client = PromptFailureTextClient(body, call_to_fail=2)
+
+    builder.regenerate_content_images()
+
+    assert prepared.article.images_regenerating is False
+    assert "перегенерировано 0/2" in prepared.article.error_text
+    assert "HTTP 500" in prepared.article.error_text
+
+    usage = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
+    assert len(usage) == 1

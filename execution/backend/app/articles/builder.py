@@ -162,14 +162,26 @@ class ArticleBuilder:
 
         updated = 0
         try:
-            prompts = {
-                position: self._image_prompt("content_image", {
+            # Явный цикл с commit() после каждой позиции, а не dict-
+            # comprehension: _image_prompt() внутри вызывает
+            # self._record_usage("text", ...), который делает
+            # self.db.add(LlmUsage(...)), но сам ничего не коммитит. Если
+            # промпт для позиции 1 посчитался (и LlmUsage добавлен в сессию,
+            # но не закоммичен), а для позиции 2 _image_prompt() бросил
+            # LLMError/PromptError, внешний except ниже делает
+            # self.db.rollback() — без промежуточного commit() здесь это
+            # молча стирает уже оплаченную запись LlmUsage за позицию 1
+            # вместе с неудачной попыткой позиции 2 (найдено ревью,
+            # воспроизведено эмпирически: 2 успешных вызова + 1 упавший →
+            # 0 строк LlmUsage после отката вместо 2).
+            prompts: dict[int, str] = {}
+            for position in positions:
+                prompts[position] = self._image_prompt("content_image", {
                     "topic": self.article.topic,
                     "paragraph": f"иллюстрация {position} из {len(positions)}",
                     "image_style": self.site.image_style_prompt,
                 })
-                for position in positions
-            }
+                self.db.commit()
 
             first_error: Exception | None = None
             # Та же логика, что в _generate_content_images: ждём ВСЕ futures,
@@ -186,6 +198,23 @@ class ArticleBuilder:
                             first_error = exc
                         continue
                     filename = image_filename(self.article.id, position, version=next_version)
+                    # Известное ограничение (найдено ревью, не чинится здесь,
+                    # принятый риск — см. аналогичный по духу комментарий на
+                    # _generate_body): upload_file() ниже — вне внутреннего
+                    # per-future try/except выше. Если он бросит
+                    # SiteAPIError, цикл as_completed прерывается —
+                    # ThreadPoolExecutor.__exit__ дождётся ещё не
+                    # завершившихся соседних потоков (они не отменяются), но
+                    # их уже готовые/оплаченные результаты никогда не будут
+                    # собраны и загружены — впустую потрачены. Правильный
+                    # фикс — разбить метод на двухфазную схему
+                    # generate-all-then-upload-all, как в build()
+                    # (_generate_content_images/_upload_content_images), но
+                    # это более крупная и рискованная переработка, чем
+                    # уместно в рамках этого исправления; узкий кейс (нужен
+                    # именно сбой upload_file, именно в разгаре раунда, при
+                    # ещё работающих соседних потоках) сочли не стоящим той
+                    # переработки прямо сейчас.
                     path = self.site_client.upload_file(data, filename, ARTICLE_IMG_DIR)
                     self.db.add(ArticleImage(article_id=self.article.id, kind="content",
                                              position=position, version=next_version,

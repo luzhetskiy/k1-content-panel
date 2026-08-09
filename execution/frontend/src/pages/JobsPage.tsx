@@ -7,6 +7,7 @@ const KIND: Record<string, string> = {
   generate_topics: 'Подбор тем',
   run_batch: 'Генерация партии',
   retry_article: 'Повтор статьи',
+  regenerate_article_images: 'Перегенерация картинок',
 }
 
 export default function JobsPage() {

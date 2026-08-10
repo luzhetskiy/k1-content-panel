@@ -22,8 +22,10 @@ def site_payload():
     }
 
 
-def test_manager_cannot_create_site(manager_client, site_payload):
-    assert manager_client.post("/api/admin/sites", json=site_payload).status_code == 403
+def test_manager_creates_site(manager_client, site_payload):
+    resp = manager_client.post("/api/admin/sites", json=site_payload)
+    assert resp.status_code == 200
+    assert resp.json()["domain"] == "stroybaza-samara.ru"
 
 
 def test_admin_creates_site(admin_client, site_payload):

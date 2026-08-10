@@ -28,8 +28,8 @@ def _stub(monkeypatch, **client):
                         lambda db, **kwargs: SimpleNamespace(**client))
 
 
-def test_manager_cannot_read_prompts(manager_client, seeded):
-    assert manager_client.get("/api/admin/prompts").status_code == 403
+def test_manager_reads_prompts(manager_client, seeded):
+    assert manager_client.get("/api/admin/prompts").status_code == 200
 
 
 def test_admin_lists_global_prompts(admin_client, seeded):
@@ -214,10 +214,14 @@ def test_test_endpoint_reports_unknown_variable(admin_client, seeded):
     assert "conut" in resp.json()["detail"]
 
 
-def test_test_endpoint_requires_admin(manager_client, seeded):
+def test_test_endpoint_allows_manager(manager_client, seeded):
+    """Роль не блокирует менеджера (403 быть не должно) — до RouterAI он
+    доходит и получает тот же 400 "ключ не задан", что и админ в
+    test_test_endpoint_reports_missing_api_key (ключ в тестах не настроен)."""
     resp = manager_client.post("/api/admin/prompts/test",
                                json={"text": "привет", "variables": {}})
-    assert resp.status_code == 403
+    assert resp.status_code == 400
+    assert "routerai_api_key" in resp.json()["detail"]
 
 
 def test_test_endpoint_does_not_call_model_on_empty_render(admin_client, seeded, monkeypatch):

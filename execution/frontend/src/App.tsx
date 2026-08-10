@@ -25,8 +25,12 @@ const navItems = [
   { key: '/articles', label: 'Статьи', icon: <FileTextOutlined />, admin: false },
   { key: '/builders', label: 'Строители', icon: <HomeOutlined />, admin: false },
   { key: '/jobs', label: 'Журнал', icon: <HistoryOutlined />, admin: false },
-  { key: '/admin/sites', label: 'Сайты', icon: <GlobalOutlined />, admin: true },
-  { key: '/admin/prompts', label: 'Промпты', icon: <BulbOutlined />, admin: true },
+  // Сайты/Промпты доступны и менеджеру (require_role("admin", "manager")
+  // на бэкенде, app/api/admin_sites.py и app/api/admin_prompts.py) — admin:
+  // false здесь означает «видно всем залогиненным», как у Статей/Строителей,
+  // а не «нет проверки роли», которую всё равно делает бэкенд на каждый запрос.
+  { key: '/admin/sites', label: 'Сайты', icon: <GlobalOutlined />, admin: false },
+  { key: '/admin/prompts', label: 'Промпты', icon: <BulbOutlined />, admin: false },
   { key: '/admin/settings', label: 'Настройки', icon: <SettingOutlined />, admin: true },
   { key: '/admin/users', label: 'Пользователи', icon: <TeamOutlined />, admin: true },
 ]
@@ -98,7 +102,7 @@ export default function App() {
 }
 
 // Пункты меню уже скрыты от не-admin (items ниже), но прямой переход по URL
-// (например, менеджер набрал /admin/sites руками или перешёл по старой
+// (например, менеджер набрал /admin/settings руками или перешёл по старой
 // ссылке) ничем на уровне роутинга раньше не блокировался — <Routes> внутри
 // Shell() рендерил страницу безусловно. Дыры в безопасности в этом нет:
 // бэкенд проверяет роль на каждый запрос (require_role("admin")) и вернул бы
@@ -199,8 +203,8 @@ function Shell() {
             <Route path="/builders" element={<BuildersPage />} />
             <Route path="/builders/:id" element={<BuilderBatchPage />} />
             <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/admin/sites" element={<AdminRoute><AdminSitesPage /></AdminRoute>} />
-            <Route path="/admin/prompts" element={<AdminRoute><AdminPromptsPage /></AdminRoute>} />
+            <Route path="/admin/sites" element={<AdminSitesPage />} />
+            <Route path="/admin/prompts" element={<AdminPromptsPage />} />
             <Route path="/admin/settings" element={<AdminRoute><AdminSettingsPage /></AdminRoute>} />
             <Route path="/admin/users" element={<AdminRoute><AdminUsersPage /></AdminRoute>} />
           </Routes>

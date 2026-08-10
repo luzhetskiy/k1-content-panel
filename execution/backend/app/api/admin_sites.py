@@ -112,13 +112,13 @@ def open_client(db: Session, site: Site) -> SiteClient:
 
 @router.get("", response_model=list[SiteOut])
 def list_sites(db: Session = Depends(get_db),
-               _user: User = Depends(require_role("admin"))):
+               _user: User = Depends(require_role("admin", "manager"))):
     return [_to_out(s) for s in db.scalars(select(Site).order_by(Site.name)).all()]
 
 
 @router.post("", response_model=SiteOut)
 def create_site(payload: SiteIn, db: Session = Depends(get_db),
-                _user: User = Depends(require_role("admin"))):
+                _user: User = Depends(require_role("admin", "manager"))):
     # Site.domain нормализуется валидатором модели (Task 9) при записи, поэтому
     # в базе лежит уже lower/strip. Сравнивать нужно с тем же приведением —
     # иначе "Example.ru" при существующем "example.ru" проскочит эту проверку
@@ -138,7 +138,7 @@ def create_site(payload: SiteIn, db: Session = Depends(get_db),
 
 @router.put("/{site_id}", response_model=SiteOut)
 def update_site(site_id: int, payload: SiteIn, db: Session = Depends(get_db),
-                _user: User = Depends(require_role("admin"))):
+                _user: User = Depends(require_role("admin", "manager"))):
     site = _get_or_404(db, site_id)
     # Та же проверка, что и в create_site, и по той же причине: домен
     # нормализуется валидатором модели, поэтому сравнивать надо нормализованное
@@ -156,7 +156,7 @@ def update_site(site_id: int, payload: SiteIn, db: Session = Depends(get_db),
 
 @router.delete("/{site_id}")
 def delete_site(site_id: int, db: Session = Depends(get_db),
-                _user: User = Depends(require_role("admin"))):
+                _user: User = Depends(require_role("admin", "manager"))):
     db.delete(_get_or_404(db, site_id))
     db.commit()
     return {"ok": True}
@@ -172,7 +172,7 @@ class SyncResult(BaseModel):
 
 @router.post("/{site_id}/sync", response_model=SyncResult)
 def sync_site(site_id: int, db: Session = Depends(get_db),
-              _user: User = Depends(require_role("admin"))):
+              _user: User = Depends(require_role("admin", "manager"))):
     """Одна кнопка проверяет всё сразу: токен, раздел и эталон. Неверный токен
     или не тот id эталона должны обнаруживаться здесь, а не в середине партии
     из десяти статей.
@@ -216,7 +216,7 @@ def sync_site(site_id: int, db: Session = Depends(get_db),
 @router.post("/{site_id}/watermark")
 def upload_watermark(site_id: int, file: UploadFile = File(...),
                      db: Session = Depends(get_db),
-                     _user: User = Depends(require_role("admin"))):
+                     _user: User = Depends(require_role("admin", "manager"))):
     site = _get_or_404(db, site_id)
     directory = Path(config.media_dir) / "watermarks"
     directory.mkdir(parents=True, exist_ok=True)

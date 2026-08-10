@@ -66,7 +66,7 @@ def _find(db: Session, key: str, site_id: int | None) -> PromptTemplate | None:
 
 @router.get("", response_model=list[PromptOut])
 def list_prompts(db: Session = Depends(get_db),
-                 _user: User = Depends(require_role("admin"))):
+                 _user: User = Depends(require_role("admin", "manager"))):
     seed_prompts(db)
     rows = db.scalars(select(PromptTemplate).order_by(PromptTemplate.key,
                                                       PromptTemplate.site_id)).all()
@@ -75,7 +75,7 @@ def list_prompts(db: Session = Depends(get_db),
 
 @router.put("", response_model=PromptOut)
 def save_prompt(payload: PromptIn, db: Session = Depends(get_db),
-                _user: User = Depends(require_role("admin"))):
+                _user: User = Depends(require_role("admin", "manager"))):
     """Проверки здесь, а не «потом разберёмся»: у сломанного промпта следующая
     точка обнаружения — Celery-задача генерации статьи, где ошибку уже никто
     не свяжет с правкой шаблона. Экран «Тест» тут не защита: сохранить можно
@@ -120,7 +120,7 @@ def save_prompt(payload: PromptIn, db: Session = Depends(get_db),
 
 @router.post("/test", response_model=PromptTestOut)
 def test_prompt(payload: PromptTestIn, db: Session = Depends(get_db),
-                _user: User = Depends(require_role("admin"))):
+                _user: User = Depends(require_role("admin", "manager"))):
     """Прогон шаблона без сохранения результата: видно и отрендеренный промпт,
     и ответ модели, и цену вопроса."""
     try:

@@ -62,3 +62,9 @@ class Site(Base):
     # --- строители (план 2) ---
     builder_template_html: Mapped[str] = mapped_column(Text, default="")
     builder_parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Эталонная карточка строителя на самом сайте — источник builder_template_html,
+    # см. app/companies/reference.py::sync_builder_reference. Тот же приём, что
+    # reference_article_id/reference_synced_at у статей.
+    builder_reference_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    builder_reference_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)

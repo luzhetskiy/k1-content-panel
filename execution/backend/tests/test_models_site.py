@@ -51,6 +51,16 @@ def test_site_builder_parent_id():
     assert not hasattr(Site, "teaser_category_id")
 
 
+def test_site_builder_reference_fields():
+    """builder_reference_id/builder_reference_synced_at — то же самое, что
+    reference_article_id/reference_synced_at у статей, но для эталонной
+    карточки строителя (см. app/companies/reference.py)."""
+    site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e",
+                builder_reference_id=77)
+    assert site.builder_reference_id == 77
+    assert site.builder_reference_synced_at is None
+
+
 def test_reference_images_is_integer():
     """Число картинок равно числу <img> в эталоне — строка здесь молча
     сломала бы арифметику при сборке статьи."""

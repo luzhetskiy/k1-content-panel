@@ -377,6 +377,30 @@ def test_sync_fills_builder_template_when_configured(admin_client, site_payload,
     assert body["builder_detail"] == ""
 
 
+def test_sync_persists_builder_template_on_the_site(admin_client, db_session, site_payload,
+                                                     monkeypatch):
+    from app.models.site import Site
+
+    def get_page(self, page_id):
+        if page_id == 25:
+            return {"id": 25, "url": "/poleznye-stati/"}
+        if page_id == 77:
+            return {"id": 77, "text": _VALID_BUILDER_TEMPLATE}
+        return {"id": page_id, "text": "<img><img>"}
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages",
+                        lambda self, prefix: [])
+
+    site_id = admin_client.post(
+        "/api/admin/sites", json={**site_payload, "builder_reference_id": 77}).json()["id"]
+    admin_client.post(f"/api/admin/sites/{site_id}/sync")
+
+    site = db_session.get(Site, site_id)
+    assert "builder-main-title" in site.builder_template_html
+    assert site.builder_reference_synced_at is not None
+
+
 def test_sync_reports_builder_failure_independently_of_articles(admin_client, site_payload,
                                                                  monkeypatch):
     """Эталон статьи валиден, эталон строителя — нет: итог должен показать

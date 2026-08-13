@@ -73,8 +73,9 @@ class CompanyBuilder:
     def _require_template(self) -> None:
         if not self.site.builder_template_html:
             raise SiteAPIError(
-                "у сайта не задан шаблон карточки строителя — заполни "
-                "builder_template_html на карточке сайта")
+                "у сайта не задан или не синхронизирован шаблон карточки "
+                "строителя — укажи ID эталонной карточки в настройках сайта "
+                "и нажми «Проверить и синхронизировать»")
 
     def _require_batch(self) -> CompanyBatch:
         batch = self.company.batch

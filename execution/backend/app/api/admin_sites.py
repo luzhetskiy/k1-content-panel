@@ -50,9 +50,6 @@ class SiteIn(BaseModel):
     cover_style_prompt: str = ""
     builder_template_html: str = ""
     builder_parent_id: int | None = None
-    teaser_category_id: int | None = None
-    teaser_city_id: int | None = None
-    teaser_location_id: int | None = None
 
 
 class SiteOut(SiteIn):
@@ -81,9 +78,6 @@ def _to_out(site: Site) -> SiteOut:
         cover_mode=site.cover_mode, cover_style_prompt=site.cover_style_prompt,
         builder_template_html=site.builder_template_html,
         builder_parent_id=site.builder_parent_id,
-        teaser_category_id=site.teaser_category_id,
-        teaser_city_id=site.teaser_city_id,
-        teaser_location_id=site.teaser_location_id,
         watermark_path=site.watermark_path,
         articles_url_prefix=site.articles_url_prefix,
         reference_images=site.reference_images,

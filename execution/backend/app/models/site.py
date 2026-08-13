@@ -62,6 +62,3 @@ class Site(Base):
     # --- строители (план 2) ---
     builder_template_html: Mapped[str] = mapped_column(Text, default="")
     builder_parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    teaser_category_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    teaser_city_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    teaser_location_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

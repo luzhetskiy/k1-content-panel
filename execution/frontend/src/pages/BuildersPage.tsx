@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Button, Card, Form, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Typography,
-  Upload, message,
+  Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag,
+  Typography, Upload, message,
 } from 'antd'
 import { PlusOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -80,6 +80,14 @@ export default function BuildersPage() {
     } catch {
       // сообщение об ошибке уже показывает интерцептор api.ts
     }
+  }
+
+  // Без этого невалидная форма (например, незаполненные ID тизера) при клике
+  // «Отобрать компании» просто остаётся на месте: antd подсвечивает поля
+  // мелким текстом под ними, а не сообщением — на глаз выглядит так, будто
+  // кнопка вообще ничего не делает.
+  const onSubmitFailed = () => {
+    message.error('Заполните все обязательные поля — форма не отправлена')
   }
 
   const retryUnbatched = async (companyId: number) => {
@@ -208,8 +216,8 @@ export default function BuildersPage() {
 
       <Modal open={open} onCancel={() => setOpen(false)} onOk={form.submit}
              title="Новая партия строителей" okText="Отобрать компании" destroyOnHidden>
-        <Form form={form} layout="vertical" onFinish={submit}
-              initialValues={{ count: 10 }} requiredMark={false}>
+        <Form form={form} layout="vertical" onFinish={submit} onFinishFailed={onSubmitFailed}
+              scrollToFirstError initialValues={{ count: 10 }} requiredMark={false}>
           <Form.Item name="site_id" label="Сайт"
                      rules={[{ required: true, message: 'Выберите сайт' }]}>
             <Select placeholder="Выберите сайт" onChange={onSiteChange}
@@ -224,21 +232,28 @@ export default function BuildersPage() {
             <Select placeholder="Категория"
                     options={facets.categories.map(c => ({ value: c, label: c }))} />
           </Form.Item>
+          {/* Обычный Input, не Select mode="tags": tags-режим всегда отдаёт массив
+              (даже при maxCount={1}), а бэкенд ждёт строку — до фикса это давало
+              422 с формы, которую message.error() из-за него же не мог показать. */}
           <Form.Item name="category_normalized" label="Название сферы для этого сайта"
                      rules={[{ required: true, message: 'Укажите нормализованное имя' }]}>
-            <Select mode="tags" maxCount={1} placeholder="Например: Дома под ключ" />
+            <Input placeholder="Например: Дома под ключ" />
           </Form.Item>
-          <Space.Compact block>
+          <Typography.Text type="secondary">
+            ID тизера в CMS сайта (раздел «карточки-тизеры», <code>/api/v1/addresses-services/</code>
+            на самом сайте) — свои для каждого сайта, региона и категории, вводятся вручную.
+          </Typography.Text>
+          <Space.Compact block style={{ marginTop: 8 }}>
             <Form.Item name="teaser_category_id" label="Category ID" style={{ width: '33%' }}
-                       rules={[{ required: true, message: 'ID' }]}>
+                       rules={[{ required: true, message: 'Укажите category ID тизера' }]}>
               <InputNumber min={1} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="teaser_city_id" label="City ID" style={{ width: '33%' }}
-                       rules={[{ required: true, message: 'ID' }]}>
+                       rules={[{ required: true, message: 'Укажите city ID тизера' }]}>
               <InputNumber min={1} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="teaser_location_id" label="Location ID" style={{ width: '34%' }}
-                       rules={[{ required: true, message: 'ID' }]}>
+                       rules={[{ required: true, message: 'Укажите location ID тизера' }]}>
               <InputNumber min={1} style={{ width: '100%' }} />
             </Form.Item>
           </Space.Compact>

@@ -16,9 +16,6 @@ def site_payload():
         "image_style_prompt": "реалистичное фото стройки",
         "cover_mode": "prompt",
         "cover_style_prompt": "широкая обложка",
-        "teaser_category_id": 3,
-        "teaser_city_id": 2,
-        "teaser_location_id": 1,
     }
 
 

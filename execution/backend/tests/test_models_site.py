@@ -41,12 +41,14 @@ def test_site_content_profile():
     assert "практичный" in site.tone_of_voice
 
 
-def test_site_builder_teaser_taxonomy():
-    """category/city/location — это карточки-тизеры каталога строителей
-    (addresses-services), к обложке статьи отношения не имеют."""
+def test_site_builder_parent_id():
+    """Родительская страница для карточек компаний-строителей — site-level
+    константа (в отличие от teaser id, которые вводятся заново для каждой
+    партии, см. CompanyBatch.teaser_category_id и design doc §4)."""
     site = Site(name="X", domain="x.ru", base_url="https://x.ru", api_token_enc="e",
-                teaser_category_id=3, teaser_city_id=2, teaser_location_id=1)
-    assert (site.teaser_category_id, site.teaser_city_id, site.teaser_location_id) == (3, 2, 1)
+                builder_parent_id=25)
+    assert site.builder_parent_id == 25
+    assert not hasattr(Site, "teaser_category_id")
 
 
 def test_reference_images_is_integer():

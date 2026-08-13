@@ -239,20 +239,16 @@ export default function AdminSitesPage() {
             <Input.TextArea rows={2} />
           </Form.Item>
           <Typography.Text type="secondary">
-            Ниже — карточки-тизеры каталога строителей (план 2), к обложкам статей
-            отношения не имеют.
+            Ниже — раздел карточек строителей (план 2), к обложкам статей
+            отношения не имеет.
           </Typography.Text>
-          <Space style={{ marginTop: 12 }}>
-            <Form.Item name="teaser_category_id" label="category">
-              <InputNumber />
-            </Form.Item>
-            <Form.Item name="teaser_city_id" label="city">
-              <InputNumber />
-            </Form.Item>
-            <Form.Item name="teaser_location_id" label="location">
-              <InputNumber />
-            </Form.Item>
-          </Space>
+          <Form.Item name="builder_parent_id" label="ID родительской страницы для карточек строителей"
+                     style={{ marginTop: 12 }}
+                     extra="Страницы компаний из партий строителей создаются как дочерние
+                            для этой страницы. Пока не заполнено — создание страниц компании
+                            этого сайта завершится ошибкой.">
+            <InputNumber style={{ width: '100%' }} placeholder="25" />
+          </Form.Item>
         </Form>
       </Modal>
     </>

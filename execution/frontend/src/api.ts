@@ -25,6 +25,22 @@ declare module 'axios' {
 
 const api = axios.create({ baseURL: '/api' })
 
+// FastAPI отдаёт `detail` строкой только для ручных HTTPException(...); на 422
+// от Pydantic-валидации это список объектов {loc, msg, type, input} — передать
+// его как есть в message.error() значит уронить рендер тоста ("Objects are not
+// valid as a React child"), и пользователь не увидит вообще никакой реакции на
+// клик. Нашли на форме создания партии строителей — 422 там гасился именно так.
+function errorDetailText(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map(d => (d && typeof d === 'object' && 'msg' in d)
+      ? String((d as { msg: unknown }).msg)
+      : String(d))
+    if (messages.length) return messages.join('; ')
+  }
+  return 'Ошибка сервера'
+}
+
 api.interceptors.response.use(
   r => r,
   error => {
@@ -41,7 +57,7 @@ api.interceptors.response.use(
     } else if (status === 403) {
       message.error('Нет доступа')
     } else {
-      message.error(error.response?.data?.detail ?? 'Ошибка сервера')
+      message.error(errorDetailText(error.response?.data?.detail))
     }
     return Promise.reject(error)
   },
@@ -59,8 +75,7 @@ export interface SiteFull {
   articles_parent_id: number | null; reference_article_id: number | null
   image_style_prompt: string; cover_mode: string; cover_style_prompt: string
   builder_template_html: string; builder_parent_id: number | null
-  teaser_category_id: number | null; teaser_city_id: number | null
-  teaser_location_id: number | null; watermark_path: string
+  watermark_path: string
   // Заполняются синхронизацией, в форме только читаются.
   articles_url_prefix: string; reference_images: number
   reference_synced_at: string | null

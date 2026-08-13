@@ -61,22 +61,28 @@ export default function AdminSitesPage() {
 
   const sync = async (site: SiteFull) => {
     const result = await syncSite(site.id)
-    if (result.ok) {
-      message.success(`Раздел ${result.url_prefix}, статей в нём ${result.pages}, `
-                      + `картинок в эталоне ${result.reference_images}`)
-      load()
-    } else {
-      // Ошибка чужого сайта показывается целиком: администратору нужно понять,
-      // что именно не так — токен, id раздела или id эталона.
-      message.error(result.detail, 8)
+    // Шаги статей и строителя независимы (app/api/admin_sites.py::sync_site) —
+    // у сайта может быть настроен только один из них. Собираем сообщение из
+    // того, что реально сконфигурировано, а не из фиксированного набора полей.
+    const parts: string[] = []
+    if (result.articles_ok) {
+      parts.push(`статьи: раздел ${result.url_prefix}, страниц ${result.pages}, `
+                + `картинок в эталоне ${result.reference_images}`)
+    } else if (result.articles_detail) {
+      parts.push(`статьи: ${result.articles_detail}`)
     }
-    // sync_site (app/api/admin_sites.py) сознательно всегда отвечает 200
-    // с {ok, detail} для всех диагностируемых отказов чужого сайта (плохой
-    // токен, не тот id эталона, недоступный раздел и т.п.) — именно чтобы
-    // сюда пришёл предсказуемый результат, а не исключение. syncSite() может
-    // отклониться только при по-настоящему неожиданном сбое (сеть, 500),
-    // который уже покрыт глобальным интерцептором api.ts — отдельный
-    // try/catch здесь не нужен.
+    if (result.builder_ok) {
+      parts.push('строители: эталон синхронизирован')
+    } else if (result.builder_detail) {
+      parts.push(`строители: ${result.builder_detail}`)
+    }
+    const text = parts.join(' · ') || 'Нечего синхронизировать — не задан ни один эталон'
+    ;(result.ok ? message.success : message.error)(text, 8)
+    // load() — всегда, а не только при result.ok: шаги независимы, и один
+    // мог успешно закоммититься, даже если другой упал (sync_site фиксирует
+    // каждый шаг отдельной транзакцией) — без этого обновлённые колонки
+    // «Раздел»/«Эталон» не покажут свежее состояние после частичного успеха.
+    load()
   }
 
   return (
@@ -105,6 +111,12 @@ export default function AdminSitesPage() {
               title: 'Эталон', width: 190,
               render: (_, r: SiteFull) => r.reference_synced_at
                 ? `${r.reference_images} карт. · ${dayjs(r.reference_synced_at).format('DD.MM HH:mm')}`
+                : '—',
+            },
+            {
+              title: 'Эталон строителя', width: 170,
+              render: (_, r: SiteFull) => r.builder_reference_synced_at
+                ? dayjs(r.builder_reference_synced_at).format('DD.MM HH:mm')
                 : '—',
             },
             {
@@ -248,6 +260,16 @@ export default function AdminSitesPage() {
                             для этой страницы. Пока не заполнено — создание страниц компании
                             этого сайта завершится ошибкой.">
             <InputNumber style={{ width: '100%' }} placeholder="25" />
+          </Form.Item>
+          <Form.Item name="builder_reference_id" label="ID эталонной карточки строителя"
+                     extra={editing?.builder_reference_synced_at
+                       ? `Синхронизирована ${dayjs(editing.builder_reference_synced_at)
+                            .format('DD.MM.YYYY HH:mm')}`
+                       : 'Разметка этой страницы (id/class-атрибуты builder-main-title, ' +
+                        'builder-contacts и т.п.) — шаблон для всех карточек строителей ' +
+                        'сайта; страница должна быть уже собрана этим сервисом или вручную ' +
+                        'по тому же контракту. Без этого — «Проверить и синхронизировать».'}>
+            <InputNumber style={{ width: '100%' }} placeholder="77" />
           </Form.Item>
         </Form>
       </Modal>

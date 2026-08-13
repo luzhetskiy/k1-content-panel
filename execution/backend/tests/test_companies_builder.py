@@ -94,6 +94,46 @@ def test_build_success_publishes_company(db_session, site, company):
     assert "Строим дома под ключ" in company.info.scraped_text
 
 
+def test_synced_template_builds_successfully(db_session, company):
+    """Композиционный тест на стык двух половин фичи: шаблон, прошедший
+    валидацию sync_builder_reference (проверяет id-контракт), должен быть
+    достаточным и для CompanyBuilder.build() (fill_builder_template) — иначе
+    требования к разметке в этих двух местах могут незаметно разъехаться."""
+    from app.companies.reference import sync_builder_reference
+
+    class FakeClient:
+        def get_page(self, page_id):
+            return {"id": page_id, "text": (
+                '<div id="builder">'
+                '<h1 id="builder-main-title"></h1>'
+                '<div id="builder-contacts">'
+                '<div id="builder-contacts-grid">'
+                '<div id="builder-contact-1"></div>'
+                '</div></div></div>'
+            )}
+
+    _seed_prompts(db_session)
+    site = Site(id=1, name="С", domain="s.ru", base_url="https://s.ru",
+               api_token_enc="e", builder_reference_id=77, builder_parent_id=10,
+               tone_of_voice="деловой")
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    sync_builder_reference(db_session, site, FakeClient())
+
+    builder = _builder(db_session, company, site)
+    builder.build()
+
+    assert company.status == "published"
+
+
 def test_build_fails_company_on_scrape_error(db_session, site, company):
     _seed_prompts(db_session)
     db_session.add(site)

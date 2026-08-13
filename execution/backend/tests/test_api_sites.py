@@ -98,8 +98,12 @@ def test_sync_fills_prefix_images_and_page_count(admin_client, site_payload, mon
     patch_site_api(monkeypatch, reference_html="<p>t</p><img><img><img>")
     site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
     body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
-    assert body == {"ok": True, "url_prefix": "/poleznye-stati/", "pages": 1,
-                    "reference_images": 3, "detail": ""}
+    assert body == {
+        "ok": True,
+        "articles_ok": True, "articles_detail": "",
+        "url_prefix": "/poleznye-stati/", "pages": 1, "reference_images": 3,
+        "builder_ok": None, "builder_detail": "",
+    }
 
 
 def test_sync_result_is_persisted_on_the_site(admin_client, db_session, site_payload,
@@ -126,7 +130,7 @@ def test_sync_reports_api_failure_without_raising(admin_client, site_payload, mo
     site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
     body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
     assert body["ok"] is False
-    assert "403" in body["detail"]
+    assert "403" in body["articles_detail"]
 
 
 def test_sync_reports_bad_reference_without_raising(admin_client, site_payload, monkeypatch):
@@ -134,7 +138,7 @@ def test_sync_reports_bad_reference_without_raising(admin_client, site_payload, 
     site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
     body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
     assert body["ok"] is False
-    assert "ни одной картинки" in body["detail"]
+    assert "ни одной картинки" in body["articles_detail"]
 
 
 def test_site_list_exposes_readiness(admin_client, manager_client, site_payload, monkeypatch):
@@ -207,7 +211,7 @@ def test_sync_does_not_retry_on_404(admin_client, site_payload, monkeypatch):
     site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
     body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
     assert body["ok"] is False
-    assert "404" in body["detail"]
+    assert "404" in body["articles_detail"]
     assert calls["n"] == 1
 
 
@@ -330,3 +334,68 @@ def test_sync_failure_preserves_previous_successful_cache(admin_client, db_sessi
     assert site.reference_images == old_images
     assert site.reference_html == old_html
     assert site.reference_synced_at == old_synced_at
+
+
+_VALID_BUILDER_TEMPLATE = (
+    '<div id="builder">'
+    '<h1 id="builder-main-title"></h1>'
+    '<div id="builder-contacts">'
+    '<div id="builder-contacts-grid">'
+    '<div id="builder-contact-1"></div>'
+    '</div></div></div>'
+)
+
+
+def test_sync_skips_builder_step_when_not_configured(admin_client, site_payload, monkeypatch):
+    """site_payload не задаёт builder_reference_id — шаг строителей должен
+    молча пропускаться, не мешая шагу статей."""
+    patch_site_api(monkeypatch)
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is True
+    assert body["builder_ok"] is None
+    assert body["builder_detail"] == ""
+
+
+def test_sync_fills_builder_template_when_configured(admin_client, site_payload, monkeypatch):
+    def get_page(self, page_id):
+        if page_id == 25:
+            return {"id": 25, "url": "/poleznye-stati/"}
+        if page_id == 77:
+            return {"id": 77, "text": _VALID_BUILDER_TEMPLATE}
+        return {"id": page_id, "text": "<img><img>"}
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages",
+                        lambda self, prefix: [])
+
+    site_id = admin_client.post(
+        "/api/admin/sites", json={**site_payload, "builder_reference_id": 77}).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is True
+    assert body["builder_ok"] is True
+    assert body["builder_detail"] == ""
+
+
+def test_sync_reports_builder_failure_independently_of_articles(admin_client, site_payload,
+                                                                 monkeypatch):
+    """Эталон статьи валиден, эталон строителя — нет: итог должен показать
+    оба результата раздельно, не теряя успех статей за отказом строителей."""
+    def get_page(self, page_id):
+        if page_id == 25:
+            return {"id": 25, "url": "/poleznye-stati/"}
+        if page_id == 77:
+            return {"id": 77, "text": "<p>не тот контракт</p>"}
+        return {"id": page_id, "text": "<img><img>"}
+
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.get_page", get_page)
+    monkeypatch.setattr("app.api.admin_sites.SiteClient.list_section_pages",
+                        lambda self, prefix: [])
+
+    site_id = admin_client.post(
+        "/api/admin/sites", json={**site_payload, "builder_reference_id": 77}).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["ok"] is False
+    assert body["articles_ok"] is True
+    assert body["builder_ok"] is False
+    assert "builder-main-title" in body["builder_detail"]

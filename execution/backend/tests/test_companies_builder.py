@@ -371,3 +371,73 @@ def test_build_does_not_search_company_site_when_yandex_logo_already_present(
         builder.build()
 
     logo_fn.assert_not_called()
+
+
+def test_build_updates_existing_page_when_remote_page_id_already_set(db_session, site, company):
+    """Пересборка компании, у которой страница уже создана (первая сборка
+    успела дойти до create_page, но упала позже, например на тизере) —
+    обязана PATCH'ить существующую страницу, а не пытаться создать новую
+    с тем же детерминированным slug (иначе сайт отвечает HTTP 400
+    "страница с таким url уже существует")."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    company.remote_page_id = 99
+    company.remote_url = "https://s.ru/s/ooo-dom-samara/"
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        update_page_text=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_page=Mock(side_effect=AssertionError("create_page не должен вызываться")),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(),
+    )
+    builder = _builder(db_session, company, site, site_client=site_client)
+    builder.build()
+
+    site_client.update_page_text.assert_called_once()
+    assert site_client.update_page_text.call_args.args[0] == 99
+    site_client.create_page.assert_not_called()
+    assert company.status == "published"
+    assert company.remote_page_id == 99
+
+
+def test_build_updates_existing_teaser_when_teaser_id_already_set(db_session, site, company):
+    """Аналогично странице — если тизер уже создан (пересборка уже
+    опубликованной компании), нужно обновить именно его, а не плодить
+    дубликат."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    company.remote_page_id = 99
+    company.remote_url = "https://s.ru/s/ooo-dom-samara/"
+    company.teaser_id = 555
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        update_page_text=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        update_teaser=Mock(return_value=555),
+        create_page=Mock(side_effect=AssertionError("create_page не должен вызываться")),
+        create_teaser=Mock(side_effect=AssertionError("create_teaser не должен вызываться")),
+        upload_file=Mock(),
+    )
+    builder = _builder(db_session, company, site, site_client=site_client)
+    builder.build()
+
+    site_client.update_teaser.assert_called_once()
+    assert site_client.update_teaser.call_args.args[0] == 555
+    site_client.create_teaser.assert_not_called()
+    assert company.status == "published"
+    assert company.teaser_id == 555

@@ -214,6 +214,25 @@ class SiteClient:
             raise SiteAPIError(f"создание тизера: ответ без id: {body}")
         return teaser_id
 
+    def update_teaser(self, teaser_id: int, name: str, slug: str, address: str, phone: str,
+                      email: str, website: str, page_url: str, *, category: int, city: int,
+                      location: int) -> int:
+        """Пересборка компании (CompanyBuilder._create_teaser) — тот же payload,
+        что и create_teaser, но PATCH на уже существующий тизер вместо
+        создания дубликата."""
+        payload = {
+            "name": name, "slug": slug, "address": address, "phone": phone,
+            "email": email, "website": website, "page_url": page_url,
+            "is_active": False, "location": location, "category": category, "city": city,
+        }
+        response = self._check(
+            requests.patch(f"{self.base_url}{ADDRESSES_SERVICES_PATH}{teaser_id}/", json=payload,
+                          headers={**self._headers, "Content-Type": "application/json"},
+                          timeout=self.timeout),
+            f"обновление тизера {teaser_id}")
+        body = self._json(response, f"обновление тизера {teaser_id}")
+        return body.get("id", teaser_id)
+
     # --- файлы ---
 
     def upload_file(self, data: bytes, filename: str, upload_to: str) -> str:

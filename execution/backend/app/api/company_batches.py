@@ -305,10 +305,12 @@ def retry(company_id: int, db: Session = Depends(get_db),
     company = db.get(Company, company_id)
     if company is None:
         raise HTTPException(404, "компания не найдена")
-    if company.status in ("published", "generating"):
-        detail = ("компания уже опубликована" if company.status == "published"
-                  else "компания уже собирается — повторный запуск не требуется")
-        raise HTTPException(400, detail)
+    # published разрешён намеренно: CompanyBuilder (app/companies/builder.py)
+    # обновляет уже существующие страницу/тизер вместо создания дублей, так
+    # что пересборка опубликованной компании (например, после правки шаблона)
+    # безопасна — блокируем только конкурентный повторный запуск.
+    if company.status == "generating":
+        raise HTTPException(400, "компания уже собирается — повторный запуск не требуется")
     company.status = "generating"
     db.commit()
     soft, hard = _company_time_limits(1)

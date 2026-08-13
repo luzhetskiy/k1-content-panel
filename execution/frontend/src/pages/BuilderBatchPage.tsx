@@ -126,8 +126,10 @@ export default function BuilderBatchPage() {
               },
               {
                 title: '', width: 60,
-                render: (_, r: CompanyRow) => r.status === 'failed' ? (
-                  <Popconfirm title="Повторить сборку этой компании?"
+                render: (_, r: CompanyRow) => r.status === 'failed' || r.status === 'published' ? (
+                  <Popconfirm title={r.status === 'published'
+                    ? 'Пересобрать страницу и тизер этой компании?'
+                    : 'Повторить сборку этой компании?'}
                               onConfirm={async () => { await retryCompany(r.id); load() }}>
                     <Button type="text" icon={<ReloadOutlined />} />
                   </Popconfirm>

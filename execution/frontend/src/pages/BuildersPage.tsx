@@ -196,8 +196,10 @@ export default function BuildersPage() {
               },
               {
                 title: '', width: 60,
-                render: (_, r: UnbatchedCompanyRow) => r.status === 'failed' ? (
-                  <Popconfirm title="Повторить сборку этой компании?"
+                render: (_, r: UnbatchedCompanyRow) => r.status === 'failed' || r.status === 'published' ? (
+                  <Popconfirm title={r.status === 'published'
+                    ? 'Пересобрать страницу и тизер этой компании?'
+                    : 'Повторить сборку этой компании?'}
                               onConfirm={() => retryUnbatched(r.id)}>
                     <Button type="text" icon={<ReloadOutlined />} />
                   </Popconfirm>

@@ -161,24 +161,36 @@ class CompanyBuilder:
         return {f: getattr(info, f) for f in YANDEX_INFO_FIELDS + AI_TEXT_FIELDS}
 
     def _create_page(self, info: CompanyInfo, html: str) -> dict:
-        name = info.builder_name or self.company.name
-        city = info.city_name or self.company.region
-        slug = slug_for_company(name, city)
-        page = self.site_client.create_page(
-            title=f"{name} — {self.company.category_normalized} в {city}",
-            url=f"/s/{slug}/", html=html, parent_id=self.site.builder_parent_id,
-            meta_description=f"{name} — {self.company.category_normalized} в {city}. "
-                             f"Контакты, услуги, отзывы.",
-        )
-        self.company.remote_page_id = page["id"]
-        self.company.remote_url = f"{self.site.base_url}{page.get('url', '')}"
+        """Пересборка (Company.remote_page_id уже задан — либо компания уже
+        опубликована, либо первая сборка успела создать страницу и упала
+        позже) обновляет существующую страницу вместо создания новой: slug
+        детерминирован из имени+города и не меняется между сборками, так что
+        повторный create_page бился бы в HTTP 400 "страница с таким url уже
+        существует"."""
+        if self.company.remote_page_id:
+            page = self.site_client.update_page_text(self.company.remote_page_id, html)
+            self.company.remote_page_id = page.get("id", self.company.remote_page_id)
+            if page.get("url"):
+                self.company.remote_url = f"{self.site.base_url}{page['url']}"
+        else:
+            name = info.builder_name or self.company.name
+            city = info.city_name or self.company.region
+            slug = slug_for_company(name, city)
+            page = self.site_client.create_page(
+                title=f"{name} — {self.company.category_normalized} в {city}",
+                url=f"/s/{slug}/", html=html, parent_id=self.site.builder_parent_id,
+                meta_description=f"{name} — {self.company.category_normalized} в {city}. "
+                                 f"Контакты, услуги, отзывы.",
+            )
+            self.company.remote_page_id = page["id"]
+            self.company.remote_url = f"{self.site.base_url}{page.get('url', '')}"
         self.db.commit()
         return page
 
     def _create_teaser(self, info: CompanyInfo, page: dict, batch: CompanyBatch) -> None:
         contacts = info.contacts or [{}]
         contact = contacts[0]
-        teaser_id = self.site_client.create_teaser(
+        kwargs = dict(
             name=info.builder_name or self.company.name,
             slug=page.get("url", "").removeprefix("/s/").rstrip("/"),
             address=contact.get("address", "") or info.address,
@@ -187,6 +199,13 @@ class CompanyBuilder:
             category=batch.teaser_category_id, city=batch.teaser_city_id,
             location=batch.teaser_location_id,
         )
+        # Пересборка (Company.teaser_id уже задан) обновляет существующий
+        # тизер вместо создания дубликата — та же причина, что и у
+        # _create_page выше.
+        if self.company.teaser_id:
+            teaser_id = self.site_client.update_teaser(self.company.teaser_id, **kwargs)
+        else:
+            teaser_id = self.site_client.create_teaser(**kwargs)
         self.company.teaser_id = teaser_id
         self.db.commit()
 

@@ -255,7 +255,13 @@ def test_retry_rejects_company_already_generating(manager_client, site_id, candi
     assert no_celery == []
 
 
-def test_retry_rejects_published_company(manager_client, site_id, candidates, no_celery, db_session):
+def test_retry_allows_published_company_to_rebuild(manager_client, site_id, candidates,
+                                                    no_celery, db_session):
+    """Пересборка уже опубликованной компании (например, поменялся шаблон
+    карточки строителя) должна запускаться — CompanyBuilder теперь обновляет
+    существующую страницу/тизер вместо создания дублей (app/companies/
+    builder.py), так что блокировать retry для status=="published" больше
+    незачем."""
     from app.models.company import Company
 
     batch = manager_client.post("/api/company-batches", json={
@@ -269,8 +275,11 @@ def test_retry_rejects_published_company(manager_client, site_id, candidates, no
     db_session.commit()
 
     resp = manager_client.post(f"/api/companies/{company_id}/retry")
-    assert resp.status_code == 400
-    assert no_celery == []
+    assert resp.status_code == 200
+    assert no_celery[-1][:2] == ("retry", company_id)
+
+    db_session.refresh(company)
+    assert company.status == "generating"
 
 
 def test_retry_rejects_unknown_company(manager_client, no_celery):

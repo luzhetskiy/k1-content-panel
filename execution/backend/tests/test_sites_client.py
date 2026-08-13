@@ -342,3 +342,37 @@ def test_create_teaser_raises_when_response_missing_id():
             assert False, "ожидался SiteAPIError"
         except SiteAPIError:
             pass
+
+
+def test_update_teaser_patches_existing_teaser():
+    """Пересборка уже опубликованной/частично собранной компании (Company.
+    teaser_id уже задан) обязана обновить существующий тизер, а не создавать
+    новый — иначе на сайте копится дубликат тизера при каждой пересборке."""
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.patch", return_value=response) as patch_call:
+        teaser_id = client.update_teaser(
+            42, name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+        )
+    assert teaser_id == 42
+    assert patch_call.call_args.args[0] == "https://s.ru/api/v1/addresses-services/42/"
+    payload = patch_call.call_args.kwargs["json"]
+    assert payload["slug"] == "ooo-dom-samara"
+    assert payload["category"] == 3
+
+
+def test_update_teaser_raises_on_error():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=False, status_code=404, text="not found")
+    with patch("app.sites.client.requests.patch", return_value=response):
+        try:
+            client.update_teaser(
+                42, name="А", slug="a", address="", phone="", email="", website="",
+                page_url="/s/a/", category=1, city=1, location=1,
+            )
+            assert False, "ожидался SiteAPIError"
+        except SiteAPIError:
+            pass

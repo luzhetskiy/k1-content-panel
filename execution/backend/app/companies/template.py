@@ -27,7 +27,13 @@ def fill_builder_template(template: str, info: dict) -> str:
     _remove_comments(soup)
 
     name = (info.get("builder_name") or "").strip()
+    city_name = (info.get("city_name") or "").strip()
     city_prep = (info.get("city_prepositional") or info.get("city_name") or "").strip()
+
+    root = soup.find(id="builder")
+    if root:
+        root["data-builder-name"] = name
+        root["data-builder-city"] = city_name
     logo_src = (info.get("builder_logo_src") or "").strip()
     logo_alt = (info.get("builder_logo_alt") or name).strip()
     about = (info.get("about_company") or "").strip()

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.ai.factory import build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
+from app.companies.logo import fetch_company_logo
 from app.companies.scrape import ScrapeError, fetch_company_text
 from app.companies.template import fill_builder_template
 from app.models.company import YANDEX_INFO_FIELDS, Company, CompanyBatch, CompanyInfo
@@ -37,13 +38,15 @@ def slug_for_company(name: str, city: str) -> str:
 
 class CompanyBuilder:
     def __init__(self, db: Session, company: Company, site: Site, text_client,
-                site_client, scrape_fn=fetch_company_text, job_run_id: int | None = None):
+                site_client, scrape_fn=fetch_company_text, logo_fn=fetch_company_logo,
+                job_run_id: int | None = None):
         self.db = db
         self.company = company
         self.site = site
         self.text_client = text_client
         self.site_client = site_client
         self.scrape_fn = scrape_fn
+        self.logo_fn = logo_fn
         self.job_run_id = job_run_id
 
     def build(self) -> None:
@@ -56,6 +59,7 @@ class CompanyBuilder:
             scraped_text = self._scrape()
             ai_fields = self._generate_text(info, scraped_text)
             self._apply_ai_fields(info, ai_fields, scraped_text)
+            self._find_logo(info)
             self._relocate_logo(info)
             html = fill_builder_template(self.site.builder_template_html, self._info_dict(info))
             page = self._create_page(info, html)
@@ -121,6 +125,19 @@ class CompanyBuilder:
         # в старой схеме (execution/db.py). Ничего не читает его обратно.
         info.scraped_text = scraped_text
         self.db.commit()
+
+    def _find_logo(self, info: CompanyInfo) -> None:
+        """В выгрузке Яндекс.Карт колонки «Логотип» нет — builder_logo_src
+        пуст почти всегда. Ищем логотип в шапке сайта компании (см.
+        app/companies/logo.py); найденный внешний URL уходит в тот же
+        _relocate_logo, что и логотип из выгрузки — то есть тоже
+        перезаливается в service-img."""
+        if info.builder_logo_src:
+            return
+        logo_url = self.logo_fn(self.company.website)
+        if logo_url:
+            info.builder_logo_src = logo_url
+            self.db.commit()
 
     def _relocate_logo(self, info: CompanyInfo) -> None:
         """Внешний логотип перезаливается на целевой сайт — иначе карточка

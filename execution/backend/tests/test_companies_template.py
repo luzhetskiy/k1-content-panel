@@ -1,7 +1,7 @@
 from app.companies.template import fill_builder_template
 
 TEMPLATE = """
-<div id="builder">
+<div id="builder" data-builder-name="ПИК" data-builder-city="Москва">
   <img id="builder-logo" src="" alt="">
   <span id="builder-logo-text"></span>
   <h1 id="builder-main-title"></h1>
@@ -37,6 +37,19 @@ def _info(**over):
     )
     base.update(over)
     return base
+
+
+def test_fill_replaces_leftover_reference_page_data_attributes():
+    """Эталонная страница (с которой синхронизирован шаблон) — реальная
+    карточка какого-то другого строителя ("ПИК", Москва и т.п.). Если
+    data-builder-name/data-builder-city на корневом #builder не перезаписать
+    данными текущей компании, на опубликованной странице остаются атрибуты
+    чужого строителя — это баг, найденный на проде (issue про stroybaza)."""
+    html = fill_builder_template(TEMPLATE, _info(builder_name="ООО Дом", city_name="Самара"))
+    assert 'data-builder-name="ООО Дом"' in html
+    assert 'data-builder-city="Самара"' in html
+    assert 'data-builder-name="ПИК"' not in html
+    assert 'data-builder-city="Москва"' not in html
 
 
 def test_fill_sets_title_and_about():

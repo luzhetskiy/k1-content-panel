@@ -47,7 +47,7 @@ def _seed_prompts(db):
     seed_prompts(db)
 
 
-def _builder(db, company, site, text_client=None, site_client=None, scrape=None):
+def _builder(db, company, site, text_client=None, site_client=None, scrape=None, logo_fn=None):
     return CompanyBuilder(
         db=db, company=company, site=site,
         text_client=text_client or Mock(complete_json=Mock(return_value=JsonResult(
@@ -60,6 +60,7 @@ def _builder(db, company, site, text_client=None, site_client=None, scrape=None)
             upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
         ),
         scrape_fn=scrape or Mock(return_value="TITLE: ООО Дом\n\nСтроим дома под ключ."),
+        logo_fn=logo_fn or Mock(return_value=""),
         job_run_id=None,
     )
 
@@ -304,3 +305,69 @@ def test_relocate_logo_downloads_and_reuploads_external_url(db_session, site, co
         b"logo-bytes", "cp-company-7-logo.webp", "uploads/service-img/")
     assert company.status == "published"
     assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-7-logo.webp"
+
+
+def test_build_finds_logo_on_company_site_when_yandex_data_has_none(db_session, site, company):
+    """В выгрузке Яндекс.Карт колонки «Логотип» нет — builder_logo_src у
+    CompanyInfo всегда пуст (см. app/api/company_batches.py). Если на сайте
+    компании нашёлся логотип, он должен уйти в тот же _relocate_logo — то
+    есть в итоге тоже оказаться перезалит в service-img, как и любая другая
+    картинка строителя."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               builder_logo_src="",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
+    )
+    logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
+    builder = _builder(db_session, company, site, site_client=site_client, logo_fn=logo_fn)
+
+    fake_response = Mock(content=b"logo-bytes")
+    fake_response.raise_for_status = Mock()
+    with patch("app.companies.builder.requests.get", return_value=fake_response) as get:
+        builder.build()
+
+    logo_fn.assert_called_once_with("https://dom.ru")
+    get.assert_called_once_with("https://dom.ru/static/logo.png", timeout=12)
+    site_client.upload_file.assert_called_once_with(
+        b"logo-bytes", "cp-company-7-logo.webp", "uploads/service-img/")
+    assert company.status == "published"
+    assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-7-logo.webp"
+
+
+def test_build_does_not_search_company_site_when_yandex_logo_already_present(
+        db_session, site, company):
+    """Колонка «Логотип» в выгрузке — реже, но встречается; если она уже
+    заполнена, повторный обход сайта компании не нужен."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", city_prepositional="Самаре",
+                               builder_logo_src="https://yandex.ru/logo.png",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
+    builder = _builder(db_session, company, site, logo_fn=logo_fn)
+
+    fake_response = Mock(content=b"logo-bytes")
+    fake_response.raise_for_status = Mock()
+    with patch("app.companies.builder.requests.get", return_value=fake_response):
+        builder.build()
+
+    logo_fn.assert_not_called()

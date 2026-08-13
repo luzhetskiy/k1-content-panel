@@ -71,6 +71,24 @@ def slugify(text: str, limit: int = 60) -> str:
     return result.strip("-")[:limit].strip("-")
 
 
+def normalize_phone(raw: str) -> str:
+    """API тизера (создание карточки-тизера) принимает phone строго как 11
+    цифр, начинающихся с 7 или 8 — иначе 400 "Правильный формат телефона...".
+    Сырой телефон из выгрузки Яндекс.Карт приходит в произвольном написании
+    (+7 (846) 277-06-05, дефисы, пробелы) и иногда содержит несколько номеров
+    через запятую (см. миграцию 9864d416847d_widen_company_candidate_phone) —
+    берём только первый номер. Формат, который не удаётся привести к 10 или
+    11 цифрам, не форсим угадыванием: пустая строка (поле необязательное)
+    безопаснее, чем гарантированный отказ создания тизера мусором."""
+    first = re.split(r"[,;/]", raw or "", maxsplit=1)[0]
+    digits = re.sub(r"\D", "", first)
+    if len(digits) == 11 and digits[0] in ("7", "8"):
+        return digits
+    if len(digits) == 10 and digits[0] != "0":
+        return "7" + digits
+    return ""
+
+
 def strip_html_comments(html: str) -> str:
     return re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
 

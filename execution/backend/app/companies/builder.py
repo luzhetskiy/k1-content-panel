@@ -17,7 +17,7 @@ from app.companies.template import fill_builder_template
 from app.models.company import YANDEX_INFO_FIELDS, Company, CompanyBatch, CompanyInfo
 from app.models.job import LlmUsage
 from app.models.site import Site
-from app.sites.client import SERVICE_IMG_DIR, SiteAPIError, slugify
+from app.sites.client import SERVICE_IMG_DIR, SiteAPIError, normalize_phone, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ class CompanyBuilder:
             name=info.builder_name or self.company.name,
             slug=page.get("url", "").removeprefix("/s/").rstrip("/"),
             address=contact.get("address", "") or info.address,
-            phone=contact.get("phone_tel", ""), email=contact.get("email", ""),
+            phone=normalize_phone(contact.get("phone_tel", "")), email=contact.get("email", ""),
             website=self.company.website, page_url=page.get("url", ""),
             category=batch.teaser_category_id, city=batch.teaser_city_id,
             location=batch.teaser_location_id,

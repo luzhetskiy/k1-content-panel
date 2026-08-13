@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.sites.client import SiteAPIError, SiteClient, slugify
+from app.sites.client import SiteAPIError, SiteClient, normalize_phone, slugify
 
 
 class FakeResponse:
@@ -30,6 +30,38 @@ def test_slugify_transliterates_and_limits():
 
 def test_slugify_strips_punctuation():
     assert slugify("Дом: 5 ошибок!") == "dom-5-oshibok"
+
+
+def test_normalize_phone_strips_formatting_and_keeps_11_digits():
+    assert normalize_phone("+7 (846) 277-06-05") == "78462770605"
+
+
+def test_normalize_phone_accepts_8_prefix():
+    """API тизера принимает и 7, и 8 первой цифрой — не подменяем одно
+    другим, менять формат номера не наша задача."""
+    assert normalize_phone("8 926 123-45-67") == "89261234567"
+
+
+def test_normalize_phone_adds_7_to_bare_10_digits():
+    assert normalize_phone("926 123-45-67") == "79261234567"
+
+
+def test_normalize_phone_takes_first_of_several_numbers():
+    """Выгрузка Яндекс.Карт иногда кладёт несколько номеров через запятую —
+    берём первый, а не склеиваем всё в мусор длиннее 11 цифр (см. миграцию
+    9864d416847d_widen_company_candidate_phone)."""
+    assert normalize_phone("8 (926) 123-45-67, 8 (927) 765-43-21") == "89261234567"
+
+
+def test_normalize_phone_returns_empty_for_unparseable_garbage():
+    """Формат, который не удаётся привести к 10 или 11 цифрам, не отправляем
+    вовсе — лучше пустой phone (поле необязательное на стороне API), чем
+    гарантированный отказ создания тизера 400-й ошибкой."""
+    assert normalize_phone("звоните с 9 до 18, номер уточняйте на сайте") == ""
+
+
+def test_normalize_phone_empty_input():
+    assert normalize_phone("") == ""
 
 
 def test_list_section_pages_follows_pagination(monkeypatch):

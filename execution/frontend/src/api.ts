@@ -74,11 +74,19 @@ export interface SiteFull {
   site_description: string; tone_of_voice: string
   articles_parent_id: number | null; reference_article_id: number | null
   image_style_prompt: string; cover_mode: string; cover_style_prompt: string
-  builder_template_html: string; builder_parent_id: number | null
+  builder_parent_id: number | null; builder_reference_id: number | null
   watermark_path: string
   // Заполняются синхронизацией, в форме только читаются.
   articles_url_prefix: string; reference_images: number
   reference_synced_at: string | null
+  builder_reference_synced_at: string | null
+}
+
+export interface SyncResult {
+  ok: boolean
+  articles_ok: boolean | null; articles_detail: string
+  url_prefix: string; pages: number; reference_images: number
+  builder_ok: boolean | null; builder_detail: string
 }
 export interface ArticleRow {
   id: number; topic: string; title: string; status: string
@@ -140,9 +148,7 @@ export const updateSite = (id: number, d: Partial<SiteFull>) =>
   api.put<SiteFull>(`/admin/sites/${id}`, d).then(r => r.data)
 export const deleteSite = (id: number) => api.delete(`/admin/sites/${id}`)
 export const syncSite = (id: number) =>
-  api.post<{ ok: boolean; url_prefix: string; pages: number
-             reference_images: number; detail: string }>(`/admin/sites/${id}/sync`)
-    .then(r => r.data)
+  api.post<SyncResult>(`/admin/sites/${id}/sync`).then(r => r.data)
 export const uploadWatermark = (id: number, file: File) => {
   const form = new FormData()
   form.append('file', file)

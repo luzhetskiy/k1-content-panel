@@ -1,6 +1,7 @@
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_role
+from app.companies.reference import sync_builder_reference
 from app.config import config
 from app.models.site import Site
 from app.models.user import User
@@ -48,8 +50,8 @@ class SiteIn(BaseModel):
     image_style_prompt: str = ""
     cover_mode: str = "prompt"
     cover_style_prompt: str = ""
-    builder_template_html: str = ""
     builder_parent_id: int | None = None
+    builder_reference_id: int | None = None
 
 
 class SiteOut(SiteIn):
@@ -60,6 +62,7 @@ class SiteOut(SiteIn):
     articles_url_prefix: str = ""
     reference_images: int = 0
     reference_synced_at: datetime | None = None
+    builder_reference_synced_at: datetime | None = None
 
 
 def _to_out(site: Site) -> SiteOut:
@@ -76,12 +79,13 @@ def _to_out(site: Site) -> SiteOut:
         reference_article_id=site.reference_article_id,
         image_style_prompt=site.image_style_prompt,
         cover_mode=site.cover_mode, cover_style_prompt=site.cover_style_prompt,
-        builder_template_html=site.builder_template_html,
         builder_parent_id=site.builder_parent_id,
+        builder_reference_id=site.builder_reference_id,
         watermark_path=site.watermark_path,
         articles_url_prefix=site.articles_url_prefix,
         reference_images=site.reference_images,
         reference_synced_at=site.reference_synced_at,
+        builder_reference_synced_at=site.builder_reference_synced_at,
     )
 
 
@@ -157,54 +161,103 @@ def delete_site(site_id: int, db: Session = Depends(get_db),
 
 
 class SyncResult(BaseModel):
-    ok: bool
+    ok: bool = True
+
+    articles_ok: bool | None = None   # None = раздел статей не сконфигурирован
+    articles_detail: str = ""
     url_prefix: str = ""
     pages: int = 0
     reference_images: int = 0
-    detail: str = ""
+
+    builder_ok: bool | None = None    # None = эталон строителя не сконфигурирован
+    builder_detail: str = ""
+
+
+def _sync_with_retries(db: Session, step) -> tuple[bool, str, Any]:
+    """Общий цикл ретраев для обоих шагов синхронизации (эталон статьи,
+    эталон строителя): 5xx и сетевые сбои (`SiteAPIError.status_code` — `None`
+    или `>= 500`) повторяются до SYNC_MAX_RETRIES раз, остальное — сразу
+    отказ. `step()` сам делает работу и сам коммитит на успехе — так отказ
+    одного шага откатывает только его собственные незакоммиченные изменения,
+    не трогая то, что уже успешно закоммитил другой, независимый шаг."""
+    for attempt in range(SYNC_MAX_RETRIES):
+        try:
+            value = step()
+        except (ReferenceError, SecretDecryptionError) as exc:
+            db.rollback()
+            return False, str(exc), None
+        except SiteAPIError as exc:
+            if not _sync_is_retryable(exc) or attempt == SYNC_MAX_RETRIES - 1:
+                db.rollback()
+                return False, str(exc), None
+            time.sleep(SYNC_RETRY_BACKOFF * (2**attempt))
+            continue
+        return True, "", value
+    return False, "не удалось синхронизировать", None  # недостижимо на практике
 
 
 @router.post("/{site_id}/sync", response_model=SyncResult)
 def sync_site(site_id: int, db: Session = Depends(get_db),
               _user: User = Depends(require_role("admin", "manager"))):
-    """Одна кнопка проверяет всё сразу: токен, раздел и эталон. Неверный токен
-    или не тот id эталона должны обнаруживаться здесь, а не в середине партии
-    из десяти статей.
+    """Одна кнопка проверяет всё сразу: токен, раздел статей и эталон
+    строителя. Два шага независимы — у сайта может быть настроен только один
+    из них, и отсутствие настройки для другого не роняет кнопку целиком (см.
+    directions/2026-08-13-builder-reference-sync-design.md). Каждый шаг — своя
+    транзакция: отказ одного не откатывает уже успешно закоммиченный другой
+    (иначе рабочий эталон статей терялся бы из-за отказа синхронизации
+    эталона строителя, никак с ним не связанного).
 
-    Ошибки возвращаются телом со `ok: false`, а не 4xx: это диагностика чужого
-    сайта, а не отказ нашего API — фронту нужно показать текст, а не свалиться
-    в общий обработчик ошибок.
-
-    Синхронизация трогает два шага (эталон и список страниц раздела) и должна
-    записаться в БД как одна операция: `sync_site_reference` вызывается с
-    `commit=False`, коммит — один, в конце, только когда оба шага прошли.
-    Иначе отказ на втором шаге оставлял бы эталон в БД уже обновлённым,
-    а ответ говорил бы "не получилось" — вводя администратора в заблуждение
-    о реальном состоянии сайта.
-
-    5xx и сетевые сбои (`SiteAPIError.status_code` — `None` или `>= 500`)
-    повторяются до `SYNC_MAX_RETRIES` раз; 4xx, `ReferenceError` (эталон без
-    картинок, не задан id и т.п.) и `SecretDecryptionError` (неверный
-    `ENCRYPTION_KEY`) — нет, повтор с тем же запросом даст тот же результат.
+    Ошибки возвращаются телом с articles_ok=False / builder_ok=False, а не
+    4xx: это диагностика чужого сайта, а не отказ нашего API — фронту нужно
+    показать текст, а не свалиться в общий обработчик ошибок.
     """
     site = _get_or_404(db, site_id)
-    for attempt in range(SYNC_MAX_RETRIES):
-        try:
-            client = open_client(db, site)
+    result = SyncResult()
+    articles_wanted = bool(site.articles_parent_id or site.reference_article_id)
+    builder_wanted = bool(site.builder_reference_id)
+
+    if not articles_wanted and not builder_wanted:
+        return result
+
+    try:
+        client = open_client(db, site)
+    except SecretDecryptionError as exc:
+        if articles_wanted:
+            result.articles_ok = False
+            result.articles_detail = str(exc)
+        if builder_wanted:
+            result.builder_ok = False
+            result.builder_detail = str(exc)
+        result.ok = False
+        return result
+
+    if articles_wanted:
+        def articles_step():
             sync_site_reference(db, site, client, commit=False)
             pages = client.list_section_pages(site.articles_url_prefix)
-        except (ReferenceError, SecretDecryptionError) as exc:
-            db.rollback()
-            return SyncResult(ok=False, detail=str(exc))
-        except SiteAPIError as exc:
-            if not _sync_is_retryable(exc) or attempt == SYNC_MAX_RETRIES - 1:
-                db.rollback()
-                return SyncResult(ok=False, detail=str(exc))
-            time.sleep(SYNC_RETRY_BACKOFF * (2**attempt))
-            continue
-        db.commit()
-        return SyncResult(ok=True, url_prefix=site.articles_url_prefix, pages=len(pages),
-                          reference_images=site.reference_images)
+            db.commit()
+            return len(pages)
+
+        ok, detail, pages_count = _sync_with_retries(db, articles_step)
+        result.articles_ok = ok
+        result.articles_detail = detail
+        if ok:
+            result.url_prefix = site.articles_url_prefix
+            result.pages = pages_count
+            result.reference_images = site.reference_images
+
+    if builder_wanted:
+        def builder_step():
+            sync_builder_reference(db, site, client, commit=False)
+            db.commit()
+            return None
+
+        ok, detail, _value = _sync_with_retries(db, builder_step)
+        result.builder_ok = ok
+        result.builder_detail = detail
+
+    result.ok = result.articles_ok is not False and result.builder_ok is not False
+    return result
 
 
 @router.post("/{site_id}/watermark")

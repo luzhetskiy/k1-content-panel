@@ -197,7 +197,7 @@ class CompanyBuilder:
             phone=normalize_phone(contact.get("phone_tel", "")), email=contact.get("email", ""),
             website=self.company.website, page_url=page.get("url", ""),
             category=batch.teaser_category_id, city=batch.teaser_city_id,
-            location=batch.teaser_location_id,
+            location=batch.teaser_location_id, coordinates=info.coordinates or "",
         )
         # Пересборка (Company.teaser_id уже задан) обновляет существующий
         # тизер вместо создания дубликата — та же причина, что и у

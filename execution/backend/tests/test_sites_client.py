@@ -313,6 +313,39 @@ def test_create_teaser_posts_expected_payload():
     assert payload["is_active"] is False
 
 
+def test_create_teaser_includes_coordinates_when_given():
+    """Координаты из выгрузки Яндекс.Карт (CompanyInfo.coordinates) должны
+    доехать до тизера — API целевого сайта принимает их как список из одной
+    строки "lat, lon" (см. execution/step6_manage_teasers.py:build_teaser_
+    payload, портируем тот же контракт)."""
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=201)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.post", return_value=response) as post:
+        client.create_teaser(
+            name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+            coordinates="53.195873, 50.100202",
+        )
+    payload = post.call_args.kwargs["json"]
+    assert payload["coordinates"] == ["53.195873, 50.100202"]
+
+
+def test_create_teaser_omits_coordinates_when_empty():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=201)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.post", return_value=response) as post:
+        client.create_teaser(
+            name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+        )
+    payload = post.call_args.kwargs["json"]
+    assert "coordinates" not in payload
+
+
 def test_create_teaser_raises_on_error():
     from app.sites.client import SiteAPIError
 
@@ -362,6 +395,21 @@ def test_update_teaser_patches_existing_teaser():
     payload = patch_call.call_args.kwargs["json"]
     assert payload["slug"] == "ooo-dom-samara"
     assert payload["category"] == 3
+
+
+def test_update_teaser_includes_coordinates_when_given():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.patch", return_value=response) as patch_call:
+        client.update_teaser(
+            42, name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+            coordinates="53.195873, 50.100202",
+        )
+    payload = patch_call.call_args.kwargs["json"]
+    assert payload["coordinates"] == ["53.195873, 50.100202"]
 
 
 def test_update_teaser_raises_on_error():

@@ -125,6 +125,37 @@ def test_build_normalizes_phone_before_creating_teaser(db_session, site, company
     assert site_client.create_teaser.call_args.kwargs["phone"] == "78462770605"
 
 
+def test_build_passes_coordinates_to_create_teaser(db_session, site, company):
+    """CompanyInfo.coordinates ("lat, lon" из выгрузки Яндекс.Карт, см.
+    app/api/company_batches.py::_company_info_from_candidate) должны уйти в
+    create_teaser — иначе координаты на карточке-тизере целевого сайта не
+    заполняются, хотя в выгрузке они есть (баг, найденный на проде для
+    партии на stroybaza-moscow.ru)."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    db_session.add(company)
+    db_session.add(CompanyInfo(
+        company_id=company.id, builder_name="ООО Дом",
+        city_name="Самара", city_prepositional="Самаре",
+        coordinates="53.195873, 50.100202",
+        contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
+    )
+    builder = _builder(db_session, company, site, site_client=site_client)
+    builder.build()
+
+    assert company.status == "published"
+    assert site_client.create_teaser.call_args.kwargs["coordinates"] == "53.195873, 50.100202"
+
+
 def test_synced_template_builds_successfully(db_session, company):
     """Композиционный тест на стык двух половин фичи: шаблон, прошедший
     валидацию sync_builder_reference (проверяет id-контракт), должен быть

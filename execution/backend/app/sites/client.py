@@ -194,15 +194,20 @@ class SiteClient:
 
     def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
                       website: str, page_url: str, *, category: int, city: int,
-                      location: int) -> int:
+                      location: int, coordinates: str = "") -> int:
         """Карточка-тизер услуги — /api/v1/addresses-services/, не обложка
         страницы. is_active=False: включает менеджер вручную, симметрично
-        published=False у create_page."""
+        published=False у create_page. coordinates — "lat, lon" из CompanyInfo.
+        coordinates (см. app/api/company_batches.py); API принимает список из
+        одной такой строки, портируем контракт execution/step6_manage_
+        teasers.py — при пустой строке ключ вообще не шлём."""
         payload = {
             "name": name, "slug": slug, "address": address, "phone": phone,
             "email": email, "website": website, "page_url": page_url,
             "is_active": False, "location": location, "category": category, "city": city,
         }
+        if coordinates:
+            payload["coordinates"] = [coordinates]
         response = self._check(
             requests.post(f"{self.base_url}{ADDRESSES_SERVICES_PATH}", json=payload,
                           headers={**self._headers, "Content-Type": "application/json"},
@@ -216,15 +221,17 @@ class SiteClient:
 
     def update_teaser(self, teaser_id: int, name: str, slug: str, address: str, phone: str,
                       email: str, website: str, page_url: str, *, category: int, city: int,
-                      location: int) -> int:
+                      location: int, coordinates: str = "") -> int:
         """Пересборка компании (CompanyBuilder._create_teaser) — тот же payload,
-        что и create_teaser, но PATCH на уже существующий тизер вместо
-        создания дубликата."""
+        что и create_teaser (см. его докстрок про coordinates), но PATCH на
+        уже существующий тизер вместо создания дубликата."""
         payload = {
             "name": name, "slug": slug, "address": address, "phone": phone,
             "email": email, "website": website, "page_url": page_url,
             "is_active": False, "location": location, "category": category, "city": city,
         }
+        if coordinates:
+            payload["coordinates"] = [coordinates]
         response = self._check(
             requests.patch(f"{self.base_url}{ADDRESSES_SERVICES_PATH}{teaser_id}/", json=payload,
                           headers={**self._headers, "Content-Type": "application/json"},

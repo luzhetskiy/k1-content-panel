@@ -33,6 +33,7 @@ from __future__ import annotations
 import io
 import mimetypes
 import re
+from urllib.parse import urljoin
 
 import requests
 
@@ -255,3 +256,16 @@ class SiteClient:
                           timeout=self.upload_timeout),
             "загрузка файла")
         return f"/media/{upload_to}{filename}"
+
+    def fetch_file(self, url: str) -> bytes:
+        """Скачивает произвольный файл по url — абсолютному или
+        относительному base_url (urljoin разворачивает и то, и другое
+        одинаково). Используется measure_reference_image_ratios
+        (app/sites/reference.py) для измерения реальных пропорций картинок
+        эталона. Без Authorization: url приходит из HTML чужой статьи, а не
+        от нас, и медиафайлы, на которые ссылается страница, и так публичны
+        (иначе их не увидел бы обычный посетитель сайта) — незачем светить
+        токен сайта перед хостом, который мог прийти из чужого HTML."""
+        absolute = urljoin(self.base_url + "/", url)
+        response = self._check(requests.get(absolute, timeout=self.timeout), f"файл {url}")
+        return response.content

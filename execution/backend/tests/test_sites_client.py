@@ -7,12 +7,14 @@ from app.sites.client import SiteAPIError, SiteClient, normalize_phone, slugify
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text="", json_error=False):
+    def __init__(self, status_code=200, payload=None, text="", json_error=False,
+                content: bytes = b""):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
         self._payload = payload or {}
         self._json_error = json_error
         self.text = text
+        self.content = content
 
     def json(self):
         if self._json_error:
@@ -127,6 +129,39 @@ def test_upload_file_builds_predictable_path(monkeypatch):
     # в filemanager означает перезапись, а не суффикс.
     assert path == "/media/uploads/article-img/article_1-1.webp"
     assert captured["data"]["upload_to"] == "uploads/article-img/"
+
+
+def test_fetch_file_resolves_relative_url_against_base(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        return FakeResponse(200, content=b"raw-image-bytes")
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    client = SiteClient("https://x.ru", "token")
+    data = client.fetch_file("/media/uploads/webp/a.webp")
+    assert data == b"raw-image-bytes"
+    assert captured["url"] == "https://x.ru/media/uploads/webp/a.webp"
+
+
+def test_fetch_file_keeps_already_absolute_url(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        return FakeResponse(200, content=b"x")
+
+    monkeypatch.setattr("app.sites.client.requests.get", fake_get)
+    SiteClient("https://x.ru", "token").fetch_file("https://cdn.example.com/img.webp")
+    assert captured["url"] == "https://cdn.example.com/img.webp"
+
+
+def test_fetch_file_raises_on_error_status(monkeypatch):
+    monkeypatch.setattr("app.sites.client.requests.get",
+                        lambda url, **kw: FakeResponse(404, text="not found"))
+    with pytest.raises(SiteAPIError):
+        SiteClient("https://x.ru", "token").fetch_file("/x.webp")
 
 
 def test_upload_uses_token_header_not_stroyker_key(monkeypatch):

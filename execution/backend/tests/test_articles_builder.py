@@ -5,7 +5,7 @@ import pytest
 
 from app.ai.images import ImageError, ImageResult
 from app.ai.text import JsonResult, TextResult
-from app.articles.builder import ArticleBuilder, image_filename, image_paths_for
+from app.articles.builder import CONTENT_CROP, ArticleBuilder, image_filename, image_paths_for
 
 
 class FakeTextClient:
@@ -25,9 +25,15 @@ class FakeTextClient:
 class FakeImageGenerator:
     def __init__(self):
         self.calls = []
+        # prompt -> crop: словарь, а не список — порядок завершения потоков
+        # ThreadPoolExecutor не гарантирован (см. test_content_image_partial_
+        # failure_still_records_successful_siblings ниже), а какой crop
+        # получил конкретный prompt, знать нужно однозначно.
+        self.crop_by_prompt = {}
 
     def generate(self, prompt, size, quality, crop):
         self.calls.append(prompt)
+        self.crop_by_prompt[prompt] = crop
         return ImageResult(data=b"webp-bytes", size=(1600, 1066), cost=5.4, seconds=60)
 
 
@@ -128,6 +134,98 @@ def test_image_paths_use_article_img_dir():
         "/media/uploads/article-img/cp-article-7-1.webp",
         "/media/uploads/article-img/cp-article-7-2.webp",
     ]
+
+
+# --- crop контентных картинок берётся из реальных пропорций эталона, если
+# они измерились при синхронизации (site.reference_image_ratios,
+# app/sites/reference.py), а не из одного захардкоженного CONTENT_CROP="3:2"
+# для всех позиций сразу. Найдено на stroybaza-moscow.ru: первая картинка
+# статьи рендерится в широком .article-hero (эталон ≈2.42:1), а генератор до
+# этой правки кадрировал её как обычную контентную картинку — получалось
+# заметно выше эталона. ---
+
+
+def test_crop_for_position_uses_measured_ratio_when_present(db_session, prepared):
+    prepared.site.reference_image_ratios = "1180:488,1180:631"
+    builder = make_builder(db_session, prepared)
+    assert builder._crop_for_position(1) == "1180:488"
+    assert builder._crop_for_position(2) == "1180:631"
+
+
+def test_crop_for_position_falls_back_to_default_when_ratios_empty(db_session, prepared):
+    prepared.site.reference_image_ratios = ""
+    builder = make_builder(db_session, prepared)
+    assert builder._crop_for_position(1) == CONTENT_CROP
+
+
+def test_crop_for_position_falls_back_for_unmeasured_position(db_session, prepared):
+    """Позиция могла не измериться (сеть недоступна, битый файл — см.
+    measure_reference_image_ratios) — пустой элемент, не индекс за
+    пределами списка."""
+    prepared.site.reference_image_ratios = "1180:488,"
+    builder = make_builder(db_session, prepared)
+    assert builder._crop_for_position(1) == "1180:488"
+    assert builder._crop_for_position(2) == CONTENT_CROP
+
+
+def test_crop_for_position_falls_back_when_position_beyond_measured_list(db_session, prepared):
+    prepared.site.reference_image_ratios = "1180:488"
+    builder = make_builder(db_session, prepared)
+    assert builder._crop_for_position(2) == CONTENT_CROP
+
+
+def test_build_uses_measured_ratio_for_matching_position(db_session, prepared):
+    """Интеграционная проверка поверх юнит-тестов _crop_for_position выше:
+    доказывает, что _render_content_image реально спрашивает
+    _crop_for_position, а не CONTENT_CROP напрямую."""
+    prepared.site.reference_image_ratios = "1180:488,1180:631"
+    body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>x</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    image_generator = FakeImageGenerator()
+    builder = ArticleBuilder(
+        db=db_session, article=prepared.article, site=prepared.site,
+        text_client=SequencedTextClient(body), image_generator=image_generator,
+        site_client=FakeSiteClient(),
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 2},
+        watermark_bytes=b"", job_run_id=None,
+    )
+    builder.build()
+    assert image_generator.crop_by_prompt["промпт-1"] == "1180:488"
+    assert image_generator.crop_by_prompt["промпт-2"] == "1180:631"
+
+
+def test_regenerate_content_images_uses_measured_ratio_for_position(db_session, prepared):
+    """Тот же _render_content_image используется и при перегенерации
+    (ArticleBuilder.regenerate_content_images) — картинки, перегенерированные
+    для уже опубликованной статьи, тоже должны получать пропорцию эталона,
+    а не 3:2."""
+    body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>x</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    image_generator = FakeImageGenerator()
+    builder = ArticleBuilder(
+        db=db_session, article=prepared.article, site=prepared.site,
+        text_client=SequencedTextClient(body), image_generator=image_generator,
+        site_client=FakeSiteClient(),
+        image_params={"size": "1536x1024", "quality": "medium", "workers": 2},
+        watermark_bytes=b"", job_run_id=None,
+    )
+    builder.build()
+
+    prepared.site.reference_image_ratios = "1180:488,1180:631"
+    db_session.commit()
+    # Новый SequencedTextClient — его счётчик начинается заново с "промпт-1",
+    # поэтому дальше сравниваем с теми же ключами: regenerate_content_images
+    # перезапишет их значения в том же image_generator.crop_by_prompt, и
+    # важно именно итоговое (после перегенерации) значение.
+    builder.text_client = SequencedTextClient(body)
+    builder.regenerate_content_images()
+
+    assert image_generator.crop_by_prompt["промпт-1"] == "1180:488"
+    assert image_generator.crop_by_prompt["промпт-2"] == "1180:631"
 
 
 def test_build_sets_title_slug_and_html(db_session, prepared):

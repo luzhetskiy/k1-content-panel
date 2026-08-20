@@ -377,12 +377,31 @@ class ArticleBuilder:
         self._record_usage("text", result.tokens_prompt, result.tokens_completion, result.cost)
         return result.text.strip()
 
+    def _crop_for_position(self, position: int) -> str:
+        """Реальная пропорция W:H картинки эталона на этой позиции, если она
+        измерилась при синхронизации (measure_reference_image_ratios,
+        app/sites/reference.py) — иначе дефолтный CONTENT_CROP. Формат W:H
+        совместим с crop_to_ratio (app/ai/images.py) напрямую, без
+        пересчёта в вид "3:2": crop_to_ratio делит числа как есть, какой бы
+        ни была их величина.
+
+        Найдено на живом сайте (stroybaza-moscow.ru): первая картинка
+        статьи рендерится в широком баннере .article-hero (эталон —
+        1180×488, ≈2.42:1), а не 3:2 — генератор до этой правки кадрировал
+        её как обычную контентную картинку, и получалось заметно выше
+        эталона."""
+        ratios = (self.site.reference_image_ratios.split(",")
+                 if self.site.reference_image_ratios else [])
+        if 0 < position <= len(ratios) and ratios[position - 1]:
+            return ratios[position - 1]
+        return CONTENT_CROP
+
     def _render_content_image(self, position: int, prompt: str):
         """Один платный вызов генерации + наложение знака. Вызывается из
         рабочего потока ThreadPoolExecutor — см. _generate_content_images."""
         result = self.image_generator.generate(
             prompt=prompt, size=self.image_params["size"],
-            quality=self.image_params["quality"], crop=CONTENT_CROP)
+            quality=self.image_params["quality"], crop=self._crop_for_position(position))
         try:
             # Водяной знак — только на контентные картинки; обложка остаётся
             # чистой. apply_watermark(app/ai/watermark.py) на битом (не

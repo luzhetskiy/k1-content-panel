@@ -53,6 +53,14 @@ class Site(Base):
     reference_images: Mapped[int] = mapped_column(Integer, default=0)
     reference_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
+    # Реальные пропорции W:H картинок эталона по позициям, через запятую
+    # ("1180:488,1180:631,631:631") — измеряются синхронизацией
+    # (measure_reference_image_ratios, app/sites/reference.py) и берутся
+    # ArticleBuilder._crop_for_position вместо единого CONTENT_CROP="3:2"
+    # для всех позиций (app/articles/builder.py). Пустая строка на позиции —
+    # картинку эталона не удалось скачать/измерить, генератор в этом случае
+    # использует дефолтный CONTENT_CROP только для неё, а не роняет всё.
+    reference_image_ratios: Mapped[str] = mapped_column(Text, default="")
 
     image_style_prompt: Mapped[str] = mapped_column(Text, default="")
     cover_mode: Mapped[str] = mapped_column(String(20), default="prompt")  # prompt|like_existing

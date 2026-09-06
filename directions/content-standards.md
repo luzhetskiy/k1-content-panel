@@ -10,10 +10,10 @@
 
 | Поле | Цель, символов | Ориентир |
 |------|----------------|----------|
-| `about_company` | **350–600** | 2–3 абзаца |
-| `specialization` | **150–300** | 1–2 абзаца |
-| `projects_services` | **150–300** | 1–2 абзаца или перечень |
-| `benefits` | **150–300** | 1–2 абзаца или перечень |
+| `about_company` | **600–1000** | 3–4 абзаца |
+| `specialization` | **300–500** | 2–3 абзаца |
+| `projects_services` | **300–500** | 2–3 абзаца или перечень |
+| `benefits` | **300–500** | 2–3 абзаца или перечень |
 
 Это ориентир, а не жёсткий валидатор: небольшой выход за границы допустим,
 качество и достоверность важнее попадания в диапазон.
@@ -44,6 +44,6 @@ SELECT company_id,
        length(coalesce(projects_services,'')) AS proj,
        length(coalesce(benefits,''))          AS benef
 FROM company_info
-WHERE length(coalesce(about_company,'')) < 350
+WHERE length(coalesce(about_company,'')) < 600
 ORDER BY about;"
 ```

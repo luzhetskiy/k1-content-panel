@@ -49,8 +49,8 @@ python execution/step2_scrape_company.py --company-id 5
   берём только с сайта-источника
 - Нейтральный язык, без суперлативов
 - **Объём текстовых блоков** — по стандарту [directions/content-standards.md](../../directions/content-standards.md):
-  `about_company` 350–600 символов, `specialization` / `projects_services` /
-  `benefits` — по 150–300
+  `about_company` 600–1000 символов, `specialization` / `projects_services` /
+  `benefits` — по 300–500
 - Если данных на сайте мало — не оставляем блок пустым, а добираем объём **общими
   нейтральными отраслевыми формулировками** (типовой процесс, материалы, этапы),
   не выдавая их за конкретные факты компании. Пустой блок — только если поле

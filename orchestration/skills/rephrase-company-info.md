@@ -37,7 +37,7 @@ python execution/step3_generate_content.py --company-id 5 --target-site "https:/
 - Без суперлативов
 - Соблюдать целевой объём блоков по стандарту
   [directions/content-standards.md](../../directions/content-standards.md)
-  (`about_company` 350–600, остальные блоки 150–300). Если исходный текст
+  (`about_company` 600–1000, остальные блоки 300–500). Если исходный текст
   короче нижней границы — при перефразе можно расширить его общими нейтральными
   отраслевыми формулировками, не выдумывая конкретики
 

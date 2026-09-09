@@ -996,3 +996,31 @@ def test_regenerate_cover_failure_clears_flag_and_reports_error(db_session, prep
 
     assert "сорвался сайт" in prepared.article.error_text
     assert prepared.article.regenerating is False
+
+
+def test_regenerate_cover_preserves_llm_usage_when_image_generation_fails(db_session, prepared):
+    """Находка ревью (тот же класс, что Task 4 round 3 для regenerate_text,
+    но шире): _build_cover_prompt() уже записала LlmUsage за реально
+    оплаченный вызов текстовой модели ДО того, как ДВА следующих рискующих
+    вызова (image_generator.generate и site_client.set_page_cover) могли
+    упасть. Без раннего commit() сразу после _build_cover_prompt()
+    db.rollback() в except-блоке стёр бы эту уже оплаченную запись LlmUsage
+    вместе с неудачной попыткой картинки."""
+    from app.models.job import JobRun, LlmUsage
+
+    builder = make_builder(db_session, prepared)
+    builder.build()
+
+    job = JobRun(kind="build_article", site_id=prepared.site.id, created_by_id=None)
+    db_session.add(job)
+    db_session.commit()
+    builder.image_generator = PartialFailureImageGenerator(fail_on="картинки")
+    builder.job_run_id = job.id
+    prepared.article.regenerating = True
+    db_session.commit()
+
+    builder.regenerate_cover()
+
+    usage = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
+    assert len(usage) == 1
+    assert prepared.article.regenerating is False

@@ -340,15 +340,32 @@ class ArticleBuilder:
         несколько одновременно видимых в теле статьи — там версия в имени
         нужна, чтобы не перезаписать файл, который всё ещё показан)."""
         try:
-            style = (self.site.cover_style_prompt if self.site.cover_mode == "prompt"
-                     else "в стиле уже существующих обложек этого сайта")
-            prompt = self._image_prompt("cover", {"topic": self.article.topic,
-                                                  "cover_style": style})
+            prompt = self._build_cover_prompt()
+            # Коммитим сразу — _build_cover_prompt() (через _image_prompt())
+            # уже записала LlmUsage за реально оплаченный вызов текстовой
+            # модели, и эта строка не должна пропасть при откате ниже, если
+            # генерация картинки или загрузка обложки на сайт дальше упадёт
+            # (тот же принцип, что и ранний commit в regenerate_text). Здесь
+            # это даже важнее, чем там: после этой точки идут ДВА, а не один,
+            # рискующих упасть вызова (image_generator.generate и
+            # site_client.set_page_cover) прежде чем в сессию попадёт что-то
+            # ещё — без коммита именно тут потеря LlmUsage накрыла бы отказ
+            # любого из них.
+            self.db.commit()
             result = self.image_generator.generate(
                 prompt=prompt, size=self.image_params["size"],
                 quality=self.image_params["quality"], crop=COVER_CROP)
             covers = self.db.query(ArticleImage).filter_by(
                 article_id=self.article.id, kind="cover").all()
+            # Если у статьи ещё нет ни одной строки ArticleImage(kind="cover")
+            # (например, первая публикация случилась до появления этой
+            # фичи, или что-то стёрло историю) — next_version получится 1,
+            # то есть то же имя файла, что и у _attach_cover(). Это не
+            # коллизия: сайт хранит обложку как одно поле страницы
+            # (teaser_image), а не как файл, на который где-то ссылаются по
+            # пути, — set_page_cover просто перезаписывает это поле,
+            # безопасно вне зависимости от того, совпало имя с предыдущим
+            # или нет.
             next_version = max((c.version for c in covers), default=0) + 1
             filename = image_filename(self.article.id, 0, version=next_version)
             self.site_client.set_page_cover(self.article.remote_page_id, result.data, filename)
@@ -357,6 +374,16 @@ class ArticleBuilder:
                                      remote_path=filename, cost=result.cost))
             self._record_usage("image", 0, 0, result.cost)
         except (LLMError, ImageError, SiteAPIError, PromptError) as exc:
+            # db.rollback() здесь для двух рискующих вызовов выше
+            # (image_generator.generate и site_client.set_page_cover) —
+            # оба безопасны для уже оплаченного текстового промпта, чей
+            # LlmUsage закоммичен отдельно строкой выше: если упал
+            # generate(), в сессии ещё нет новых грязных объектов (rollback
+            # — no-op); если упал set_page_cover(), ArticleImage/LlmUsage за
+            # картинку тоже ещё не добавлены (они идут в коде ниже него) —
+            # значит откатывать в обоих случаях фактически нечего, но
+            # rollback() всё равно вызывается безусловно, а не в расчёте на
+            # конкретный сценарий отказа.
             self.db.rollback()
             self.article.error_text = f"ошибка: {exc}"
             self.article.regenerating = False
@@ -618,11 +645,17 @@ class ArticleBuilder:
         self.db.commit()
         return page
 
-    def _attach_cover(self, page_id: int) -> None:
+    def _build_cover_prompt(self) -> str:
+        """Общее построение промпта обложки для _attach_cover (первая
+        публикация) и regenerate_cover (уже опубликованная статья) — не
+        должно расходиться между ними."""
         style = (self.site.cover_style_prompt if self.site.cover_mode == "prompt"
                  else "в стиле уже существующих обложек этого сайта")
-        prompt = self._image_prompt("cover", {"topic": self.article.topic,
-                                              "cover_style": style})
+        return self._image_prompt("cover", {"topic": self.article.topic,
+                                            "cover_style": style})
+
+    def _attach_cover(self, page_id: int) -> None:
+        prompt = self._build_cover_prompt()
         result = self.image_generator.generate(
             prompt=prompt, size=self.image_params["size"],
             quality=self.image_params["quality"], crop=COVER_CROP)

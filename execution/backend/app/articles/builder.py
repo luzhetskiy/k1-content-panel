@@ -393,6 +393,45 @@ class ArticleBuilder:
         self.article.regenerating = False
         self.db.commit()
 
+    def regenerate(self, *, text: bool, images: bool, cover: bool) -> None:
+        """Единая точка входа для кнопок «Перегенерировать» — один клик
+        может попросить любую комбинацию из трёх частей. Порядок фиксирован:
+        текст всегда первым (§1 directions/2026-09-09-article-full-
+        regeneration-design.md) — если картинки тоже выбраны,
+        regenerate_content_images() должен искать свои старые пути в СВЕЖЕМ
+        body_html, а не в том, что было до regenerate_text(). Обложка не
+        встроена в body_html, порядка с остальными частями не имеет.
+
+        Каждая часть уже сама коммитит и очищает regenerating — здесь
+        читаем article.error_text сразу после каждого шага (пока его не
+        перезаписал следующий) и в конце делаем один комбинированный
+        commit. Одна упавшая часть не останавливает остальные — тот же
+        принцип, что уже применяется для отдельных картинок внутри
+        regenerate_content_images."""
+        if not (text or images or cover):
+            self.article.error_text = "нечего перегенерировать — не выбрана ни одна часть"
+            self.article.regenerating = False
+            self.db.commit()
+            return
+
+        errors: list[str] = []
+        if text:
+            self.regenerate_text()
+            if self.article.error_text:
+                errors.append(f"текст — {self.article.error_text}")
+        if images:
+            self.regenerate_content_images()
+            if self.article.error_text:
+                errors.append(f"картинки — {self.article.error_text}")
+        if cover:
+            self.regenerate_cover()
+            if self.article.error_text:
+                errors.append(f"обложка — {self.article.error_text}")
+
+        self.article.error_text = "; ".join(errors)
+        self.article.regenerating = False
+        self.db.commit()
+
     # --- шаги ---
 
     def _set_status(self, status: str) -> None:
@@ -720,12 +759,16 @@ def build_for(db: Session, article: Article, site: Site, site_client,
     ).build()
 
 
-def regenerate_images_for(db: Session, article: Article, site: Site, site_client,
-                          job_run_id: int | None) -> None:
-    """Как build_for выше, но перегенерирует только контентные картинки уже
-    опубликованной статьи — не создаёт страницу заново и не трогает
-    обложку. Тот же открытый риск с порядком AIConfigError, что
-    задокументирован в build_for."""
+def regenerate_article_for(db: Session, article: Article, site: Site, site_client,
+                           job_run_id: int | None, *, text: bool, images: bool,
+                           cover: bool) -> None:
+    """Как build_for выше, но перегенерирует выбранные части (text/images/
+    cover) уже опубликованной статьи — не создаёт страницу заново. Тот же
+    открытый риск с порядком AIConfigError, что задокументирован в
+    build_for. Не имеет собственного unit-теста (как и build_for — чистая
+    сборка зависимостей без ветвлений); логика самого раунда перегенерации
+    уже покрыта тестами regenerate_text/regenerate_content_images/
+    regenerate_cover/regenerate выше."""
     watermark = b""
     if site.watermark_path:
         try:
@@ -742,4 +785,4 @@ def regenerate_images_for(db: Session, article: Article, site: Site, site_client
         image_params=image_params(db),
         watermark_bytes=watermark,
         job_run_id=job_run_id,
-    ).regenerate_content_images()
+    ).regenerate(text=text, images=images, cover=cover)

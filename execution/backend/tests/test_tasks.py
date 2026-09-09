@@ -336,12 +336,12 @@ def test_retry_article_without_site_marks_article_failed(db_session, admin, monk
     assert calls == []
 
 
-# --- перегенерация картинок опубликованной статьи ---
+# --- перегенерация опубликованной статьи (текст/картинки/обложка) ---
 
 
-def test_regenerate_article_images_sync_calls_builder_and_finishes_job(
+def test_regenerate_article_sync_calls_builder_and_finishes_job(
         db_session, batch, site, monkeypatch):
-    from app.tasks import regenerate_article_images_sync
+    from app.tasks import regenerate_article_sync
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
                       status="published", remote_page_id=501,
@@ -351,20 +351,22 @@ def test_regenerate_article_images_sync_calls_builder_and_finishes_job(
 
     calls = []
     monkeypatch.setattr(
-        "app.tasks.regenerate_images_for",
-        lambda db, a, s, sc, job_id: calls.append((a.id, s.id, job_id)))
+        "app.tasks.regenerate_article_for",
+        lambda db, a, s, sc, job_id, **kwargs: calls.append((a.id, s.id, job_id, kwargs)))
     monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
 
-    regenerate_article_images_sync(db_session, article.id)
+    regenerate_article_sync(db_session, article.id, text=True, images=False, cover=True)
     db_session.refresh(article)
 
-    assert len(calls) == 1 and calls[0][0] == article.id and calls[0][1] == site.id
+    assert len(calls) == 1
+    assert calls[0][0] == article.id and calls[0][1] == site.id
+    assert calls[0][3] == {"text": True, "images": False, "cover": True}
     assert article.regenerating is False
 
 
-def test_regenerate_article_images_sync_skips_non_published_article(
+def test_regenerate_article_sync_skips_non_published_article(
         db_session, batch, site, monkeypatch):
-    from app.tasks import regenerate_article_images_sync
+    from app.tasks import regenerate_article_sync
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
                       status="draft", regenerating=True)
@@ -372,19 +374,19 @@ def test_regenerate_article_images_sync_skips_non_published_article(
     db_session.commit()
 
     calls = []
-    monkeypatch.setattr("app.tasks.regenerate_images_for", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr("app.tasks.regenerate_article_for", lambda *a, **k: calls.append(1))
 
-    regenerate_article_images_sync(db_session, article.id)
+    regenerate_article_sync(db_session, article.id, text=False, images=True, cover=False)
     db_session.refresh(article)
 
     assert calls == []
     assert article.regenerating is False
 
 
-def test_regenerate_article_images_sync_ai_config_error_marks_failed(
+def test_regenerate_article_sync_ai_config_error_marks_failed(
         db_session, batch, site, monkeypatch):
     from app.ai.factory import AIConfigError
-    from app.tasks import regenerate_article_images_sync
+    from app.tasks import regenerate_article_sync
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
                       status="published", remote_page_id=501,
@@ -392,13 +394,13 @@ def test_regenerate_article_images_sync_ai_config_error_marks_failed(
     db_session.add(article)
     db_session.commit()
 
-    def broken(db, article, site, site_client, job_run_id):
+    def broken(db, article, site, site_client, job_run_id, **kwargs):
         raise AIConfigError("ключ RouterAI не задан — заполните routerai_api_key")
 
-    monkeypatch.setattr("app.tasks.regenerate_images_for", broken)
+    monkeypatch.setattr("app.tasks.regenerate_article_for", broken)
     monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
 
-    regenerate_article_images_sync(db_session, article.id)
+    regenerate_article_sync(db_session, article.id, text=False, images=True, cover=False)
     db_session.refresh(article)
 
     assert article.regenerating is False
@@ -406,8 +408,8 @@ def test_regenerate_article_images_sync_ai_config_error_marks_failed(
     assert article.status == "published"   # перегенерация не трогает статус статьи
 
 
-def test_regenerate_article_images_sync_without_site_marks_failed(db_session, admin):
-    from app.tasks import regenerate_article_images_sync
+def test_regenerate_article_sync_without_site_marks_failed(db_session, admin):
+    from app.tasks import regenerate_article_sync
 
     orphan_batch = ArticleBatch(site_id=None, requested_count=1, created_by_id=admin.id)
     db_session.add(orphan_batch)
@@ -418,7 +420,7 @@ def test_regenerate_article_images_sync_without_site_marks_failed(db_session, ad
     db_session.add(article)
     db_session.commit()
 
-    regenerate_article_images_sync(db_session, article.id)
+    regenerate_article_sync(db_session, article.id, text=False, images=True, cover=False)
     db_session.refresh(article)
 
     assert article.regenerating is False

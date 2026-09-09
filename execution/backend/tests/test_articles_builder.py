@@ -1024,3 +1024,78 @@ def test_regenerate_cover_preserves_llm_usage_when_image_generation_fails(db_ses
     usage = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
     assert len(usage) == 1
     assert prepared.article.regenerating is False
+
+
+# --- Оркестратор: одна Celery-задача, любая комбинация text/images/cover ---
+
+
+def test_regenerate_runs_text_before_images(db_session, prepared):
+    """Порядок фиксирован (§1 дизайн-документа): если бы картинки
+    обрабатывались первыми, замена путей ушла бы в СТАРЫЙ body_html и была
+    бы перезаписана следующим шагом текста."""
+    builder = make_builder(db_session, prepared)
+    builder.build()
+
+    calls_order = []
+    original_text = builder.regenerate_text
+    original_images = builder.regenerate_content_images
+    builder.regenerate_text = lambda: (calls_order.append("text"), original_text())[1]
+    builder.regenerate_content_images = \
+        lambda: (calls_order.append("images"), original_images())[1]
+
+    builder.regenerate(text=True, images=True, cover=False)
+
+    assert calls_order == ["text", "images"]
+
+
+def test_regenerate_only_calls_selected_parts(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+
+    calls = []
+    builder.regenerate_text = lambda: calls.append("text")
+    builder.regenerate_content_images = lambda: calls.append("images")
+    builder.regenerate_cover = lambda: calls.append("cover")
+
+    builder.regenerate(text=False, images=True, cover=False)
+
+    assert calls == ["images"]
+    assert prepared.article.regenerating is False
+
+
+def test_regenerate_aggregates_errors_from_each_failed_part(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+
+    def broken_json(prompt):
+        from app.ai.text import LLMError
+        raise LLMError("сорвался текст")
+
+    builder.text_client.complete_json = broken_json
+
+    class BrokenCoverClient(FakeSiteClient):
+        def set_page_cover(self, page_id, image_bytes, filename):
+            from app.sites.client import SiteAPIError
+            raise SiteAPIError("сорвалась обложка")
+
+    builder.site_client = BrokenCoverClient()
+
+    builder.regenerate(text=True, images=False, cover=True)
+
+    assert "текст" in prepared.article.error_text
+    assert "сорвался текст" in prepared.article.error_text
+    assert "обложка" in prepared.article.error_text
+    assert "сорвалась обложка" in prepared.article.error_text
+    assert prepared.article.regenerating is False
+
+
+def test_regenerate_with_no_parts_selected_records_error(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+    prepared.article.regenerating = True
+    db_session.commit()
+
+    builder.regenerate(text=False, images=False, cover=False)
+
+    assert "не выбрана" in prepared.article.error_text
+    assert prepared.article.regenerating is False

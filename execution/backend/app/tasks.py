@@ -10,7 +10,7 @@ from app.ai.factory import AIConfigError, build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
 from app.api.admin_sites import open_client as open_site_client
-from app.articles.builder import build_for, regenerate_images_for
+from app.articles.builder import build_for, regenerate_article_for
 from app.articles.topics import filter_duplicates
 from app.celery_app import celery_app
 from app.clock import utcnow
@@ -308,20 +308,21 @@ def retry_article(article_id: int) -> None:
         db.close()
 
 
-# --- перегенерация картинок опубликованной статьи ---
+# --- перегенерация опубликованной статьи (текст/картинки/обложка) ---
 
-def regenerate_article_images_sync(db, article_id: int) -> None:
+def regenerate_article_sync(db, article_id: int, *, text: bool, images: bool,
+                            cover: bool) -> None:
     """В отличие от retry_article_sync, ни одна ветка здесь НЕ трогает
-    article.status — картинки перегенерируются у уже опубликованной статьи,
-    её страница на сайте продолжает существовать и работать независимо от
-    исхода этого раунда. Отказ отражается только в regenerating/
-    error_text. Это намеренное расхождение с соседней retry_article_sync
-    (которая как раз обязана переводить статью в "failed"), а не пропуск —
-    не «чинить» по аналогии с ней."""
+    article.status — статья уже опубликована, её страница на сайте
+    продолжает существовать и работать независимо от исхода этого раунда.
+    Отказ отражается только в regenerating/error_text. Это намеренное
+    расхождение с соседней retry_article_sync (которая как раз обязана
+    переводить статью в "failed"), а не пропуск — не «чинить» по аналогии
+    с ней."""
     article = db.get(Article, article_id)
     if article.status != "published":
-        # Гонка с эндпоинтом (app/api/article_batches.py, regenerate_images):
-        # он уже отклоняет неопубликованные статьи синхронно, сюда можно
+        # Гонка с эндпоинтом (app/api/article_batches.py, regenerate): он
+        # уже отклоняет неопубликованные статьи синхронно, сюда можно
         # попасть только если статус успел измениться между постановкой
         # задачи и её реальным стартом. Тихий выход, тот же стиль, что и у
         # generate_topics_sync при повторной постановке той же задачи.
@@ -332,17 +333,16 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
     site = db.get(Site, article.site_id) if article.site_id is not None else None
     if site is None:
         article.regenerating = False
-        article.error_text = "сайт этой статьи удалён — перегенерация картинок невозможна"
+        article.error_text = "сайт этой статьи удалён — перегенерация невозможна"
         db.commit()
-        job = _start_job(db, "regenerate_article_images", None, None,
-                         {"article_id": article_id})
+        job = _start_job(db, "regenerate_article", None, None, {"article_id": article_id})
         _finish_job(db, job, "failed", article.error_text)
         return
 
-    job = _start_job(db, "regenerate_article_images", site.id, None,
-                     {"article_id": article_id})
+    job = _start_job(db, "regenerate_article", site.id, None, {"article_id": article_id})
     try:
-        regenerate_images_for(db, article, site, open_site_client(db, site), job.id)
+        regenerate_article_for(db, article, site, open_site_client(db, site), job.id,
+                               text=text, images=images, cover=cover)
     except SoftTimeLimitExceeded:
         article.regenerating = False
         article.error_text = "превышен лимит времени задачи"
@@ -356,24 +356,35 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
         _finish_job(db, job, "failed", str(exc))
         return
 
-    # Подстраховка: ArticleBuilder.regenerate_content_images() (Task 5) сама
-    # снимает этот флаг по завершении, но обёртка не должна полагаться на то,
-    # что он снят именно билдером — иначе тест, подменяющий
-    # regenerate_images_for целиком (без реального билдера), не может
-    # проверить, что флаг снимается, а сама обёртка перестаёт быть источником
-    # истины о собственном состоянии.
+    # Подстраховка: ArticleBuilder.regenerate() сама снимает этот флаг по
+    # завершении, но обёртка не должна полагаться на то, что он снят именно
+    # билдером — иначе тест, подменяющий regenerate_article_for целиком (без
+    # реального билдера), не может проверить, что флаг снимается, а сама
+    # обёртка перестаёт быть источником истины о собственном состоянии.
     article.regenerating = False
     db.commit()
     _finish_job(db, job, "ok" if not article.error_text else "failed", article.error_text)
 
 
-@celery_app.task(name="app.tasks.regenerate_article_images")
-def regenerate_article_images(article_id: int) -> None:
+@celery_app.task(name="app.tasks.regenerate_article")
+def regenerate_article(article_id: int, *, text: bool, images: bool, cover: bool) -> None:
     db = SessionLocal()
     try:
-        regenerate_article_images_sync(db, article_id)
+        regenerate_article_sync(db, article_id, text=text, images=images, cover=cover)
     finally:
         db.close()
+
+
+# Временный алиас обратной совместимости: app/api/article_batches.py (эндпоинт
+# /articles/{id}/regenerate-images) пока импортирует и ставит в очередь именно
+# regenerate_article_images.apply_async(args=[article.id], ...) без text/
+# images/cover — обновление этого эндпоинта под новую сигнатуру вынесено в
+# Task 7 (отдельная задача плана) и намеренно не входит в Task 6. Без этого
+# алиаса переименование задачи здесь ломало бы импорт всего FastAPI-приложения
+# (app/main.py → app/api/article_batches.py → app.tasks) ещё до Task 7. Убрать
+# при выполнении Task 7, когда эндпоинт начнёт вызывать regenerate_article
+# напрямую с явными text/images/cover.
+regenerate_article_images = regenerate_article
 
 
 # --- строители: сборка партии ---

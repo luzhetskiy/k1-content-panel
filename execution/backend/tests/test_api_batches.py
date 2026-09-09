@@ -30,7 +30,7 @@ def no_celery(monkeypatch):
                         lambda args, **kwargs: sent.append(("retry", args[0], kwargs)) or
                         type("R", (), {"id": "task-3"})())
     monkeypatch.setattr(
-        "app.api.article_batches.regenerate_article_images.apply_async",
+        "app.api.article_batches.regenerate_article.apply_async",
         lambda args, **kwargs: sent.append(("regenerate", args[0], kwargs)) or
         type("R", (), {"id": "task-4"})())
     return sent
@@ -263,22 +263,57 @@ def test_jobs_cost_is_rounded_for_display(manager_client, db_session, site_id):
     assert body[0]["cost"] == 0.3
 
 
-def test_regen_time_limits_grow_with_image_count():
+def test_regen_time_limits_soft_grows_with_each_part():
     from app.api.article_batches import _regen_time_limits
 
-    soft_one, hard_one = _regen_time_limits(1)
-    soft_many, _ = _regen_time_limits(5)
+    none_selected, _ = _regen_time_limits(text=False, image_count=0, cover=False)
+    text_only, _ = _regen_time_limits(text=True, image_count=0, cover=False)
+    images_only, _ = _regen_time_limits(text=False, image_count=1, cover=False)
+    cover_only, _ = _regen_time_limits(text=False, image_count=0, cover=True)
+    all_parts, _ = _regen_time_limits(text=True, image_count=1, cover=True)
+
+    assert text_only > none_selected
+    assert images_only > none_selected
+    assert cover_only > none_selected
+    assert all_parts > max(text_only, images_only, cover_only)
+
+
+def test_regen_time_limits_image_count_scales_soft_limit():
+    from app.api.article_batches import _regen_time_limits
+
+    soft_one, _ = _regen_time_limits(text=False, image_count=1, cover=False)
+    soft_many, _ = _regen_time_limits(text=False, image_count=5, cover=False)
     assert soft_many > soft_one
-    assert hard_one > soft_one
 
 
-def test_regenerate_images_unknown_article_404(manager_client, no_celery):
-    resp = manager_client.post("/api/articles/999/regenerate-images")
+def test_regen_time_limits_hard_is_always_after_soft():
+    from app.api.article_batches import _regen_time_limits
+
+    soft, hard = _regen_time_limits(text=True, image_count=3, cover=True)
+    assert hard > soft
+
+
+def test_regenerate_unknown_article_404(manager_client, no_celery):
+    resp = manager_client.post("/api/articles/999/regenerate", json={"images": True})
     assert resp.status_code == 404
 
 
-def test_regenerate_images_requires_published_article(manager_client, db_session,
-                                                       site_id, no_celery):
+def test_regenerate_requires_at_least_one_part(manager_client, db_session, site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501)
+    db_session.add(article)
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate",
+                               json={"text": False, "images": False, "cover": False})
+    assert resp.status_code == 400
+
+
+def test_regenerate_requires_published_article(manager_client, db_session, site_id, no_celery):
     from app.models.article import Article
 
     batch_id = manager_client.post("/api/article-batches",
@@ -287,12 +322,12 @@ def test_regenerate_images_requires_published_article(manager_client, db_session
     db_session.add(article)
     db_session.commit()
 
-    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate", json={"images": True})
     assert resp.status_code == 400
 
 
-def test_regenerate_images_starts_task_for_published_article(manager_client, db_session,
-                                                              site_id, no_celery):
+def test_regenerate_starts_task_for_published_article(manager_client, db_session,
+                                                       site_id, no_celery):
     from app.models.article import Article, ArticleImage
 
     batch_id = manager_client.post("/api/article-batches",
@@ -305,7 +340,7 @@ def test_regenerate_images_starts_task_for_published_article(manager_client, db_
                                 remote_path="/media/x/cp-article-1-1.webp"))
     db_session.commit()
 
-    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate", json={"images": True})
 
     assert resp.status_code == 200
     assert any(entry[:2] == ("regenerate", article.id) for entry in no_celery)
@@ -313,14 +348,30 @@ def test_regenerate_images_starts_task_for_published_article(manager_client, db_
     assert article.regenerating is True
 
 
-def test_regenerate_images_time_limit_counts_distinct_positions_not_rows(
+def test_regenerate_passes_selected_parts_to_task(manager_client, db_session, site_id, no_celery):
+    from app.models.article import Article
+
+    batch_id = manager_client.post("/api/article-batches",
+                                   json={"site_id": site_id, "count": 1}).json()["id"]
+    article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
+                      status="published", remote_page_id=501)
+    db_session.add(article)
+    db_session.commit()
+
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate",
+                               json={"text": True, "images": False, "cover": True})
+
+    assert resp.status_code == 200
+    dispatch = next(entry for entry in no_celery if entry[0] == "regenerate")
+    assert dispatch[2]["kwargs"] == {"text": True, "images": False, "cover": True}
+
+
+def test_regenerate_time_limit_counts_distinct_positions_only_when_images_selected(
         manager_client, db_session, site_id, no_celery):
     """Регенерация не удаляет старые ArticleImage — вторая версия той же
     позиции добавляет новую строку, не заменяет старую (app/articles/
     builder.py, regenerate_content_images). Бюджет времени обязан считать
-    иллюстрации (уникальные position), а не строки — иначе COUNT(*) после
-    хотя бы одного раунда перегенерации задвоил бы бюджет для той же самой
-    одной картинки."""
+    иллюстрации (уникальные position), а не строки."""
     from app.api.article_batches import _regen_time_limits
     from app.models.article import Article, ArticleImage
 
@@ -338,15 +389,15 @@ def test_regenerate_images_time_limit_counts_distinct_positions_not_rows(
     ])
     db_session.commit()
 
-    resp = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    resp = manager_client.post(f"/api/articles/{article.id}/regenerate", json={"images": True})
 
     assert resp.status_code == 200
     dispatch = next(entry for entry in no_celery if entry[0] == "regenerate")
-    soft_one, _ = _regen_time_limits(1)
+    soft_one, _ = _regen_time_limits(text=False, image_count=1, cover=False)
     assert dispatch[2]["soft_time_limit"] == soft_one
 
 
-def test_regenerate_images_twice_dispatches_once(manager_client, db_session, site_id, no_celery):
+def test_regenerate_twice_dispatches_once(manager_client, db_session, site_id, no_celery):
     from app.models.article import Article
 
     batch_id = manager_client.post("/api/article-batches",
@@ -356,8 +407,8 @@ def test_regenerate_images_twice_dispatches_once(manager_client, db_session, sit
     db_session.add(article)
     db_session.commit()
 
-    first = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
-    second = manager_client.post(f"/api/articles/{article.id}/regenerate-images")
+    first = manager_client.post(f"/api/articles/{article.id}/regenerate", json={"images": True})
+    second = manager_client.post(f"/api/articles/{article.id}/regenerate", json={"images": True})
 
     assert first.status_code == 200
     assert second.status_code == 400
@@ -365,8 +416,7 @@ def test_regenerate_images_twice_dispatches_once(manager_client, db_session, sit
     assert len(dispatches) == 1
 
 
-def test_batch_detail_includes_regenerating_flag(manager_client, db_session,
-                                                  site_id, no_celery):
+def test_batch_detail_includes_regenerating_flag(manager_client, db_session, site_id, no_celery):
     from app.models.article import Article
 
     batch_id = manager_client.post("/api/article-batches",

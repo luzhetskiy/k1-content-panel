@@ -9,7 +9,7 @@ from app.api.deps import get_current_user, get_db
 from app.models.article import Article, ArticleBatch, ArticleImage
 from app.models.site import Site
 from app.models.user import User
-from app.tasks import generate_topics, regenerate_article_images, retry_article, run_batch
+from app.tasks import generate_topics, regenerate_article, retry_article, run_batch
 
 router = APIRouter(prefix="/api", tags=["articles"])
 
@@ -179,18 +179,28 @@ def _retry_time_limits(reference_images: int) -> tuple[int, int]:
     return soft, soft + TIME_LIMIT_GAP_SECONDS
 
 
-# Перегенерация не пересобирает текст и не создаёт страницу заново —
-# бюджет считается только по картинкам: N последовательных текстовых
-# промптов иллюстраций (_RETRY_PER_IMAGE_SECONDS каждый) плюс одна
-# параллельная пачка генерации самих картинок (365 с, см. app/ai/images.py)
-# плюс запас на загрузку файлов и update_page_text.
+# Перегенерация не создаёт страницу заново — бюджет считается только по
+# реально выбранным частям, а не всегда «по максимуму»: текст — один
+# последовательный вызов генерации тела (_REGEN_TEXT_SECONDS); картинки — N
+# последовательных текстовых промптов иллюстраций (_RETRY_PER_IMAGE_SECONDS
+# каждый) плюс одна параллельная пачка генерации самих картинок
+# (_REGEN_IMAGE_BATCH_SECONDS); обложка — промпт обложки плюс сама картинка
+# (_REGEN_COVER_SECONDS). _REGEN_OVERHEAD_SECONDS — общий запас на загрузку
+# файлов и update_page_text, один раз независимо от набора частей.
 _REGEN_OVERHEAD_SECONDS = 300
 _REGEN_IMAGE_BATCH_SECONDS = 365
+_REGEN_TEXT_SECONDS = 366          # один вызов генерации тела статьи
+_REGEN_COVER_SECONDS = 366 + 365   # промпт обложки + сама картинка
 
 
-def _regen_time_limits(image_count: int) -> tuple[int, int]:
-    soft = (_REGEN_OVERHEAD_SECONDS + _RETRY_PER_IMAGE_SECONDS * image_count
-           + _REGEN_IMAGE_BATCH_SECONDS)
+def _regen_time_limits(*, text: bool, image_count: int, cover: bool) -> tuple[int, int]:
+    soft = _REGEN_OVERHEAD_SECONDS
+    if text:
+        soft += _REGEN_TEXT_SECONDS
+    if image_count:
+        soft += _RETRY_PER_IMAGE_SECONDS * image_count + _REGEN_IMAGE_BATCH_SECONDS
+    if cover:
+        soft += _REGEN_COVER_SECONDS
     return soft, soft + TIME_LIMIT_GAP_SECONDS
 
 
@@ -341,28 +351,40 @@ def retry(article_id: int, db: Session = Depends(get_db),
     return {"ok": True}
 
 
-@router.post("/articles/{article_id}/regenerate-images")
-def regenerate_images(article_id: int, db: Session = Depends(get_db),
-                      _user: User = Depends(get_current_user)):
+class RegenerateIn(BaseModel):
+    text: bool = False
+    images: bool = False
+    cover: bool = False
+
+
+@router.post("/articles/{article_id}/regenerate")
+def regenerate(article_id: int, payload: RegenerateIn, db: Session = Depends(get_db),
+               _user: User = Depends(get_current_user)):
+    if not (payload.text or payload.images or payload.cover):
+        raise HTTPException(400, "нужно выбрать хотя бы одну часть для перегенерации")
     article = db.get(Article, article_id)
     if article is None:
         raise HTTPException(404, "статья не найдена")
     if article.status != "published":
-        raise HTTPException(
-            400, "перегенерация картинок доступна только для опубликованных статей")
+        raise HTTPException(400, "перегенерация доступна только для опубликованных статей")
     # Тот же приём анти-гонки, что у run()/retry() выше: перевод в
     # "выполняется" синхронно, до apply_async, — второй быстрый клик
     # увидит уже True и не поставит вторую задачу в очередь.
     if article.regenerating:
-        raise HTTPException(400, "перегенерация картинок уже выполняется")
+        raise HTTPException(400, "перегенерация уже выполняется")
     article.regenerating = True
     db.commit()
 
-    image_count = db.scalar(
-        select(func.count(func.distinct(ArticleImage.position)))
-        .where(ArticleImage.article_id == article.id, ArticleImage.kind == "content")
-    ) or 0
-    soft, hard = _regen_time_limits(image_count)
-    regenerate_article_images.apply_async(args=[article.id], soft_time_limit=soft,
-                                          time_limit=hard)
+    image_count = 0
+    if payload.images:
+        image_count = db.scalar(
+            select(func.count(func.distinct(ArticleImage.position)))
+            .where(ArticleImage.article_id == article.id, ArticleImage.kind == "content")
+        ) or 0
+    soft, hard = _regen_time_limits(text=payload.text, image_count=image_count,
+                                    cover=payload.cover)
+    regenerate_article.apply_async(
+        args=[article.id],
+        kwargs={"text": payload.text, "images": payload.images, "cover": payload.cover},
+        soft_time_limit=soft, time_limit=hard)
     return {"ok": True}

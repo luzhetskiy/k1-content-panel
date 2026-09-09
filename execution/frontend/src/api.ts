@@ -165,8 +165,9 @@ export const saveTopics = (id: number, topics: string[]) =>
 export const runBatch = (id: number) =>
   api.post<Batch>(`/article-batches/${id}/run`).then(r => r.data)
 export const retryArticle = (id: number) => api.post(`/articles/${id}/retry`)
-export const regenerateArticleImages = (id: number) =>
-  api.post(`/articles/${id}/regenerate-images`)
+export interface RegenerateParts { text?: boolean; images?: boolean; cover?: boolean }
+export const regenerateArticle = (id: number, parts: RegenerateParts) =>
+  api.post(`/articles/${id}/regenerate`, parts)
 
 export const uploadCompanyImport = (file: File) => {
   const form = new FormData()

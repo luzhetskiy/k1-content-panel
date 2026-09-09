@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import {
-  ArticleRow, Batch, getBatch, regenerateArticleImages, retryArticle, runBatch, saveTopics,
+  ArticleRow, Batch, getBatch, regenerateArticle, retryArticle, runBatch, saveTopics,
 } from '../api'
 
 const EDITABLE = ['topics_pending', 'topics_review', 'failed']
@@ -206,7 +206,7 @@ export default function BatchPage() {
                   : '—',
               },
               {
-                title: '', width: 220,
+                title: '', width: 300,
                 render: (_, r: ArticleRow) => {
                   if (r.status === 'failed') {
                     return (
@@ -217,18 +217,39 @@ export default function BatchPage() {
                     )
                   }
                   if (r.status === 'published') {
+                    const regen = async (parts: { images?: boolean; cover?: boolean }) => {
+                      await regenerateArticle(r.id, parts)
+                      load()
+                    }
                     return (
-                      <Popconfirm title="Перегенерировать картинки в тексте статьи?"
-                                  onConfirm={async () => {
-                                    await regenerateArticleImages(r.id)
-                                    load()
-                                  }}>
-                        <Button size="small" icon={<ReloadOutlined />}
-                                loading={r.regenerating}
-                                disabled={r.regenerating}>
+                      <Space direction="vertical" size={2}>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           Перегенерировать картинки
-                        </Button>
-                      </Popconfirm>
+                        </Typography.Text>
+                        <Space size={4}>
+                          <Popconfirm title="Перегенерировать картинки внутри текста статьи?"
+                                      onConfirm={() => regen({ images: true })}>
+                            <Button size="small" loading={r.regenerating}
+                                    disabled={r.regenerating}>
+                              Только внутри
+                            </Button>
+                          </Popconfirm>
+                          <Popconfirm title="Перегенерировать обложку статьи?"
+                                      onConfirm={() => regen({ cover: true })}>
+                            <Button size="small" loading={r.regenerating}
+                                    disabled={r.regenerating}>
+                              Обложку
+                            </Button>
+                          </Popconfirm>
+                          <Popconfirm title="Перегенерировать все картинки статьи (внутри и обложку)?"
+                                      onConfirm={() => regen({ images: true, cover: true })}>
+                            <Button size="small" loading={r.regenerating}
+                                    disabled={r.regenerating}>
+                              Все
+                            </Button>
+                          </Popconfirm>
+                        </Space>
+                      </Space>
                     )
                   }
                   return null

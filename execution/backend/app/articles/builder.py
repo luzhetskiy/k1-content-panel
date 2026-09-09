@@ -282,6 +282,14 @@ class ArticleBuilder:
         try:
             self._require_synced_reference()
             body = self._generate_body(image_paths=self._current_content_image_paths())
+            # Коммитим сразу — _generate_body() уже записала LlmUsage за
+            # реально оплаченный вызов (см. _record_usage), и эта строка не
+            # должна пропасть при откате ниже, если дальше (присвоение
+            # полей статьи ещё не начиналось — на данный момент LlmUsage
+            # единственный «грязный» объект в сессии) что-то пойдёт не так:
+            # тот же принцип, что и у построчных commit() в
+            # regenerate_content_images.
+            self.db.commit()
             # Фолбэк на self.article.title (текущий, уже живой заголовок), а
             # НЕ на self.article.topic (как в _apply_body): topic — черновая
             # внутренняя формулировка темы, годная как фолбэк только при

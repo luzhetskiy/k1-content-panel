@@ -131,6 +131,37 @@ def test_upload_file_builds_predictable_path(monkeypatch):
     assert captured["data"]["upload_to"] == "uploads/article-img/"
 
 
+def test_update_page_text_sends_only_text_by_default(monkeypatch):
+    captured = {}
+
+    def fake_patch(url, **kwargs):
+        captured.update(url=url, json=kwargs["json"])
+        return FakeResponse(200, {"id": 501})
+
+    monkeypatch.setattr("app.sites.client.requests.patch", fake_patch)
+    SiteClient("https://x.ru", "token").update_page_text(501, "<p>текст</p>")
+    assert captured["json"] == {"text": "<p>текст</p>"}
+
+
+def test_update_page_text_includes_title_and_meta_when_given(monkeypatch):
+    captured = {}
+
+    def fake_patch(url, **kwargs):
+        captured.update(json=kwargs["json"])
+        return FakeResponse(200, {"id": 501})
+
+    monkeypatch.setattr("app.sites.client.requests.patch", fake_patch)
+    SiteClient("https://x.ru", "token").update_page_text(
+        501, "<p>новый текст</p>", title="Новый заголовок",
+        meta_description="новое описание", meta_keywords="новые, ключи")
+    assert captured["json"] == {
+        "text": "<p>новый текст</p>",
+        "title": "Новый заголовок",
+        "meta_description": "новое описание",
+        "meta_keywords": "новые, ключи",
+    }
+
+
 def test_fetch_file_resolves_relative_url_against_base(monkeypatch):
     captured = {}
 

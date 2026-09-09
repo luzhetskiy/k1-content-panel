@@ -167,12 +167,31 @@ class SiteClient:
             "создание страницы")
         return self._json(response, "создание страницы")
 
-    def update_page_text(self, page_id: int, html: str) -> dict:
+    def update_page_text(self, page_id: int, html: str, *, title: str | None = None,
+                         meta_description: str | None = None,
+                         meta_keywords: str | None = None) -> dict:
         """PATCH тела уже существующей страницы. Используется вне обычного
         потока сборки (build_for создаёт страницу один раз и больше не
-        трогает) — для ручного исправления уже опубликованного контента,
-        например замены путей картинок после коллизии имён в filemanager."""
+        трогает) — для ручного исправления уже опубликованного контента
+        (замена путей картинок после коллизии имён в filemanager) и для
+        перегенерации текста статьи (ArticleBuilder.regenerate_text,
+        directions/2026-09-09-article-full-regeneration-design.md).
+
+        title/meta_description/meta_keywords — именованные и необязательные:
+        существующие вызывающие (fix_article_image_collision.py,
+        app/companies/builder.py, ArticleBuilder.regenerate_content_images)
+        зовут метод с ровно двумя позиционными аргументами и продолжают
+        менять только текст. regenerate_text — единственный вызывающий,
+        которому нужны все четыре поля в одном PATCH: заголовок, meta и
+        текст обновляются на сайте атомарно, а не рассинхронизированной
+        парой запросов."""
         payload = {"text": strip_html_comments(html).strip()}
+        if title is not None:
+            payload["title"] = title
+        if meta_description is not None:
+            payload["meta_description"] = meta_description
+        if meta_keywords is not None:
+            payload["meta_keywords"] = meta_keywords
         response = self._check(
             requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
                            json=payload,

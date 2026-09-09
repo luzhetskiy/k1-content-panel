@@ -366,7 +366,7 @@ def test_regenerate_images_twice_dispatches_once(manager_client, db_session, sit
 
 
 def test_batch_detail_includes_regenerating_flag(manager_client, db_session,
-                                                         site_id, no_celery):
+                                                  site_id, no_celery):
     from app.models.article import Article
 
     batch_id = manager_client.post("/api/article-batches",

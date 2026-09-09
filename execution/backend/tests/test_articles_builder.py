@@ -228,6 +228,53 @@ def test_regenerate_content_images_uses_measured_ratio_for_position(db_session, 
     assert image_generator.crop_by_prompt["промпт-2"] == "1180:631"
 
 
+# --- _generate_body умеет принимать готовый список путей картинок вместо
+# построения его с нуля — нужно regenerate_text() (Task 4): у уже
+# опубликованной статьи актуальные пути могут быть НЕ v1 (если картинки уже
+# перегенерировались), а image_paths_for()/_image_count() всегда строят
+# именно v1-заглушки, актуальные только при самой первой сборке. ---
+
+
+def test_generate_body_uses_provided_image_paths_when_given(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    custom_paths = ["/media/uploads/article-img/cp-article-1-1_v2.webp"]
+    builder._generate_body(image_paths=custom_paths)
+    prompt = builder.text_client.prompts[0]
+    assert custom_paths[0] in prompt
+    assert "ровно 1 иллюстраций" in prompt
+
+
+def test_generate_body_falls_back_to_reference_count_without_image_paths(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder._generate_body()
+    prompt = builder.text_client.prompts[0]
+    assert "ровно 2 иллюстраций" in prompt   # prepared.site.reference_images == 2
+    assert image_paths_for(prepared.article.id, 2)[0] in prompt
+
+
+def test_current_content_image_paths_returns_latest_version_per_position(db_session, prepared):
+    from app.models.article import ArticleImage
+
+    db_session.add_all([
+        ArticleImage(article_id=prepared.article.id, kind="content", position=1, version=1,
+                    remote_path="/media/x/cp-article-1-1.webp"),
+        ArticleImage(article_id=prepared.article.id, kind="content", position=1, version=2,
+                    remote_path="/media/x/cp-article-1-1_v2.webp"),
+        ArticleImage(article_id=prepared.article.id, kind="content", position=2, version=1,
+                    remote_path="/media/x/cp-article-1-2.webp"),
+    ])
+    db_session.commit()
+    builder = make_builder(db_session, prepared)
+    assert builder._current_content_image_paths() == [
+        "/media/x/cp-article-1-1_v2.webp", "/media/x/cp-article-1-2.webp",
+    ]
+
+
+def test_current_content_image_paths_empty_when_no_images(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    assert builder._current_content_image_paths() == []
+
+
 def test_build_sets_title_slug_and_html(db_session, prepared):
     builder = make_builder(db_session, prepared)
     builder.build()

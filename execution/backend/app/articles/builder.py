@@ -289,7 +289,22 @@ class ArticleBuilder:
         """Сколько <img> в эталоне, столько картинок и генерируем."""
         return self.site.reference_images
 
-    def _generate_body(self) -> dict:
+    def _current_content_image_paths(self) -> list[str]:
+        """Текущие (последней версии на позицию) пути контентных картинок —
+        нужны regenerate_text(): новый body_html должен продолжать ссылаться
+        на реально существующие файлы, а не на v1-заглушки image_paths_for(),
+        актуальные только при самой первой сборке статьи. Пустой список,
+        если у статьи вообще нет контентных картинок — не должно ронять
+        текст, только оставить его без упоминания иллюстраций."""
+        images = self.db.query(ArticleImage).filter_by(
+            article_id=self.article.id, kind="content").all()
+        positions = sorted({i.position for i in images})
+        return [
+            max((i for i in images if i.position == p), key=lambda i: i.version).remote_path
+            for p in positions
+        ]
+
+    def _generate_body(self, image_paths: list[str] | None = None) -> dict:
         """Известное ограничение (найдено при ревью Task 16, не чинится
         здесь): TextClient.complete_json (app/ai/text.py) бросает LLMError
         ДО вызова self._usage(response), если json.loads провалился — то
@@ -306,7 +321,15 @@ class ArticleBuilder:
         в Task 16, а зафиксировать как принятый риск: разовая, а не
         системная потеря, и админ всё равно увидит failed-статью с текстом
         ошибки, просто без соответствующей строки расхода."""
-        count = self._image_count()
+        # image_paths передаётся явно при перегенерации текста уже
+        # опубликованной статьи (regenerate_text) — актуальные пути картинок
+        # могут быть НЕ v1, если картинки уже перегенерировались хотя бы раз
+        # (_current_content_image_paths ниже). Без параметра (обычная первая
+        # сборка, build()) считаем как раньше: image_paths_for() всегда
+        # строит v1 — картинок ещё не существует, они будут созданы именно
+        # под эти пути следующим шагом (_generate_content_images).
+        count = self._image_count() if image_paths is None else len(image_paths)
+        paths = image_paths_for(self.article.id, count) if image_paths is None else image_paths
         template = resolve_prompt(self.db, "article_body", self.site.id)
         prompt = render_prompt(template, {
             "topic": self.article.topic,
@@ -316,7 +339,7 @@ class ArticleBuilder:
             # Эталон берётся из кеша карточки — к сайту за ним не ходим.
             "reference_html": self.site.reference_html,
             "image_count": count,
-            "image_paths": image_paths_for(self.article.id, count),
+            "image_paths": paths,
         })
         result = self.text_client.complete_json(prompt)
         self._record_usage("text", result.tokens_prompt, result.tokens_completion, result.cost)

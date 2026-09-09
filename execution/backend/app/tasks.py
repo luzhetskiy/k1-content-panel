@@ -321,10 +321,9 @@ def regenerate_article_sync(db, article_id: int, *, text: bool, images: bool,
     с ней."""
     article = db.get(Article, article_id)
     if article.status != "published":
-        # Гонка с эндпоинтом (app/api/article_batches.py, сейчас
-        # regenerate_images — переименуется в regenerate только в Task 7
-        # плана): он уже отклоняет неопубликованные статьи синхронно, сюда
-        # можно попасть только если статус успел измениться между постановкой
+        # Гонка с эндпоинтом (app/api/article_batches.py, regenerate): он
+        # уже отклоняет неопубликованные статьи синхронно, сюда можно
+        # попасть только если статус успел измениться между постановкой
         # задачи и её реальным стартом. Тихий выход, тот же стиль, что и у
         # generate_topics_sync при повторной постановке той же задачи.
         article.regenerating = False
@@ -368,39 +367,12 @@ def regenerate_article_sync(db, article_id: int, *, text: bool, images: bool,
 
 
 @celery_app.task(name="app.tasks.regenerate_article")
-def regenerate_article(article_id: int, *, text: bool = False, images: bool = True,
-                       cover: bool = False) -> None:
-    # Дефолты (text=False, images=True, cover=False) воспроизводят старое
-    # поведение "перегенерация только картинок" — они здесь ради
-    # app/api/article_batches.py (эндпоинт /articles/{id}/regenerate-images,
-    # найдено код-ревью коммита 415456b): он пока ставит эту задачу в очередь
-    # как regenerate_article_images.apply_async(args=[article.id], ...) БЕЗ
-    # text/images/cover, унаследовано от старого имени задачи. Без дефолтов
-    # именно здесь (а не в regenerate_article_sync — та вызывается явно и из
-    # тестов, и отсюда, поэтому её параметры остаются обязательными) реальный
-    # Celery-воркер падал бы с TypeError ДО входа в regenerate_article_sync
-    # (до _start_job), а article.regenerating так и оставался бы True
-    # навсегда — статья выглядела бы зависшей в перегенерации без какой-либо
-    # ошибки в error_text. Обновление эндпоинта под новую сигнатуру — Task 7
-    # плана (отдельная задача); дефолты уйдут вместе с алиасом ниже, когда
-    # эндпоинт начнёт передавать text/images/cover явно.
+def regenerate_article(article_id: int, *, text: bool, images: bool, cover: bool) -> None:
     db = SessionLocal()
     try:
         regenerate_article_sync(db, article_id, text=text, images=images, cover=cover)
     finally:
         db.close()
-
-
-# Временный алиас обратной совместимости: app/api/article_batches.py (эндпоинт
-# /articles/{id}/regenerate-images) пока импортирует и ставит в очередь именно
-# regenerate_article_images.apply_async(args=[article.id], ...) без text/
-# images/cover — обновление этого эндпоинта под новую сигнатуру вынесено в
-# Task 7 (отдельная задача плана) и намеренно не входит в Task 6. Без этого
-# алиаса переименование задачи здесь ломало бы импорт всего FastAPI-приложения
-# (app/main.py → app/api/article_batches.py → app.tasks) ещё до Task 7. Убрать
-# при выполнении Task 7, когда эндпоинт начнёт вызывать regenerate_article
-# напрямую с явными text/images/cover.
-regenerate_article_images = regenerate_article
 
 
 # --- строители: сборка партии ---

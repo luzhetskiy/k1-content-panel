@@ -427,49 +427,6 @@ def test_regenerate_article_sync_without_site_marks_failed(db_session, admin):
     assert "удал" in article.error_text
 
 
-def test_regenerate_article_task_defaults_to_images_only(
-        db_session, batch, site, monkeypatch):
-    """Найдено код-ревью коммита 415456b: app/api/article_batches.py (эндпоинт
-    /articles/{id}/regenerate-images, Task 7 плана, ещё не обновлён) ставит
-    эту задачу в очередь как
-    regenerate_article_images.apply_async(args=[article.id], ...) — БЕЗ
-    text/images/cover. Без дефолтов на самой celery-задаче regenerate_article
-    (не на regenerate_article_sync — та вызывается явно и её параметры
-    остаются обязательными) реальный воркер падал бы с TypeError ДО входа в
-    regenerate_article_sync (до _start_job), и article.regenerating никогда
-    не сбросился бы в False — статья зависла бы в перегенерации навсегда.
-    Вызываем саму декорированную задачу напрямую (не .apply_async/.delay) —
-    так @celery_app.task выполняет тело синхронно, без брокера, — чтобы
-    проверить дефолты именно на уровне вызываемой задачи, а не только
-    regenerate_article_sync."""
-    from app.tasks import regenerate_article
-
-    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
-                      status="published", remote_page_id=501,
-                      regenerating=True)
-    db_session.add(article)
-    db_session.commit()
-
-    calls = []
-    monkeypatch.setattr(
-        "app.tasks.regenerate_article_for",
-        lambda db, a, s, sc, job_id, **kwargs: calls.append(kwargs))
-    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
-    monkeypatch.setattr("app.tasks.SessionLocal", lambda: db_session)
-
-    regenerate_article(article.id)   # без kwargs — как зовёт старый эндпоинт
-    # Не db_session.refresh(article): задача сама вызывает db.close() в
-    # finally (db здесь — тот же объект db_session, подменённый через
-    # SessionLocal выше), а close() выкидывает объект из identity map —
-    # refresh() на уже не persistent-инстансе бросает InvalidRequestError.
-    # Сессия при этом пригодна для новых запросов (close() не разрушает сам
-    # объект Session), поэтому перечитываем статью заново через get().
-    article = db_session.get(Article, article.id)
-
-    assert calls == [{"text": False, "images": True, "cover": False}]
-    assert article.regenerating is False
-
-
 # --- находка №3 ревью Task 17: generate_topics_sync не защищена от
 # повторного запуска — без защиты каждый повтор задваивает Article.
 

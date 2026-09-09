@@ -28,7 +28,7 @@ class ArticleOut(BaseModel):
     status: str
     remote_url: str
     error_text: str
-    images_regenerating: bool
+    regenerating: bool
 
 
 class BatchOut(BaseModel):
@@ -53,7 +53,7 @@ def _to_out(db: Session, batch: ArticleBatch) -> BatchOut:
         error_text=batch.error_text, created_at=batch.created_at,
         articles=[ArticleOut(id=a.id, topic=a.topic, title=a.title, status=a.status,
                              remote_url=a.remote_url, error_text=a.error_text,
-                             images_regenerating=a.images_regenerating)
+                             regenerating=a.regenerating)
                   for a in batch.articles],
     )
 
@@ -353,9 +353,9 @@ def regenerate_images(article_id: int, db: Session = Depends(get_db),
     # Тот же приём анти-гонки, что у run()/retry() выше: перевод в
     # "выполняется" синхронно, до apply_async, — второй быстрый клик
     # увидит уже True и не поставит вторую задачу в очередь.
-    if article.images_regenerating:
+    if article.regenerating:
         raise HTTPException(400, "перегенерация картинок уже выполняется")
-    article.images_regenerating = True
+    article.regenerating = True
     db.commit()
 
     image_count = db.scalar(

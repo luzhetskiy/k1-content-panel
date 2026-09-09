@@ -145,7 +145,7 @@ class ArticleBuilder:
         positions = sorted({i.position for i in content_images})
         if not positions:
             self.article.error_text = "нет картинок для перегенерации"
-            self.article.images_regenerating = False
+            self.article.regenerating = False
             self.db.commit()
             return
 
@@ -248,7 +248,7 @@ class ArticleBuilder:
             # из _image_prompt при построении промптов) улетело бы наружу
             # необработанным: ArticleImage-строки и body_html уже
             # закоммичены построчно внутри цикла выше, но
-            # images_regenerating остался бы True навсегда — статья
+            # regenerating остался бы True навсегда — статья
             # выглядела бы «зависшей» в перегенерации без какой-либо
             # ошибки в error_text, хотя часть (или все) картинок уже
             # реально перегенерированы. Формат сообщения тот же, что и у
@@ -260,10 +260,10 @@ class ArticleBuilder:
             self.article.error_text = (
                 f"перегенерировано {updated}/{len(positions)} картинок, "
                 f"ошибка: {exc}")
-            self.article.images_regenerating = False
+            self.article.regenerating = False
             self.db.commit()
             return
-        self.article.images_regenerating = False
+        self.article.regenerating = False
         self.db.commit()
 
     # --- шаги ---

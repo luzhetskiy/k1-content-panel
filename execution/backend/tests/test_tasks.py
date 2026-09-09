@@ -345,7 +345,7 @@ def test_regenerate_article_images_sync_calls_builder_and_finishes_job(
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
                       status="published", remote_page_id=501,
-                      images_regenerating=True)
+                      regenerating=True)
     db_session.add(article)
     db_session.commit()
 
@@ -359,7 +359,7 @@ def test_regenerate_article_images_sync_calls_builder_and_finishes_job(
     db_session.refresh(article)
 
     assert len(calls) == 1 and calls[0][0] == article.id and calls[0][1] == site.id
-    assert article.images_regenerating is False
+    assert article.regenerating is False
 
 
 def test_regenerate_article_images_sync_skips_non_published_article(
@@ -367,7 +367,7 @@ def test_regenerate_article_images_sync_skips_non_published_article(
     from app.tasks import regenerate_article_images_sync
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
-                      status="draft", images_regenerating=True)
+                      status="draft", regenerating=True)
     db_session.add(article)
     db_session.commit()
 
@@ -378,7 +378,7 @@ def test_regenerate_article_images_sync_skips_non_published_article(
     db_session.refresh(article)
 
     assert calls == []
-    assert article.images_regenerating is False
+    assert article.regenerating is False
 
 
 def test_regenerate_article_images_sync_ai_config_error_marks_failed(
@@ -388,7 +388,7 @@ def test_regenerate_article_images_sync_ai_config_error_marks_failed(
 
     article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
                       status="published", remote_page_id=501,
-                      images_regenerating=True)
+                      regenerating=True)
     db_session.add(article)
     db_session.commit()
 
@@ -401,7 +401,7 @@ def test_regenerate_article_images_sync_ai_config_error_marks_failed(
     regenerate_article_images_sync(db_session, article.id)
     db_session.refresh(article)
 
-    assert article.images_regenerating is False
+    assert article.regenerating is False
     assert "ключ" in article.error_text
     assert article.status == "published"   # перегенерация не трогает статус статьи
 
@@ -414,14 +414,14 @@ def test_regenerate_article_images_sync_without_site_marks_failed(db_session, ad
     db_session.commit()
     article = Article(batch_id=orphan_batch.id, site_id=None, topic="Тема",
                       status="published", remote_page_id=501,
-                      images_regenerating=True)
+                      regenerating=True)
     db_session.add(article)
     db_session.commit()
 
     regenerate_article_images_sync(db_session, article.id)
     db_session.refresh(article)
 
-    assert article.images_regenerating is False
+    assert article.regenerating is False
     assert "удал" in article.error_text
 
 

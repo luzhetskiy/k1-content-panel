@@ -56,7 +56,7 @@ export default function BatchPage() {
   useEffect(() => {
     if (!batch) return
     const active = batch.status === 'topics_pending' || batch.status === 'running'
-      || batch.articles.some(a => a.status === 'generating' || a.images_regenerating)
+      || batch.articles.some(a => a.status === 'generating' || a.regenerating)
     if (!active) return
     const timer = setInterval(load, 5000)
     return () => clearInterval(timer)
@@ -224,8 +224,8 @@ export default function BatchPage() {
                                     load()
                                   }}>
                         <Button size="small" icon={<ReloadOutlined />}
-                                loading={r.images_regenerating}
-                                disabled={r.images_regenerating}>
+                                loading={r.regenerating}
+                                disabled={r.regenerating}>
                           Перегенерировать картинки
                         </Button>
                       </Popconfirm>

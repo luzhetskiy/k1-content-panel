@@ -146,7 +146,7 @@ def test_new_article_and_image_default_regeneration_fields(db_session, admin):
     db_session.add(image)
     db_session.commit()
 
-    assert article.images_regenerating is False
+    assert article.regenerating is False
     assert image.version == 1
 
 

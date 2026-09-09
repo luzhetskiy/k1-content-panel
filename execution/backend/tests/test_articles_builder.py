@@ -528,7 +528,7 @@ def test_regenerate_content_images_uploads_versioned_files_and_updates_body(
     assert paths[0] in prepared.article.body_html
     assert paths[1] in prepared.article.body_html
 
-    prepared.article.images_regenerating = True
+    prepared.article.regenerating = True
     db_session.commit()
     builder.regenerate_content_images()
 
@@ -545,7 +545,7 @@ def test_regenerate_content_images_uploads_versioned_files_and_updates_body(
     ]
     assert site_client.updated_text == (501, prepared.article.body_html)
     assert prepared.article.status == "published"
-    assert prepared.article.images_regenerating is False
+    assert prepared.article.regenerating is False
     assert prepared.article.error_text == ""
 
     images = db_session.query(ArticleImage).filter_by(
@@ -582,7 +582,7 @@ def test_regenerate_content_images_partial_failure_keeps_old_path_for_failed_pos
     assert paths[0] not in prepared.article.body_html   # позиция 1 успела обновиться
     assert paths[1] in prepared.article.body_html        # позиция 2 осталась старой
     assert "перегенерировано 1/2" in prepared.article.error_text
-    assert prepared.article.images_regenerating is False
+    assert prepared.article.regenerating is False
     assert prepared.article.status == "published"
 
 
@@ -590,14 +590,14 @@ def test_regenerate_content_images_without_existing_images_records_error(db_sess
     prepared.article.status = "published"
     prepared.article.body_html = "<p>текст без картинок</p>"
     prepared.article.remote_page_id = 501
-    prepared.article.images_regenerating = True
+    prepared.article.regenerating = True
     db_session.commit()
 
     builder = make_builder(db_session, prepared)
     builder.regenerate_content_images()
 
     assert "нет картинок" in prepared.article.error_text
-    assert prepared.article.images_regenerating is False
+    assert prepared.article.regenerating is False
     assert builder.image_generator.calls == []
 
 
@@ -627,7 +627,7 @@ def test_regenerate_content_images_site_push_failure_keeps_progress_and_clears_f
     """Находка ревью Task 4: update_page_text может упасть (SiteAPIError —
     сеть/токен сайта) уже ПОСЛЕ того, как новые ArticleImage и замена путей
     в body_html построчно закоммичены циклом. Без внешнего try/except это
-    исключение улетело бы наружу необработанным, и images_regenerating
+    исключение улетело бы наружу необработанным, и regenerating
     остался бы True навсегда — статья выглядела бы «зависшей». Уже
     закоммиченный прогресс (обе позиции успели перегенерироваться до
     падения push'а) не должен теряться."""
@@ -648,13 +648,13 @@ def test_regenerate_content_images_site_push_failure_keeps_progress_and_clears_f
     builder = make_builder(db_session, prepared, site_client, body=body)
     builder.build()
 
-    prepared.article.images_regenerating = True
+    prepared.article.regenerating = True
     db_session.commit()
     builder.regenerate_content_images()
 
     assert "перегенерировано 2/2" in prepared.article.error_text
     assert "HTTP 500" in prepared.article.error_text
-    assert prepared.article.images_regenerating is False
+    assert prepared.article.regenerating is False
     assert prepared.article.status == "published"
 
     new_path_1 = image_filename(prepared.article.id, 1, version=2)
@@ -721,7 +721,7 @@ def test_regenerate_content_images_prompt_failure_keeps_llmusage_for_earlier_pos
 
     builder.regenerate_content_images()
 
-    assert prepared.article.images_regenerating is False
+    assert prepared.article.regenerating is False
     assert "перегенерировано 0/2" in prepared.article.error_text
     assert "HTTP 500" in prepared.article.error_text
 

@@ -314,7 +314,7 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
     """В отличие от retry_article_sync, ни одна ветка здесь НЕ трогает
     article.status — картинки перегенерируются у уже опубликованной статьи,
     её страница на сайте продолжает существовать и работать независимо от
-    исхода этого раунда. Отказ отражается только в images_regenerating/
+    исхода этого раунда. Отказ отражается только в regenerating/
     error_text. Это намеренное расхождение с соседней retry_article_sync
     (которая как раз обязана переводить статью в "failed"), а не пропуск —
     не «чинить» по аналогии с ней."""
@@ -325,13 +325,13 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
         # попасть только если статус успел измениться между постановкой
         # задачи и её реальным стартом. Тихий выход, тот же стиль, что и у
         # generate_topics_sync при повторной постановке той же задачи.
-        article.images_regenerating = False
+        article.regenerating = False
         db.commit()
         return
 
     site = db.get(Site, article.site_id) if article.site_id is not None else None
     if site is None:
-        article.images_regenerating = False
+        article.regenerating = False
         article.error_text = "сайт этой статьи удалён — перегенерация картинок невозможна"
         db.commit()
         job = _start_job(db, "regenerate_article_images", None, None,
@@ -344,13 +344,13 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
     try:
         regenerate_images_for(db, article, site, open_site_client(db, site), job.id)
     except SoftTimeLimitExceeded:
-        article.images_regenerating = False
+        article.regenerating = False
         article.error_text = "превышен лимит времени задачи"
         db.commit()
         _finish_job(db, job, "failed", article.error_text)
         return
     except (AIConfigError, SecretDecryptionError) as exc:
-        article.images_regenerating = False
+        article.regenerating = False
         article.error_text = str(exc)
         db.commit()
         _finish_job(db, job, "failed", str(exc))
@@ -362,7 +362,7 @@ def regenerate_article_images_sync(db, article_id: int) -> None:
     # regenerate_images_for целиком (без реального билдера), не может
     # проверить, что флаг снимается, а сама обёртка перестаёт быть источником
     # истины о собственном состоянии.
-    article.images_regenerating = False
+    article.regenerating = False
     db.commit()
     _finish_job(db, job, "ok" if not article.error_text else "failed", article.error_text)
 

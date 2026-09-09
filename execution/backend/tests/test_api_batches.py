@@ -310,7 +310,7 @@ def test_regenerate_images_starts_task_for_published_article(manager_client, db_
     assert resp.status_code == 200
     assert any(entry[:2] == ("regenerate", article.id) for entry in no_celery)
     db_session.refresh(article)
-    assert article.images_regenerating is True
+    assert article.regenerating is True
 
 
 def test_regenerate_images_time_limit_counts_distinct_positions_not_rows(
@@ -365,16 +365,16 @@ def test_regenerate_images_twice_dispatches_once(manager_client, db_session, sit
     assert len(dispatches) == 1
 
 
-def test_batch_detail_includes_images_regenerating_flag(manager_client, db_session,
+def test_batch_detail_includes_regenerating_flag(manager_client, db_session,
                                                          site_id, no_celery):
     from app.models.article import Article
 
     batch_id = manager_client.post("/api/article-batches",
                                    json={"site_id": site_id, "count": 1}).json()["id"]
     article = Article(batch_id=batch_id, site_id=site_id, topic="Тема",
-                      status="published", remote_page_id=501, images_regenerating=True)
+                      status="published", remote_page_id=501, regenerating=True)
     db_session.add(article)
     db_session.commit()
 
     body = manager_client.get(f"/api/article-batches/{batch_id}").json()
-    assert body["articles"][0]["images_regenerating"] is True
+    assert body["articles"][0]["regenerating"] is True

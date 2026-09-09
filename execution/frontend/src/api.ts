@@ -90,7 +90,7 @@ export interface SyncResult {
 }
 export interface ArticleRow {
   id: number; topic: string; title: string; status: string
-  remote_url: string; error_text: string; images_regenerating: boolean
+  remote_url: string; error_text: string; regenerating: boolean
 }
 export interface Batch {
   id: number; site_id: number; site_name: string; site_domain: string

@@ -266,6 +266,41 @@ class ArticleBuilder:
         self.article.regenerating = False
         self.db.commit()
 
+    def regenerate_text(self) -> None:
+        """Перегенерирует заголовок (только отображаемый), текст и meta уже
+        опубликованной статьи. slug/URL НЕ пересчитывается — в отличие от
+        _apply_body() (используется только при первой публикации), здесь
+        нет строки `self.article.slug = slugify(...)`: у API сайта нет
+        метода переименования уже созданной страницы (directions/2026-09-09-
+        article-full-regeneration-design.md, §4), и самостоятельный пересчёт
+        articles_url_prefix + slugify(new_title) без факта переименования на
+        сайте рассинхронизировал бы article.remote_url с реальным адресом.
+
+        Не трогает картинки (ни контентные, ни обложку) — новый body_html
+        продолжает ссылаться на текущие файлы (_current_content_image_paths),
+        а не на v1-заглушки, актуальные только для самой первой сборки."""
+        try:
+            self._require_synced_reference()
+            body = self._generate_body(image_paths=self._current_content_image_paths())
+            self.article.title = body.get("title") or self.article.topic
+            self.article.body_html = body["html"]
+            self.article.meta_description = body.get("meta_description", "")
+            self.article.meta_keywords = body.get("meta_keywords", "")
+            self.db.commit()
+            self.site_client.update_page_text(
+                self.article.remote_page_id, self.article.body_html,
+                title=self.article.title, meta_description=self.article.meta_description,
+                meta_keywords=self.article.meta_keywords)
+        except (LLMError, PromptError, SiteAPIError) as exc:
+            self.db.rollback()
+            self.article.error_text = str(exc)
+            self.article.regenerating = False
+            self.db.commit()
+            return
+        self.article.error_text = ""
+        self.article.regenerating = False
+        self.db.commit()
+
     # --- шаги ---
 
     def _set_status(self, status: str) -> None:

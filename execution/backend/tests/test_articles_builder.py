@@ -64,8 +64,9 @@ class FakeSiteClient:
         self.cover = (page_id, filename)
         return "/media/staticpages/images/" + filename
 
-    def update_page_text(self, page_id, html):
-        self.updated_text = (page_id, html)
+    def update_page_text(self, page_id, html, *, title=None, meta_description=None,
+                         meta_keywords=None):
+        self.updated_text = (page_id, html, title, meta_description, meta_keywords)
         return {"id": page_id}
 
 
@@ -590,7 +591,7 @@ def test_regenerate_content_images_uploads_versioned_files_and_updates_body(
         "cp-article-1-1.webp", "cp-article-1-2.webp",
         "cp-article-1-1_v2.webp", "cp-article-1-2_v2.webp",
     ]
-    assert site_client.updated_text == (501, prepared.article.body_html)
+    assert site_client.updated_text == (501, prepared.article.body_html, None, None, None)
     assert prepared.article.status == "published"
     assert prepared.article.regenerating is False
     assert prepared.article.error_text == ""
@@ -774,3 +775,101 @@ def test_regenerate_content_images_prompt_failure_keeps_llmusage_for_earlier_pos
 
     usage = db_session.query(LlmUsage).filter_by(job_run_id=job.id, kind="text").all()
     assert len(usage) == 1
+
+
+# --- Перегенерация текста уже опубликованной статьи ---
+
+
+def test_regenerate_text_updates_title_body_meta_without_changing_slug(db_session, prepared):
+    site_client = FakeSiteClient()
+    body = {
+        "title": "Чем утеплить каркасный дом", "html": "<p>первая версия</p>",
+        "meta_description": "старое описание", "meta_keywords": "старое",
+    }
+    builder = make_builder(db_session, prepared, site_client, body=body)
+    builder.build()
+    old_slug = prepared.article.slug
+    assert old_slug == "chem-uteplit-karkasnyy-dom"
+
+    prepared.article.regenerating = True
+    db_session.commit()
+    new_body = {
+        "title": "Совсем другой заголовок", "html": "<p>новая версия текста</p>",
+        "meta_description": "новое описание", "meta_keywords": "новое",
+    }
+    builder.text_client = FakeTextClient(new_body)
+    builder.regenerate_text()
+
+    assert prepared.article.title == "Совсем другой заголовок"
+    assert prepared.article.body_html == "<p>новая версия текста</p>"
+    assert prepared.article.meta_description == "новое описание"
+    assert prepared.article.meta_keywords == "новое"
+    assert prepared.article.slug == old_slug   # URL закреплён — не пересчитывается
+    assert prepared.article.regenerating is False
+    assert prepared.article.error_text == ""
+    assert site_client.updated_text == (
+        501, "<p>новая версия текста</p>", "Совсем другой заголовок",
+        "новое описание", "новое")
+
+
+def test_regenerate_text_uses_current_not_v1_image_paths(db_session, prepared):
+    """Если картинки уже перегенерировались (сейчас v2), свежий текст обязан
+    сослаться на v2, а не откатить разметку на v1 (§1 дизайн-документа
+    2026-09-09-article-full-regeneration)."""
+    from app.models.article import ArticleImage
+
+    builder = make_builder(db_session, prepared)
+    db_session.add(ArticleImage(
+        article_id=prepared.article.id, kind="content", position=1, version=2,
+        remote_path="/media/uploads/article-img/cp-article-1-1_v2.webp"))
+    db_session.commit()
+
+    builder.regenerate_text()
+
+    prompt = builder.text_client.prompts[0]
+    assert "/media/uploads/article-img/cp-article-1-1_v2.webp" in prompt
+
+
+def test_regenerate_text_failure_does_not_touch_existing_text(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+    old_title = prepared.article.title
+    old_body = prepared.article.body_html
+
+    def broken_json(prompt):
+        from app.ai.text import LLMError
+        raise LLMError("модель вернула не JSON: извините")
+
+    builder.text_client.complete_json = broken_json
+    builder.regenerate_text()
+
+    assert prepared.article.title == old_title
+    assert prepared.article.body_html == old_body
+    assert "не JSON" in prepared.article.error_text
+    assert prepared.article.regenerating is False
+
+
+def test_regenerate_text_site_push_failure_is_reported(db_session, prepared):
+    class BrokenPushClient(FakeSiteClient):
+        def update_page_text(self, page_id, html, **kwargs):
+            from app.sites.client import SiteAPIError
+            raise SiteAPIError("обновление страницы: HTTP 500: сорвался сайт")
+
+    builder = make_builder(db_session, prepared, BrokenPushClient())
+    builder.build()
+    builder.regenerate_text()
+
+    assert "сорвался сайт" in prepared.article.error_text
+    assert prepared.article.regenerating is False
+
+
+def test_regenerate_text_requires_synced_reference(db_session, prepared):
+    prepared.site.reference_html = ""
+    prepared.site.reference_images = 0
+    db_session.commit()
+    builder = make_builder(db_session, prepared)
+
+    builder.regenerate_text()
+
+    assert "синхронизирован" in prepared.article.error_text
+    assert prepared.article.regenerating is False

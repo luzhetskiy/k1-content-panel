@@ -812,6 +812,31 @@ def test_regenerate_text_updates_title_body_meta_without_changing_slug(db_sessio
         "новое описание", "новое")
 
 
+def test_regenerate_text_empty_title_keeps_current_title_not_topic(db_session, prepared):
+    """Находка ревью Task 4: фолбэк на body.get("title") or self.article.topic
+    (скопированный из _apply_body, где он корректен для первой публикации)
+    в regenerate_text() был бы багом — здесь topic - черновая внутренняя
+    формулировка темы, а не заголовок. Если модель вернёт пустой/отсутствующий
+    "title" (_generate_body проверяет только наличие "html"), заголовок
+    обязан остаться прежним (текущим, уже опубликованным), а не откатиться
+    на topic."""
+    builder = make_builder(db_session, prepared)
+    builder.build()
+    old_title = prepared.article.title
+    assert old_title != prepared.article.topic
+
+    empty_title_body = {
+        "title": "", "html": "<p>новый текст</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder.text_client = FakeTextClient(empty_title_body)
+    builder.regenerate_text()
+
+    assert prepared.article.title == old_title
+    assert prepared.article.title != prepared.article.topic
+    assert prepared.article.body_html == "<p>новый текст</p>"
+
+
 def test_regenerate_text_uses_current_not_v1_image_paths(db_session, prepared):
     """Если картинки уже перегенерировались (сейчас v2), свежий текст обязан
     сослаться на v2, а не откатить разметку на v1 (§1 дизайн-документа
@@ -857,10 +882,24 @@ def test_regenerate_text_site_push_failure_is_reported(db_session, prepared):
 
     builder = make_builder(db_session, prepared, BrokenPushClient())
     builder.build()
+    old_title = prepared.article.title
+    old_body = prepared.article.body_html
+
+    new_body = {
+        "title": "Заголовок, который не должен долететь", "html": "<p>текст не должен долететь</p>",
+        "meta_description": "", "meta_keywords": "",
+    }
+    builder.text_client = FakeTextClient(new_body)
     builder.regenerate_text()
 
     assert "сорвался сайт" in prepared.article.error_text
     assert prepared.article.regenerating is False
+    # commit происходит только ПОСЛЕ успешного push — раз push упал,
+    # db.rollback() обязан вернуть title/body_html к тому, что ещё лежит в
+    # БД (старому), а не оставить в БД уже присвоенные, но не отправленные
+    # на сайт новые значения (иначе БД и сайт разошлись бы).
+    assert prepared.article.title == old_title
+    assert prepared.article.body_html == old_body
 
 
 def test_regenerate_text_requires_synced_reference(db_session, prepared):

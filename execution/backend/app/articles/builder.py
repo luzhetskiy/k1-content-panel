@@ -282,15 +282,34 @@ class ArticleBuilder:
         try:
             self._require_synced_reference()
             body = self._generate_body(image_paths=self._current_content_image_paths())
-            self.article.title = body.get("title") or self.article.topic
+            # Фолбэк на self.article.title (текущий, уже живой заголовок), а
+            # НЕ на self.article.topic (как в _apply_body): topic — черновая
+            # внутренняя формулировка темы, годная как фолбэк только при
+            # самой первой публикации, когда никакого другого заголовка ещё
+            # не существует. Здесь же есть уже опубликованный, полноценный
+            # заголовок — если модель вдруг вернёт пустой/отсутствующий
+            # "title" (_generate_body проверяет только наличие "html"), не
+            # опускаем страницу до сырого topic молча, а просто оставляем
+            # прежний заголовок как есть.
+            self.article.title = body.get("title") or self.article.title
             self.article.body_html = body["html"]
             self.article.meta_description = body.get("meta_description", "")
             self.article.meta_keywords = body.get("meta_keywords", "")
-            self.db.commit()
             self.site_client.update_page_text(
                 self.article.remote_page_id, self.article.body_html,
                 title=self.article.title, meta_description=self.article.meta_description,
                 meta_keywords=self.article.meta_keywords)
+            # commit после успешного push, а не до (в отличие от
+            # regenerate_content_images) — здесь нет резюмируемого прогресса
+            # построчно, retry всегда пересчитывает текст заново с нуля, так
+            # что ранний commit не спасает никакую работу, только оставляет
+            # БД и сайт в разных состояниях при отказе push. db.rollback()
+            # ниже поэтому не no-op: он реально возвращает article.title/
+            # body_html/meta_* к тому, что ещё лежит в БД (SQLAlchemy
+            # экспайрит объекты при rollback — атрибуты перечитаются из БД
+            # при следующем обращении), так что при отказе push БД и сайт
+            # остаются согласованы на СТАРОМ тексте, а не расходятся.
+            self.db.commit()
         except (LLMError, PromptError, SiteAPIError) as exc:
             self.db.rollback()
             self.article.error_text = str(exc)

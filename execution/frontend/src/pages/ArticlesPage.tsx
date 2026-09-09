@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Alert, Button, Card, Form, InputNumber, Modal, Select, Space, Table, Tag, Typography,
+  Alert, Button, Card, Form, InputNumber, Modal, Select, Space, Table, Tag, Typography, message,
 } from 'antd'
-import { PlusOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { Batch, SiteBrief, createBatch, getBatches, getSites } from '../api'
+import {
+  Batch, RegenerateParts, SiteBrief, createBatch, getBatches, getSites, regenerateArticle,
+} from '../api'
 
 const STATUS: Record<string, { color: string; label: string }> = {
   topics_pending: { color: 'processing', label: 'Подбираются темы' },
@@ -28,11 +30,21 @@ function pluralizeImages(n: number): string {
   return 'картинок'
 }
 
+const REGEN_OPTIONS: { label: string; parts: RegenerateParts }[] = [
+  { label: 'Только текст', parts: { text: true } },
+  { label: 'Только картинки внутри', parts: { images: true } },
+  { label: 'Только обложку', parts: { cover: true } },
+  { label: 'Все картинки и обложку', parts: { images: true, cover: true } },
+  { label: 'Все', parts: { text: true, images: true, cover: true } },
+]
+
 export default function ArticlesPage() {
   const navigate = useNavigate()
   const [batches, setBatches] = useState<Batch[]>([])
   const [sites, setSites] = useState<SiteBrief[]>([])
   const [open, setOpen] = useState(false)
+  const [regenOpen, setRegenOpen] = useState(false)
+  const [regenId, setRegenId] = useState<number | null>(null)
   const [form] = Form.useForm()
 
   const load = () => getBatches().then(setBatches)
@@ -75,9 +87,14 @@ export default function ArticlesPage() {
     <>
       <Space style={{ marginBottom: 16, justifyContent: 'space-between', width: '100%' }}>
         <Typography.Title level={4} style={{ margin: 0 }}>Партии статей</Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
-          Новая партия
-        </Button>
+        <Space>
+          <Button icon={<ReloadOutlined />} onClick={() => setRegenOpen(true)}>
+            Перегенерировать по ID
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
+            Новая партия
+          </Button>
+        </Space>
       </Space>
 
       <Card styles={{ body: { padding: 0 } }}>
@@ -143,6 +160,30 @@ export default function ArticlesPage() {
             />
           )}
         </Form>
+      </Modal>
+
+      <Modal open={regenOpen} onCancel={() => setRegenOpen(false)} footer={null}
+             title="Перегенерировать статью по ID">
+        <Space direction="vertical" style={{ width: '100%' }} size={16}>
+          <InputNumber min={1} style={{ width: '100%' }} placeholder="ID статьи"
+                      value={regenId} onChange={setRegenId} />
+          <Space wrap>
+            {REGEN_OPTIONS.map(({ label, parts }) => (
+              <Button key={label} disabled={!regenId}
+                      onClick={async () => {
+                        if (!regenId) return
+                        try {
+                          await regenerateArticle(regenId, parts)
+                          message.success(`Запущено для статьи №${regenId}`)
+                        } catch {
+                          // Ошибка уже показана перехватчиком api.ts.
+                        }
+                      }}>
+                {label}
+              </Button>
+            ))}
+          </Space>
+        </Space>
       </Modal>
     </>
   )

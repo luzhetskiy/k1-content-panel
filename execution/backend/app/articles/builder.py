@@ -328,6 +328,44 @@ class ArticleBuilder:
         self.article.regenerating = False
         self.db.commit()
 
+    def regenerate_cover(self) -> None:
+        """Перегенерирует обложку страницы (teaser_image) уже опубликованной
+        статьи. В отличие от контентных картинок обложка не встроена в
+        body_html — сайт хранит её как одно поле страницы, которое
+        set_page_cover просто перезаписывает. Версия в имени файла нужна
+        только для истории/аудита стоимости в ArticleImage, а не чтобы
+        сохранить старую обложку видимой где-то ещё — она и так перестаёт
+        быть видимой на сайте в момент замены поля, независимо от имени
+        файла (в отличие от контентных картинок, которых может быть
+        несколько одновременно видимых в теле статьи — там версия в имени
+        нужна, чтобы не перезаписать файл, который всё ещё показан)."""
+        try:
+            style = (self.site.cover_style_prompt if self.site.cover_mode == "prompt"
+                     else "в стиле уже существующих обложек этого сайта")
+            prompt = self._image_prompt("cover", {"topic": self.article.topic,
+                                                  "cover_style": style})
+            result = self.image_generator.generate(
+                prompt=prompt, size=self.image_params["size"],
+                quality=self.image_params["quality"], crop=COVER_CROP)
+            covers = self.db.query(ArticleImage).filter_by(
+                article_id=self.article.id, kind="cover").all()
+            next_version = max((c.version for c in covers), default=0) + 1
+            filename = image_filename(self.article.id, 0, version=next_version)
+            self.site_client.set_page_cover(self.article.remote_page_id, result.data, filename)
+            self.db.add(ArticleImage(article_id=self.article.id, kind="cover", position=0,
+                                     version=next_version, prompt=prompt,
+                                     remote_path=filename, cost=result.cost))
+            self._record_usage("image", 0, 0, result.cost)
+        except (LLMError, ImageError, SiteAPIError, PromptError) as exc:
+            self.db.rollback()
+            self.article.error_text = f"ошибка: {exc}"
+            self.article.regenerating = False
+            self.db.commit()
+            return
+        self.article.error_text = ""
+        self.article.regenerating = False
+        self.db.commit()
+
     # --- шаги ---
 
     def _set_status(self, status: str) -> None:

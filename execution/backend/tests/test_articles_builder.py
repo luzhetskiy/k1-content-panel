@@ -942,3 +942,57 @@ def test_regenerate_text_requires_synced_reference(db_session, prepared):
 
     assert "синхронизирован" in prepared.article.error_text
     assert prepared.article.regenerating is False
+
+
+# --- Перегенерация обложки уже опубликованной статьи ---
+
+
+def test_regenerate_cover_uploads_new_version_and_keeps_history(db_session, prepared):
+    from app.models.article import ArticleImage
+
+    site_client = FakeSiteClient()
+    builder = make_builder(db_session, prepared, site_client)
+    builder.build()
+    assert site_client.cover == (501, "cp-article-1-cover.webp")
+
+    prepared.article.regenerating = True
+    db_session.commit()
+    builder.regenerate_cover()
+
+    assert site_client.cover == (501, "cp-article-1-cover_v2.webp")
+    covers = db_session.query(ArticleImage).filter_by(
+        article_id=prepared.article.id, kind="cover").order_by(ArticleImage.version).all()
+    assert [(c.version, c.remote_path) for c in covers] == [
+        (1, "cp-article-1-cover.webp"), (2, "cp-article-1-cover_v2.webp"),
+    ]
+    assert prepared.article.regenerating is False
+    assert prepared.article.error_text == ""
+
+
+def test_regenerate_cover_does_not_touch_content_images_or_body(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+    old_body = prepared.article.body_html
+
+    builder.regenerate_cover()
+
+    assert prepared.article.body_html == old_body
+
+
+def test_regenerate_cover_failure_clears_flag_and_reports_error(db_session, prepared):
+    builder = make_builder(db_session, prepared)
+    builder.build()
+
+    class BrokenCoverClient(FakeSiteClient):
+        def set_page_cover(self, page_id, image_bytes, filename):
+            from app.sites.client import SiteAPIError
+            raise SiteAPIError("загрузка обложки: HTTP 500: сорвался сайт")
+
+    builder.site_client = BrokenCoverClient()
+    prepared.article.regenerating = True
+    db_session.commit()
+
+    builder.regenerate_cover()
+
+    assert "сорвался сайт" in prepared.article.error_text
+    assert prepared.article.regenerating is False

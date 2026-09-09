@@ -7,7 +7,11 @@ const KIND: Record<string, string> = {
   generate_topics: 'Подбор тем',
   run_batch: 'Генерация партии',
   retry_article: 'Повтор статьи',
+  // regenerate_article_images — старое имя job kind (до переименования
+  // Celery-задачи в app/tasks.py на regenerate_article, Task 6 плана);
+  // оставлено для уже существующих в БД исторических job-записей.
   regenerate_article_images: 'Перегенерация картинок',
+  regenerate_article: 'Перегенерация статьи',
 }
 
 export default function JobsPage() {

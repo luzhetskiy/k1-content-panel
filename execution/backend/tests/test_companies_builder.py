@@ -65,8 +65,79 @@ def _builder(db, company, site, text_client=None, site_client=None, scrape=None,
     )
 
 
-def test_logo_filename_uses_company_prefix():
-    assert logo_filename(7) == "cp-company-7-logo.webp"
+def test_logo_filename_keeps_extension_of_real_content():
+    """Раньше имя всегда было .webp независимо от содержимого: сайт отдавал
+    SVG с Content-Type image/webp, и браузер такой логотип не рисовал
+    (9 битых логотипов на проде)."""
+    assert logo_filename(7, ".svg") == "cp-company-7-logo.svg"
+    assert logo_filename(7, ".jpg") == "cp-company-7-logo.jpg"
+
+
+def test_relocate_logo_uses_extension_from_content_type(db_session, site, company):
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               builder_logo_src="https://dom.ru/logo"))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.svg"))
+    response = Mock(content=b"<svg/>", headers={"Content-Type": "image/svg+xml"})
+    response.raise_for_status = Mock()
+    with patch("app.companies.builder.requests.get", return_value=response):
+        _builder(db_session, company, site, site_client=site_client).build()
+
+    assert site_client.upload_file.call_args.args[1] == "cp-company-7-logo.svg"
+
+
+def test_relocate_logo_drops_data_uri_placeholder(db_session, site, company):
+    """lazy-load-сайты кладут в src прозрачную заглушку data:image/svg+xml. Раньше он
+    уезжал в страницу как логотип — прозрачный прямоугольник вместо
+    картинки (компании 280 и 312 на проде)."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(
+        company_id=company.id, builder_name="ООО Дом",
+        builder_logo_src="data:image/svg+xml;utf8,<svg><rect/></svg>"))
+    db_session.commit()
+
+    with patch("app.companies.builder.requests.get") as get:
+        _builder(db_session, company, site).build()
+
+    get.assert_not_called()
+    assert company.info.builder_logo_src == ""
+
+
+def test_relocate_logo_rejects_non_image_content_type(db_session, site, company):
+    """Заглушка антибота или HTML страницы ошибки вместо картинки — заливать
+    нельзя, уходим на запасную подпись названием."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               builder_logo_src="https://dom.ru/logo"))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555), upload_file=Mock())
+    response = Mock(content=b"<html>", headers={"Content-Type": "text/html"})
+    response.raise_for_status = Mock()
+    with patch("app.companies.builder.requests.get", return_value=response):
+        _builder(db_session, company, site, site_client=site_client).build()
+
+    site_client.upload_file.assert_not_called()
+    assert company.info.builder_logo_src == ""
 
 
 def test_slug_for_company_transliterates_name_and_city():
@@ -355,7 +426,7 @@ def test_relocate_logo_downloads_and_reuploads_external_url(db_session, site, co
     )
     builder = _builder(db_session, company, site, site_client=site_client)
 
-    fake_response = Mock(content=b"logo-bytes")
+    fake_response = Mock(content=b"logo-bytes", headers={"Content-Type": "image/webp"})
     fake_response.raise_for_status = Mock()
     with patch("app.companies.builder.requests.get", return_value=fake_response) as get:
         builder.build()
@@ -393,7 +464,7 @@ def test_build_finds_logo_on_company_site_when_yandex_data_has_none(db_session, 
     logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
     builder = _builder(db_session, company, site, site_client=site_client, logo_fn=logo_fn)
 
-    fake_response = Mock(content=b"logo-bytes")
+    fake_response = Mock(content=b"logo-bytes", headers={"Content-Type": "image/webp"})
     fake_response.raise_for_status = Mock()
     with patch("app.companies.builder.requests.get", return_value=fake_response) as get:
         builder.build()
@@ -425,7 +496,7 @@ def test_build_does_not_search_company_site_when_yandex_logo_already_present(
     logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
     builder = _builder(db_session, company, site, logo_fn=logo_fn)
 
-    fake_response = Mock(content=b"logo-bytes")
+    fake_response = Mock(content=b"logo-bytes", headers={"Content-Type": "image/webp"})
     fake_response.raise_for_status = Mock()
     with patch("app.companies.builder.requests.get", return_value=fake_response):
         builder.build()

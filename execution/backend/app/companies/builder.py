@@ -26,11 +26,22 @@ logger = logging.getLogger(__name__)
 AI_TEXT_FIELDS = ("about_company", "specialization", "projects_services", "benefits")
 
 
-def logo_filename(company_id: int) -> str:
+# Расширение определяется по Content-Type ответа, а не по URL: у логотипов
+# Яндекса (avatars.mds.yandex.net/.../XXXL) расширения в пути нет вовсе.
+_EXT_BY_CONTENT_TYPE = {
+    "image/svg+xml": ".svg",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def logo_filename(company_id: int, ext: str) -> str:
     """Префикс cp-company- — та же причина, что и у cp-article- в
     app/articles/builder.py: не пересекаться со старой CLI-схемой
     (execution/step3_fill_template.py грузит логотипы как logo-{name})."""
-    return f"cp-company-{company_id}-logo.webp"
+    return f"cp-company-{company_id}-logo{ext}"
 
 
 def slug_for_company(name: str, city: str) -> str:
@@ -141,23 +152,41 @@ class CompanyBuilder:
             info.builder_logo_src = logo_url
             self.db.commit()
 
+    def _upload_logo(self, info: CompanyInfo, data: bytes, ext: str) -> None:
+        info.builder_logo_src = self.site_client.upload_file(
+            data, logo_filename(self.company.id, ext), SERVICE_IMG_DIR)
+        self.db.commit()
+
     def _relocate_logo(self, info: CompanyInfo) -> None:
         """Внешний логотип перезаливается на целевой сайт — иначе карточка
         зависит от чужого хостинга. Уже локальные пути (/media/...) не трогаем."""
-        if not info.builder_logo_src or info.builder_logo_src.startswith("/"):
+        src = info.builder_logo_src or ""
+        # data: — не логотип, а lazy-load-заглушка (прозрачный <svg>):
+        # скачать её нечем, а оставить как есть означает прозрачный
+        # прямоугольник вместо логотипа на странице.
+        if src.startswith("data:"):
+            info.builder_logo_src = ""
+            self.db.commit()
+            return
+        if not src or src.startswith("/"):
             return
         try:
-            response = requests.get(info.builder_logo_src, timeout=12)
+            response = requests.get(src, timeout=12)
             response.raise_for_status()
         except requests.RequestException:
             logger.warning(
                 "не удалось перезалить логотип компании %s (%s) — оставляю "
-                "внешнюю ссылку как есть", self.company.id, info.builder_logo_src)
+                "внешнюю ссылку как есть", self.company.id, src)
             return
-        filename = logo_filename(self.company.id)
-        info.builder_logo_src = self.site_client.upload_file(
-            response.content, filename, SERVICE_IMG_DIR)
-        self.db.commit()
+        ctype = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        ext = _EXT_BY_CONTENT_TYPE.get(ctype)
+        if ext is None:
+            logger.warning("логотип компании %s: неизвестный тип %r — пропускаю",
+                           self.company.id, ctype)
+            info.builder_logo_src = ""
+            self.db.commit()
+            return
+        self._upload_logo(info, response.content, ext)
 
     def _info_dict(self, info: CompanyInfo) -> dict:
         return {f: getattr(info, f) for f in YANDEX_INFO_FIELDS + AI_TEXT_FIELDS}

@@ -22,6 +22,20 @@ def _set_text(tag, text: str) -> None:
     tag.append(NavigableString(text))
 
 
+def _hide(tag) -> None:
+    """Лишний элемент блока логотипа скрывается, а не удаляется: шаблон
+    сайта синхронизируется с уже собранной страницы (app/companies/
+    reference.py), поэтому удалённый элемент исчез бы из шаблона навсегда —
+    и следующая компания осталась бы либо без картинки, либо без подписи."""
+    tag["hidden"] = ""
+    if tag.name == "img" and "src" in tag.attrs:
+        # без src скрытая картинка не делает лишнего запроса; пустой src
+        # (как в шаблоне по умолчанию) сохранять в data-src незачем
+        if tag["src"]:
+            tag["data-src"] = tag["src"]
+        del tag["src"]
+
+
 def fill_builder_template(template: str, info: dict) -> str:
     soup = BeautifulSoup(template, "html.parser")
     _remove_comments(soup)
@@ -61,13 +75,16 @@ def fill_builder_template(template: str, info: dict) -> str:
         if logo_img:
             logo_img["src"] = logo_src
             logo_img["alt"] = logo_alt
+            del logo_img["hidden"]
         if logo_text_span:
-            logo_text_span.decompose()
+            _set_text(logo_text_span, "")
+            _hide(logo_text_span)
     else:
         if logo_img:
-            logo_img.decompose()
+            _hide(logo_img)
         if logo_text_span:
             _set_text(logo_text_span, name)
+            del logo_text_span["hidden"]
 
     main_title = soup.find(id="builder-main-title")
     if main_title:

@@ -1,3 +1,5 @@
+from bs4 import BeautifulSoup
+
 from app.companies.template import fill_builder_template
 
 TEMPLATE = """
@@ -74,7 +76,10 @@ def test_fill_renders_contact_line():
 def test_fill_uses_text_logo_fallback_when_no_logo_src():
     html = fill_builder_template(TEMPLATE, _info(builder_logo_src=""))
     assert "ООО Дом" in html
-    assert 'id="builder-logo"' not in html   # img-логотип убран
+    # img-логотип теперь не удаляется, а скрывается (см. Task 11) — иначе
+    # он навсегда исчезает из шаблона при следующей синхронизации эталона
+    soup = BeautifulSoup(html, "html.parser")
+    assert soup.find(id="builder-logo").has_attr("hidden")
 
 
 def test_fill_renders_multiple_contacts():
@@ -106,3 +111,44 @@ def test_fill_handles_non_list_contacts_gracefully():
     info = _info(contacts={"address": "x"})
     html = fill_builder_template(TEMPLATE, info)   # не должно бросить исключение (AttributeError)
     assert "builder-contact-1" not in html
+
+
+def test_fill_keeps_both_logo_elements_when_logo_present():
+    """Ключевая защита от петли: шаблон синхронизируется с уже собранной
+    страницы (sync_builder_reference), поэтому удалённый при сборке элемент
+    исчезал бы из шаблона навсегда. На проде так потерялась запасная подпись
+    у всех 13 сайтов."""
+    html = fill_builder_template(TEMPLATE, _info(builder_logo_src="/media/logo.svg"))
+    assert 'id="builder-logo"' in html
+    assert 'id="builder-logo-text"' in html
+
+
+def test_fill_shows_logo_and_hides_text_when_logo_present():
+    html = fill_builder_template(TEMPLATE, _info(builder_logo_src="/media/logo.svg"))
+    soup = BeautifulSoup(html, "html.parser")
+    assert soup.find(id="builder-logo").get("src") == "/media/logo.svg"
+    assert not soup.find(id="builder-logo").has_attr("hidden")
+    assert soup.find(id="builder-logo-text").has_attr("hidden")
+    assert soup.find(id="builder-logo-text").get_text(strip=True) == ""
+
+
+def test_fill_shows_name_and_hides_image_when_logo_missing():
+    """Страница 338 на bolars.ru (Рубкофф) осталась без логотипа И без
+    названия — картинку удалили, а подписи в шаблоне не было."""
+    html = fill_builder_template(TEMPLATE, _info(builder_logo_src=""))
+    soup = BeautifulSoup(html, "html.parser")
+    assert soup.find(id="builder-logo-text").get_text(strip=True) == "ООО Дом"
+    assert not soup.find(id="builder-logo-text").has_attr("hidden")
+    logo = soup.find(id="builder-logo")
+    assert logo.has_attr("hidden")
+    assert not logo.has_attr("src")
+
+
+def test_fill_hidden_image_keeps_reference_src_in_data_attribute():
+    """Скрытая картинка без src не делает запроса, но исходный адрес из
+    эталона сохраняется — чтобы разметка эталона оставалась осмысленной."""
+    template = TEMPLATE.replace('<img id="builder-logo" src="" alt="">',
+                                '<img id="builder-logo" src="/media/ref.svg" alt="">')
+    html = fill_builder_template(template, _info(builder_logo_src=""))
+    soup = BeautifulSoup(html, "html.parser")
+    assert soup.find(id="builder-logo").get("data-src") == "/media/ref.svg"

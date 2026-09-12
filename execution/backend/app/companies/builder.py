@@ -134,6 +134,12 @@ class CompanyBuilder:
         # YANDEX_INFO_FIELDS не трогаются — только четыре текстовых поля.
         for field in AI_TEXT_FIELDS:
             setattr(info, field, ai_fields[field])
+        # Пятое поле необязательное: промпт в БД мог остаться старым
+        # (seed_prompts не перезаписывает уже сохранённый), и тогда работает
+        # прежний запас — city_prepositional or city_name в шаблоне.
+        prepositional = str(ai_fields.get("city_prepositional") or "").strip()
+        if prepositional:
+            info.city_prepositional = prepositional
         # Сырой текст сайта — для отладки качества промпта, аналог raw_html
         # в старой схеме (execution/db.py). Ничего не читает его обратно.
         info.scraped_text = scraped_text
@@ -206,11 +212,14 @@ class CompanyBuilder:
         else:
             name = info.builder_name or self.company.name
             city = info.city_name or self.company.region
+            # Slug остаётся в именительном падеже: он детерминирован и уже
+            # опубликован, смена ломала бы обновление существующих страниц.
             slug = slug_for_company(name, city)
+            city_in = info.city_prepositional or city
             page = self.site_client.create_page(
-                title=f"{name} — {self.company.category_normalized} в {city}",
+                title=f"{name} — {self.company.category_normalized} в {city_in}",
                 url=f"/s/{slug}/", html=html, parent_id=self.site.builder_parent_id,
-                meta_description=f"{name} — {self.company.category_normalized} в {city}. "
+                meta_description=f"{name} — {self.company.category_normalized} в {city_in}. "
                                  f"Контакты, услуги, отзывы.",
             )
             self.company.remote_page_id = page["id"]

@@ -645,3 +645,58 @@ def test_build_updates_existing_teaser_when_teaser_id_already_set(db_session, si
     site_client.create_teaser.assert_not_called()
     assert company.status == "published"
     assert company.teaser_id == 555
+
+
+def test_city_prepositional_is_taken_from_model_when_returned(db_session, site, company):
+    """«Рубкофф — монтаж в Москва» в заголовке и «Картек-Строй в рабочий
+    посёлок Нахабино» в карточке — city_prepositional не заполнялся нигде."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", address="ул. Ленина 1",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    text_client = Mock(complete_json=Mock(return_value=JsonResult(
+        data={"about_company": "Строим дома.", "specialization": "Каркас.",
+              "projects_services": "50 проектов.", "benefits": "Гарантия.",
+              "city_prepositional": "Самаре"},
+        tokens_prompt=10, tokens_completion=20, cost=0.01)))
+    site_client = Mock(create_page=Mock(return_value={"id": 99, "url": "/s/x/"}),
+                       create_teaser=Mock(return_value=555), upload_file=Mock())
+
+    _builder(db_session, company, site, text_client=text_client,
+             site_client=site_client).build()
+
+    assert company.info.city_prepositional == "Самаре"
+    assert "в Самаре" in site_client.create_page.call_args.kwargs["title"]
+
+
+def test_build_survives_response_without_city_prepositional(db_session, site, company):
+    """Промпт в БД у прода старый (seed_prompts его не перезаписывает), поэтому
+    поле обязано остаться необязательным."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               city_name="Самара", address="ул. Ленина 1",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(create_page=Mock(return_value={"id": 99, "url": "/s/x/"}),
+                       create_teaser=Mock(return_value=555), upload_file=Mock())
+    _builder(db_session, company, site, site_client=site_client).build()
+
+    assert company.status == "published"
+    assert "в Самара" in site_client.create_page.call_args.kwargs["title"]
+
+
+def test_slug_stays_nominative_regardless_of_prepositional(db_session, site, company):
+    """Slug детерминирован и уже опубликован — менять его нельзя, иначе
+    пересборка создаст дубль страницы вместо обновления."""
+    assert slug_for_company("ООО Дом", "Самара") == "ooo-dom-samara"

@@ -32,6 +32,23 @@ def _wb_bytes_with_phone(rows: list[list]) -> bytes:
     return buf.getvalue()
 
 
+def _make_workbook(rows: list[list]) -> bytes:
+    """Полный заголовок выгрузки Яндекс.Карт — тот же, что и в
+    test_companies_import_xlsx.py. Заголовок не должен расходиться между
+    тестовыми файлами, иначе они проверяют разные структуры файла."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Запрос", "Название", "Категории", "Регион", "Город", "Полный адрес",
+              "Мобильные", "Немобильные", "Сайт", "Email с сайта компании", "График",
+              "Широта", "Долгота", "Оценок", "Отзывов", "Рейтинг",
+              "Логотип", "Все телефоны"])
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def test_import_creates_candidates(db_session):
     data = _wb_bytes([["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5]])
     imp = import_file(db_session, data, "builders.xlsx", uploaded_by_id=None)
@@ -132,3 +149,36 @@ def test_commit_failure_is_logged(db_session, monkeypatch, caplog):
     assert imp.error_message == "не удалось сохранить компании — проверьте данные файла"
     assert "import_file" in caplog.text
     assert "builders.xlsx" in caplog.text
+
+
+def test_import_stores_working_hours_and_logo(db_session):
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "+7 846 000-00-00", "https://dom.ru", "i@dom.ru",
+         "ежедневно, 09:00–18:00", 53.2, 50.1, 10, 5, 4.8,
+         "https://avatars.mds.yandex.net/get-altay/1/XXXL", ""],
+    ])
+    import_file(db_session, data, "yandex.xlsx", uploaded_by_id=None)
+    candidate = db_session.query(CompanyCandidate).one()
+    assert candidate.working_hours == "ежедневно, 09:00–18:00"
+    assert candidate.logo_url == "https://avatars.mds.yandex.net/get-altay/1/XXXL"
+
+
+def test_reimport_updates_working_hours_and_logo(db_session):
+    """Повторная загрузка того же файла — это и есть способ добрать новые
+    колонки у уже импортированных кандидатов (см. §7 спеки)."""
+    old = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "+7 846 000-00-00", "https://dom.ru", "i@dom.ru",
+         "", 53.2, 50.1, 10, 5, 4.8, "", ""],
+    ])
+    import_file(db_session, old, "old.xlsx", uploaded_by_id=None)
+    new = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "+7 846 000-00-00", "https://dom.ru", "i@dom.ru",
+         "пн-пт 10:00–19:00", 53.2, 50.1, 10, 5, 4.8, "https://logo/1", ""],
+    ])
+    import_file(db_session, new, "new.xlsx", uploaded_by_id=None)
+    candidate = db_session.query(CompanyCandidate).one()
+    assert candidate.working_hours == "пн-пт 10:00–19:00"
+    assert candidate.logo_url == "https://logo/1"

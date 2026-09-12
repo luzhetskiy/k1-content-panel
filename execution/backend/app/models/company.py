@@ -54,6 +54,11 @@ class CompanyCandidate(Base):
     address: Mapped[str] = mapped_column(String(500), default="")
     phone: Mapped[str] = mapped_column(String(500), default="")
     email: Mapped[str] = mapped_column(String(200), default="")
+    # Text, не String(n): значения приходят из чужого файла без гарантии
+    # длины сверху, а ALTER TABLE на проде уже расширяли из-за этого для
+    # phone (см. 9864d416847d_widen_company_candidate_phone).
+    working_hours: Mapped[str] = mapped_column(Text, default="")
+    logo_url: Mapped[str] = mapped_column(Text, default="")
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     reviews_count: Mapped[int] = mapped_column(Integer, default=0)
     ratings_count: Mapped[int] = mapped_column(Integer, default=0)

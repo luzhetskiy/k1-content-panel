@@ -63,6 +63,8 @@ def import_file(db: Session, data: bytes, filename: str,
         existing.address = row.address
         existing.phone = row.phone
         existing.email = row.email
+        existing.working_hours = row.working_hours
+        existing.logo_url = row.logo_url
         existing.rating = row.rating
         existing.reviews_count = row.reviews_count
         existing.ratings_count = row.ratings_count

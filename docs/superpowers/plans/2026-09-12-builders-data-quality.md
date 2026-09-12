@@ -48,7 +48,7 @@ execution/backend/
 ## Как запускать
 
 ```bash
-cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution
+cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution
 docker compose run --rm --no-deps backend pytest -q          # весь бэкенд-регресс, SQLite in-memory
 docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v   # один файл
 docker compose up -d postgres redis                           # для проверки миграции на реальном Postgres
@@ -125,7 +125,7 @@ def test_file_without_new_columns_still_imports():
 
 - [ ] **Step 3: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_import_xlsx.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_import_xlsx.py -v`
 Expected: FAIL — `AttributeError: 'ParsedRow' object has no attribute 'working_hours'`
 
 - [ ] **Step 4: Добавить колонки в `COLUMNS` и поля в `ParsedRow`**
@@ -184,7 +184,7 @@ COLUMNS = {
 
 - [ ] **Step 6: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_import_xlsx.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_import_xlsx.py -v`
 Expected: PASS, все тесты файла зелёные
 
 - [ ] **Step 7: Коммит**
@@ -248,7 +248,7 @@ def test_reimport_updates_working_hours_and_logo(db_session):
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_imports.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_imports.py -v`
 Expected: FAIL — `AttributeError: type object 'CompanyCandidate' has no attribute 'working_hours'`
 
 - [ ] **Step 3: Добавить колонки в модель**
@@ -256,9 +256,22 @@ Expected: FAIL — `AttributeError: type object 'CompanyCandidate' has no attrib
 В `app/models/company.py`, класс `CompanyCandidate`, после поля `email`:
 
 ```python
-    working_hours: Mapped[str] = mapped_column(String(300), default="")
-    logo_url: Mapped[str] = mapped_column(String(500), default="")
+    working_hours: Mapped[str] = mapped_column(Text, default="")
+    logo_url: Mapped[str] = mapped_column(Text, default="")
 ```
+
+`Text`, а не `String(n)`, сознательно. Значения приходят из чужого файла, длину
+которого мы не контролируем: в разобранной выгрузке самый длинный «График» —
+110 символов, но гарантий сверху нет, а цена промаха несоразмерна. `import_file`
+(`app/companies/imports.py:73-82`) ловит любое исключение коммита, откатывает
+транзакцию целиком и помечает импорт `failed` с текстом «не удалось сохранить
+компании — проверьте данные файла»: одна длинная строка убила бы весь файл, а
+понять причину по этому сообщению нельзя. Тесты идут на SQLite, который
+`VARCHAR(n)` не проверяет, — такой отказ не поймал бы ни один тест, только прод.
+Прецедент уже был: `phone` расширяли миграцией
+`9864d416847d_widen_company_candidate_phone`.
+
+`Text` уже импортирован в модуль (его использует `CompanyImport.error_message`).
 
 - [ ] **Step 4: Копировать новые поля в upsert**
 
@@ -271,13 +284,13 @@ Expected: FAIL — `AttributeError: type object 'CompanyCandidate' has no attrib
 
 - [ ] **Step 5: Запустить тест и убедиться, что проходит**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_imports.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_imports.py -v`
 Expected: PASS
 
 - [ ] **Step 6: Сгенерировать миграцию**
 
 ```bash
-cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution
+cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution
 docker compose up -d postgres
 docker compose run --rm backend alembic revision -m "candidate working hours logo"
 ```
@@ -288,10 +301,10 @@ docker compose run --rm backend alembic revision -m "candidate working hours log
 ```python
 def upgrade() -> None:
     op.add_column("company_candidates",
-                  sa.Column("working_hours", sa.String(length=300),
+                  sa.Column("working_hours", sa.Text(),
                             nullable=False, server_default=""))
     op.add_column("company_candidates",
-                  sa.Column("logo_url", sa.String(length=500),
+                  sa.Column("logo_url", sa.Text(),
                             nullable=False, server_default=""))
 
 
@@ -305,7 +318,7 @@ def downgrade() -> None:
 
 - [ ] **Step 7: Применить миграцию на реальном Postgres**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm backend alembic upgrade head`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm backend alembic upgrade head`
 Expected: `Running upgrade b5a9c64497ea -> <new>, candidate working hours logo`
 
 - [ ] **Step 8: Коммит**
@@ -327,7 +340,9 @@ git commit -m "feat: working_hours и logo_url у кандидата компа�
 - [ ] **Step 1: Написать падающий тест**
 
 ```python
-from app.companies.info import build_info_from_candidate, refresh_info_from_candidate
+from app.companies.info import (
+    build_info_from_candidate, refresh_info_from_candidate, split_phone,
+)
 from app.models.company import Company, CompanyCandidate, CompanyInfo
 
 
@@ -404,6 +419,41 @@ def test_refresh_is_noop_for_company_without_candidate(db_session):
     assert company.info.builder_name == "Старое имя"
 
 
+def test_split_phone_keeps_department_note_out_of_href():
+    """Живой дефект: на stroybaza-moscow.ru страница «Академик Строй» отдаёт
+    href="tel:+7 (495) 106-30-40 Отдел продаж". Пометка нужна человеку в
+    подписи, но в href попадать не должна."""
+    href, text = split_phone("+7 (495) 106-30-40 Отдел продаж")
+    assert href == "+74951063040"
+    assert text == "+7 (495) 106-30-40 Отдел продаж"
+
+
+def test_split_phone_takes_first_of_several_numbers():
+    href, text = split_phone("+7 (495) 157-12-25,+7 (495) 502-79-69 Отдел продаж")
+    assert href == "+74951571225"
+    assert text == "+7 (495) 157-12-25"
+
+
+def test_split_phone_returns_empty_href_for_unparseable_value():
+    """Номер, который не привести к 10-11 цифрам, — не номер: пустой href
+    лучше ссылки, по которой нельзя позвонить."""
+    href, text = split_phone("звоните через сайт")
+    assert href == ""
+    assert text == "звоните через сайт"
+
+
+def test_build_info_splits_phone(db_session):
+    candidate = _candidate(phone="+7 (846) 277-06-05 Приёмная")
+    db_session.add(candidate)
+    company = Company(site_id=1, site_key="dom.ru", name="ООО Дом")
+    db_session.add(company)
+    db_session.commit()
+
+    info = build_info_from_candidate(company, candidate)
+    assert info.contacts[0]["phone_tel"] == "+78462770605"
+    assert info.contacts[0]["phone_text"] == "+7 (846) 277-06-05 Приёмная"
+
+
 def test_refresh_does_not_wipe_city_prepositional(db_session):
     """city_prepositional и builder_logo_alt источника у кандидата не имеют —
     обновление не должно их обнулять."""
@@ -423,7 +473,7 @@ def test_refresh_does_not_wipe_city_prepositional(db_session):
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_info.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_info.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.companies.info'`
 
 - [ ] **Step 3: Создать модуль**
@@ -438,16 +488,40 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.companies.info'`
 
 from __future__ import annotations
 
+import re
+
 from sqlalchemy.orm import Session
 
 from app.models.company import Company, CompanyCandidate, CompanyInfo
+from app.sites.client import normalize_phone
+
+
+_PHONE_LEAD = re.compile(r"^[\d\s()+\-]+")
+
+
+def split_phone(raw: str) -> tuple[str, str]:
+    """(href, подпись) для блока контактов.
+
+    В выгрузке телефон приходит с пометкой отдела («+7 (495) 106-30-40 Отдел
+    продаж», 700 строк из 5214) и иногда несколькими номерами через запятую.
+    Раньше сырое значение уходило и в href, и в подпись — на проде 15 из 63
+    собранных компаний получили ссылку вида
+    `href="tel:+7 (495) 106-30-40 Отдел продаж"` (проверено на живой странице
+    stroybaza-moscow.ru/s/akademik-stroy-moskva/). В href должен попадать
+    только набираемый номер; пометка остаётся в подписи, она информативна.
+    """
+    first = re.split(r"[,;/|]", raw or "", maxsplit=1)[0].strip()
+    match = _PHONE_LEAD.match(first)
+    digits = normalize_phone(match.group(0)) if match else ""
+    return (f"+{digits}" if digits else ""), first
 
 
 def _fields_from_candidate(candidate: CompanyCandidate) -> dict:
+    phone_tel, phone_text = split_phone(candidate.phone)
     contact = {
         "address": candidate.address,
-        "phone_tel": candidate.phone,
-        "phone_text": candidate.phone,
+        "phone_tel": phone_tel,
+        "phone_text": phone_text,
         "email": candidate.email,
         "working_hours": candidate.working_hours,
         "site_url": candidate.website_raw,
@@ -496,8 +570,8 @@ def refresh_info_from_candidate(db: Session, company: Company) -> None:
 
 - [ ] **Step 4: Запустить тест и убедиться, что проходит**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_info.py -v`
-Expected: PASS, 5 тестов
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_info.py -v`
+Expected: PASS, 9 тестов
 
 - [ ] **Step 5: Переключить API партий на новый модуль**
 
@@ -526,7 +600,7 @@ Expected: пусто (иначе импорт оставить)
 
 - [ ] **Step 6: Запустить регресс API партий**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_api_company_batches.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_api_company_batches.py -v`
 Expected: PASS
 
 - [ ] **Step 7: Коммит**
@@ -578,7 +652,7 @@ def test_build_refreshes_info_from_candidate(db_session, site, company):
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_build_refreshes_info_from_candidate -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_build_refreshes_info_from_candidate -v`
 Expected: FAIL — `KeyError: 'working_hours'`
 
 - [ ] **Step 3: Вызвать обновление в начале сборки**
@@ -598,7 +672,7 @@ from app.companies.info import refresh_info_from_candidate
 
 - [ ] **Step 4: Запустить тест и убедиться, что проходит**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: PASS, весь файл зелёный
 
 - [ ] **Step 5: Коммит**
@@ -704,7 +778,7 @@ def test_relocate_logo_rejects_non_image_content_type(db_session, site, company)
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: FAIL — `TypeError: logo_filename() takes 1 positional argument but 2 were given`
 
 - [ ] **Step 3: Переписать `logo_filename` и добавить таблицу расширений**
@@ -770,7 +844,7 @@ def logo_filename(company_id: int, ext: str) -> str:
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: PASS
 
 - [ ] **Step 6: Коммит**
@@ -832,7 +906,7 @@ def test_logo_candidate_is_falsy_when_nothing_found():
 
 - [ ] **Step 3: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: FAIL — `ImportError: cannot import name 'LogoCandidate'`
 
 - [ ] **Step 4: Ввести тип и переименовать функции**
@@ -927,7 +1001,7 @@ find_logo/find_logo_in_scope из execution/step2_find_svg_logos.py, допол�
 
 - [ ] **Step 7: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py tests/test_companies_builder.py -v`
 Expected: PASS
 
 - [ ] **Step 8: Коммит**
@@ -993,7 +1067,7 @@ def test_find_logo_takes_first_url_from_srcset():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: FAIL — первый тест возвращает `https://sip-lider.ru/local/templates/s/images/lazy.svg`
 
 - [ ] **Step 3: Ввести чтение ленивых атрибутов**
@@ -1041,7 +1115,7 @@ def _find_img_in_scope(scope, base_url: str) -> str:
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: PASS
 
 - [ ] **Step 6: Коммит**
@@ -1091,7 +1165,7 @@ def test_find_logo_skips_images_inside_partner_block():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: FAIL — первый тест возвращает `""`
 
 - [ ] **Step 3: Заменить фильтр**
@@ -1132,7 +1206,7 @@ def _find_img_in_scope(scope, base_url: str) -> str:
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: PASS
 
 - [ ] **Step 6: Коммит**
@@ -1193,7 +1267,7 @@ def test_find_logo_ignores_inline_svg_in_partner_block():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: FAIL — `assert '<svg' in ''`
 
 - [ ] **Step 3: Реализовать поиск inline-svg**
@@ -1230,7 +1304,7 @@ def _find_svg_in_scope(scope) -> str:
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Написать падающий тест заливки svg билдером**
@@ -1263,7 +1337,7 @@ def test_build_uploads_inline_svg_logo_as_file(db_session, site, company):
 
 - [ ] **Step 6: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_build_uploads_inline_svg_logo_as_file -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_build_uploads_inline_svg_logo_as_file -v`
 Expected: FAIL — `upload_file` не вызывался
 
 - [ ] **Step 7: Заливать разметку в `_find_logo`**
@@ -1285,7 +1359,7 @@ Expected: FAIL — `upload_file` не вызывался
 
 - [ ] **Step 8: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py tests/test_companies_builder.py -v`
 Expected: PASS
 
 - [ ] **Step 9: Коммит**
@@ -1327,7 +1401,7 @@ def test_fetch_company_logo_retries_after_cookie_stub():
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py::test_fetch_company_logo_retries_after_cookie_stub -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py::test_fetch_company_logo_retries_after_cookie_stub -v`
 Expected: FAIL — `AttributeError: <module 'app.companies.logo'> does not have the attribute 'requests.Session'` либо `session.get.call_count == 1`
 
 - [ ] **Step 3: Реализовать повтор**
@@ -1359,7 +1433,7 @@ def fetch_company_logo(website: str) -> LogoCandidate:
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_logo.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Коммит**
@@ -1426,7 +1500,7 @@ def test_fill_hidden_image_keeps_reference_src_in_data_attribute():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_template.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_template.py -v`
 Expected: FAIL — `AttributeError: 'NoneType' object has no attribute 'get'` (элемент удалён)
 
 - [ ] **Step 3: Заменить удаление на скрытие**
@@ -1472,7 +1546,7 @@ def _hide(tag) -> None:
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_template.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_template.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Коммит**
@@ -1565,7 +1639,7 @@ _VALID_TEMPLATE = (
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_reference.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_reference.py -v`
 Expected: FAIL — `assert 'builder-logo-text' in []`
 
 - [ ] **Step 3: Расширить контракт**
@@ -1611,7 +1685,7 @@ def _missing_markers(html: str) -> list[str]:
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_reference.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_reference.py -v`
 Expected: PASS
 
 - [ ] **Step 6: Коммит**
@@ -1663,7 +1737,7 @@ def test_update_teaser_sends_working_hours_as_description():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_sites_client.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_sites_client.py -v`
 Expected: FAIL — `TypeError: create_teaser() got an unexpected keyword argument 'description'`
 
 - [ ] **Step 3: Добавить параметр в клиент**
@@ -1678,7 +1752,7 @@ Expected: FAIL — `TypeError: create_teaser() got an unexpected keyword argumen
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_sites_client.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_sites_client.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Написать падающие тесты билдера**
@@ -1727,7 +1801,7 @@ def test_build_fails_readably_when_address_is_empty(db_session, site, company):
 
 - [ ] **Step 6: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: FAIL — `KeyError: 'description'`
 
 - [ ] **Step 7: Передать график и проверить адрес**
@@ -1759,7 +1833,7 @@ Expected: FAIL — `KeyError: 'description'`
 
 - [ ] **Step 8: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py tests/test_sites_client.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py tests/test_sites_client.py -v`
 Expected: PASS
 
 - [ ] **Step 9: Коммит**
@@ -1838,7 +1912,7 @@ def test_slug_stays_nominative_regardless_of_prepositional(db_session, site, com
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: FAIL — `assert '' == 'Самаре'`
 
 - [ ] **Step 3: Принимать необязательное поле от модели**
@@ -1896,7 +1970,7 @@ city_prepositional — название города «{{ city }}» в пред�
 
 - [ ] **Step 6: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py tests/test_ai_prompts.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py tests/test_ai_prompts.py -v`
 Expected: PASS
 
 - [ ] **Step 7: Коммит**
@@ -1942,7 +2016,7 @@ def test_remote_url_has_no_double_slash_for_base_url_with_trailing_slash(db_sess
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_remote_url_has_no_double_slash_for_base_url_with_trailing_slash -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py::test_remote_url_has_no_double_slash_for_base_url_with_trailing_slash -v`
 Expected: FAIL — `assert 'https://s.ru//s/ooo-dom-samara/' == 'https://s.ru/s/ooo-dom-samara/'`
 
 - [ ] **Step 3: Срезать слэш базы в обеих ветках `_create_page`**
@@ -1957,7 +2031,7 @@ Expected: FAIL — `assert 'https://s.ru//s/ooo-dom-samara/' == 'https://s.ru/s/
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_companies_builder.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Коммит**
@@ -2029,7 +2103,7 @@ def test_reports_page_without_logo_image():
 
 - [ ] **Step 2: Запустить тесты и убедиться, что падают**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_fix_builder_reference.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_fix_builder_reference.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'fix_builder_reference_logo_text'`
 
 - [ ] **Step 3: Написать скрипт**
@@ -2110,7 +2184,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_fix_builder_reference.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_fix_builder_reference.py -v`
 Expected: PASS, 4 теста
 
 - [ ] **Step 5: Коммит**
@@ -2168,7 +2242,7 @@ def test_reset_skips_companies_migrated_from_cli(db_session):
 
 - [ ] **Step 2: Запустить тест и убедиться, что падает**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_reset_builder_logos.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_reset_builder_logos.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'reset_builder_logos'`
 
 - [ ] **Step 3: Написать скрипт**
@@ -2218,12 +2292,12 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Запустить тесты и убедиться, что проходят**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q tests/test_reset_builder_logos.py -v`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q tests/test_reset_builder_logos.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Полный регресс бэкенда**
 
-Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm --no-deps backend pytest -q`
+Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/.claude/worktrees/builders-data-quality/execution && docker compose run --rm --no-deps backend pytest -q`
 Expected: PASS, падений нет
 
 - [ ] **Step 6: Коммит**

@@ -1,6 +1,17 @@
 x-backend-base: &backend-base
   build: ./backend
   restart: unless-stopped
+  # Контейнеры резолвят имена по цепочке «127.0.0.11 (внутренний резолвер
+  # docker) → 127.0.0.53 (systemd-resolved хоста) → внешний сервер», и падает
+  # именно второй хоп: в журнале хоста отказы «failed to query external DNS
+  # server ... i/o timeout» 3, 4, 7, 8 и 10 сентября 2026 — по доменам сайтов и
+  # по routerai.ru. Один такой отказ 2026-09-03 убил партию 25 (см.
+  # directions/2026-09-12-batch-resilience-design.md §1). Явные адреса убирают
+  # systemd-resolved из цепочки целиком. Первым Яндекс — хост в РФ.
+  # Откатывается удалением этих двух строк.
+  dns:
+    - 77.88.8.8
+    - 1.1.1.1
   volumes:
     - media:/app/media
   environment: &backend-env

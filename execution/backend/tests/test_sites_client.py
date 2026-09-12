@@ -2,6 +2,7 @@ import json
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from app.sites.client import SiteAPIError, SiteClient, normalize_phone, slugify
 
@@ -490,3 +491,95 @@ def test_update_teaser_raises_on_error():
             assert False, "ожидался SiteAPIError"
         except SiteAPIError:
             pass
+
+
+# --- сетевые сбои ниже уровня HTTP (дизайн 2026-09-12, §4) ---
+#
+# Необёрнутый requests.ConnectionError 2026-09-03 убил партию 25: он не входит
+# ни в один except по пути (ArticleBuilder.build → run_batch_sync), задача
+# Celery упала необработанной, и 23 статьи навсегда остались в draft. Здесь
+# проверяется, что клиент отдаёт такие сбои как SiteAPIError — контракт,
+# который докстринги SiteAPIError и модуля обещали с самого начала.
+
+def test_network_failure_on_get_becomes_site_api_error(monkeypatch):
+    def boom(*args, **kwargs):
+        raise requests.ConnectionError(
+            "NameResolutionError: Failed to resolve 'tedwood-uzel.ru'")
+
+    monkeypatch.setattr("app.sites.client.requests.get", boom)
+    with pytest.raises(SiteAPIError) as err:
+        SiteClient("https://x.ru", "tok").list_section_pages("/blog/")
+
+    # status_code=None — именно этот признак докстринг SiteAPIError обещает для
+    # сетевых сбоев: по нему вызывающий код отличает их от HTTP-ошибок.
+    assert err.value.status_code is None
+    assert "сеть недоступна" in str(err.value)
+    # Тип исключения в тексте: str(ConnectionError) сам по себе малопонятен, а
+    # текст идёт прямо в Article.error_text и показывается менеджеру.
+    assert "ConnectionError" in str(err.value)
+    assert isinstance(err.value.__cause__, requests.ConnectionError)
+
+
+def test_network_failure_on_post_becomes_site_api_error(monkeypatch):
+    def boom(*args, **kwargs):
+        raise requests.Timeout("read timeout")
+
+    monkeypatch.setattr("app.sites.client.requests.post", boom)
+    with pytest.raises(SiteAPIError) as err:
+        SiteClient("https://x.ru", "tok").create_page(
+            "Тема", "/blog/tema/", "<p>текст</p>", 25)
+    assert err.value.status_code is None
+    assert "Timeout" in str(err.value)
+
+
+def test_network_failure_on_patch_becomes_site_api_error(monkeypatch):
+    def boom(*args, **kwargs):
+        raise requests.ConnectionError("connection reset by peer")
+
+    monkeypatch.setattr("app.sites.client.requests.patch", boom)
+    with pytest.raises(SiteAPIError) as err:
+        SiteClient("https://x.ru", "tok").update_page_text(7, "<p>текст</p>")
+    assert err.value.status_code is None
+
+
+def test_network_failure_on_upload_becomes_site_api_error(monkeypatch):
+    """upload_file — единственное место, где _check вызывался без сохранения
+    ответа; проверяем, что обёртка не потерялась именно там."""
+    def boom(*args, **kwargs):
+        raise requests.ConnectionError("dns timeout")
+
+    monkeypatch.setattr("app.sites.client.requests.post", boom)
+    with pytest.raises(SiteAPIError):
+        SiteClient("https://x.ru", "tok").upload_file(b"data", "a.webp", "uploads/x/")
+
+
+def test_mutating_call_is_not_retried_on_network_failure(monkeypatch):
+    """Фиксирует ОТСУТСТВИЕ неявных ретраев у мутирующих вызовов: повтор
+    create_page после ReadTimeout создал бы вторую страницу на сайте (ответ мог
+    не доехать уже после обработки запроса) — именно тот дубль, от которого
+    существует _guard_duplicate_url. Докстринг модуля фиксирует то же решение:
+    «сам клиент ретраи не делает — это ответственность вызывающего кода».
+    Тест стоит здесь, чтобы ретраи не «починили» позже, не заметив риска."""
+    calls = []
+
+    def boom(*args, **kwargs):
+        calls.append(1)
+        raise requests.ConnectionError("dns timeout")
+
+    monkeypatch.setattr("app.sites.client.requests.post", boom)
+    with pytest.raises(SiteAPIError):
+        SiteClient("https://x.ru", "tok").create_page(
+            "Тема", "/blog/tema/", "<p>текст</p>", 25)
+    assert len(calls) == 1
+
+
+def test_http_error_is_not_labelled_as_network_failure():
+    """SiteAPIError из _check не подкласс RequestException — обёртка не должна
+    приклеивать к HTTP-ошибкам текст про недоступную сеть и не должна терять
+    status_code."""
+    response = Mock(ok=False, status_code=404, text="not found")
+    with patch("app.sites.client.requests.get", return_value=response):
+        with pytest.raises(SiteAPIError) as err:
+            SiteClient("https://x.ru", "tok").get_page(7)
+    assert err.value.status_code == 404
+    assert "сеть недоступна" not in str(err.value)

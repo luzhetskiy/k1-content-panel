@@ -112,6 +112,57 @@ class SiteClient:
                                status_code=response.status_code)
         return response
 
+    def _send(self, fn, url: str, what: str, **kwargs):
+        """Единственная точка, через которую клиент ходит в сеть.
+
+        `fn` — `requests.get`/`.post`/`.patch`, передаётся аргументом, а не
+        вызывается здесь по имени метода через `requests.request`: существующие
+        тесты подменяют `app.sites.client.requests.get`/`.post`/`.patch` через
+        monkeypatch, и переход на `requests.request` сломал бы их все сразу,
+        потребовав переписывания тестов, не имеющих отношения к сетевым сбоям.
+        Передача `fn` от места вызова сохраняет эту поверхность подмены:
+        атрибут `requests.get` разрешается в момент исполнения строки вызова,
+        то есть уже после monkeypatch.
+
+        Сетевой сбой ниже уровня HTTP (DNS не разрешился, соединение отвергнуто,
+        таймаут) приходит как `requests.RequestException` и превращается в
+        `SiteAPIError` со `status_code=None` — ровно тот контракт, который
+        докстринги `SiteAPIError` и этого модуля обещают с самого начала, но
+        который до сих пор не исполнял никто.
+
+        Зачем это понадобилось: 2026-09-03 необёрнутый `ConnectionError` (отказ
+        DNS по домену сайта на хосте, см. directions/2026-09-12-batch-
+        resilience-design.md §1-2) убил партию 25. Он не входит ни в один
+        except по пути — ни в список `ArticleBuilder.build()`, ни в список
+        `run_batch_sync` — поэтому задача Celery упала необработанной, и в БД
+        не исправилось НИЧЕГО: партия навсегда осталась в "running", 23 статьи
+        в "draft". Ошибка такого типа обязана быть отказом ОДНОЙ статьи, а не
+        смертью партии; `SiteAPIError` билдер уже умеет обрабатывать именно так.
+
+        Тип исключения попадает в текст: `str()` у `ConnectionError` от отказа
+        DNS сам по себе малопонятен, а этот текст идёт прямо в
+        `Article.error_text` и показывается менеджеру в таблице партии.
+
+        Ретраев здесь нет сознательно — см. докстринг модуля («сам клиент
+        ретраи не делает — это ответственность вызывающего кода»). Для
+        мутирующих вызовов (`create_page`, `create_teaser`, `upload_file`)
+        наивный повтор к тому же опасен: `ReadTimeout` после отправки тела
+        неотличим от «сайт принял и обработал, а ответ не доехал», и повтор
+        создаёт вторую страницу или второй тизер — тот самый дубль, от которого
+        существует `_guard_duplicate_url` (см. тест
+        test_mutating_call_is_not_retried_on_network_failure).
+        """
+        try:
+            response = fn(url, **kwargs)
+        except requests.RequestException as exc:
+            raise SiteAPIError(f"{what}: сеть недоступна: "
+                               f"{type(exc).__name__}: {exc}") from exc
+        # _check поднимает SiteAPIError, а он не подкласс RequestException —
+        # поэтому HTTP-ошибки except выше не перехватывает и текст про
+        # недоступную сеть к ним не приклеивается (см. тест
+        # test_http_error_is_not_labelled_as_network_failure).
+        return self._check(response, what)
+
     def _json(self, response, what: str):
         """Тело успешного ответа не гарантированно JSON: прокси, страница
         логина или обрыв соединения посреди тела отдают 200 с мусором. Без
@@ -129,10 +180,9 @@ class SiteClient:
         раздел отбирается по префиксу url на нашей стороне."""
         pages, page_number = [], 1
         while True:
-            response = self._check(
-                requests.get(f"{self.base_url}{STATICPAGES_PATH}?page={page_number}",
-                             headers=self._headers, timeout=self.timeout),
-                "список страниц")
+            response = self._send(
+                requests.get, f"{self.base_url}{STATICPAGES_PATH}?page={page_number}",
+                "список страниц", headers=self._headers, timeout=self.timeout)
             body = self._json(response, "список страниц")
             pages += [item for item in body.get("results", [])
                       if (item.get("url") or "").startswith(url_prefix)]
@@ -141,10 +191,9 @@ class SiteClient:
             page_number += 1
 
     def get_page(self, page_id: int) -> dict:
-        response = self._check(
-            requests.get(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
-                         headers=self._headers, timeout=self.timeout),
-            f"страница {page_id}")
+        response = self._send(
+            requests.get, f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
+            f"страница {page_id}", headers=self._headers, timeout=self.timeout)
         return self._json(response, f"страница {page_id}")
 
     def create_page(self, title: str, url: str, html: str, parent_id: int | None,
@@ -160,11 +209,11 @@ class SiteClient:
             "meta_description": meta_description,
             "meta_keywords": meta_keywords,
         }
-        response = self._check(
-            requests.post(f"{self.base_url}{STATICPAGES_PATH}", json=payload,
-                          headers={**self._headers, "Content-Type": "application/json"},
-                          timeout=self.timeout),
-            "создание страницы")
+        response = self._send(
+            requests.post, f"{self.base_url}{STATICPAGES_PATH}", "создание страницы",
+            json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
         return self._json(response, "создание страницы")
 
     def update_page_text(self, page_id: int, html: str, *, title: str | None = None,
@@ -192,24 +241,22 @@ class SiteClient:
             payload["meta_description"] = meta_description
         if meta_keywords is not None:
             payload["meta_keywords"] = meta_keywords
-        response = self._check(
-            requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
-                           json=payload,
-                           headers={**self._headers, "Content-Type": "application/json"},
-                           timeout=self.timeout),
-            f"обновление страницы {page_id}")
+        response = self._send(
+            requests.patch, f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
+            f"обновление страницы {page_id}", json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
         return self._json(response, f"обновление страницы {page_id}")
 
     def set_page_cover(self, page_id: int, image_bytes: bytes, filename: str) -> str:
         """teaser_image — ImageField страницы: путём-строкой не задаётся (400),
         только multipart прямо в поле."""
         ctype = mimetypes.guess_type(filename)[0] or "image/webp"
-        response = self._check(
-            requests.patch(f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
-                           headers=self._headers,
-                           files={"teaser_image": (filename, io.BytesIO(image_bytes), ctype)},
-                           timeout=self.upload_timeout),
-            "загрузка обложки")
+        response = self._send(
+            requests.patch, f"{self.base_url}{STATICPAGES_PATH}{page_id}/",
+            "загрузка обложки", headers=self._headers,
+            files={"teaser_image": (filename, io.BytesIO(image_bytes), ctype)},
+            timeout=self.upload_timeout)
         return self._json(response, "загрузка обложки").get("teaser_image", "")
 
     def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
@@ -228,11 +275,11 @@ class SiteClient:
         }
         if coordinates:
             payload["coordinates"] = [coordinates]
-        response = self._check(
-            requests.post(f"{self.base_url}{ADDRESSES_SERVICES_PATH}", json=payload,
-                          headers={**self._headers, "Content-Type": "application/json"},
-                          timeout=self.timeout),
-            "создание тизера")
+        response = self._send(
+            requests.post, f"{self.base_url}{ADDRESSES_SERVICES_PATH}", "создание тизера",
+            json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
         body = self._json(response, "создание тизера")
         teaser_id = body.get("id")
         if teaser_id is None:
@@ -252,11 +299,11 @@ class SiteClient:
         }
         if coordinates:
             payload["coordinates"] = [coordinates]
-        response = self._check(
-            requests.patch(f"{self.base_url}{ADDRESSES_SERVICES_PATH}{teaser_id}/", json=payload,
-                          headers={**self._headers, "Content-Type": "application/json"},
-                          timeout=self.timeout),
-            f"обновление тизера {teaser_id}")
+        response = self._send(
+            requests.patch, f"{self.base_url}{ADDRESSES_SERVICES_PATH}{teaser_id}/",
+            f"обновление тизера {teaser_id}", json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
         body = self._json(response, f"обновление тизера {teaser_id}")
         return body.get("id", teaser_id)
 
@@ -267,13 +314,12 @@ class SiteClient:
         сам ответ пути не содержит, а коллизия имени означает перезапись."""
         upload_to = upload_to.strip("/") + "/"
         ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        self._check(
-            requests.post(f"{self.base_url}{FILEMANAGER_PATH}",
-                          headers=self._headers,
-                          files={"file": (filename, io.BytesIO(data), ctype)},
-                          data={"upload_to": upload_to},
-                          timeout=self.upload_timeout),
-            "загрузка файла")
+        self._send(
+            requests.post, f"{self.base_url}{FILEMANAGER_PATH}", "загрузка файла",
+            headers=self._headers,
+            files={"file": (filename, io.BytesIO(data), ctype)},
+            data={"upload_to": upload_to},
+            timeout=self.upload_timeout)
         return f"/media/{upload_to}{filename}"
 
     def fetch_file(self, url: str) -> bytes:
@@ -286,5 +332,5 @@ class SiteClient:
         (иначе их не увидел бы обычный посетитель сайта) — незачем светить
         токен сайта перед хостом, который мог прийти из чужого HTML."""
         absolute = urljoin(self.base_url + "/", url)
-        response = self._check(requests.get(absolute, timeout=self.timeout), f"файл {url}")
+        response = self._send(requests.get, absolute, f"файл {url}", timeout=self.timeout)
         return response.content

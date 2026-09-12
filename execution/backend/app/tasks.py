@@ -157,6 +157,15 @@ def generate_topics_sync(db, batch_id: int) -> None:
         batch.error_text = str(exc) or "превышен лимит времени задачи"
         db.commit()
         _finish_job(db, job, "failed", str(exc) or "превышен лимит времени задачи")
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        # Белый список выше не покрывает непредусмотренное: без этой ветки
+        # партия осталась бы в topics_pending навсегда, а джоба — в running.
+        db.rollback()
+        batch.status = "failed"
+        batch.error_text = f"непредвиденная ошибка: {type(exc).__name__}: {exc}"
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        raise
 
 
 @celery_app.task(name="app.tasks.generate_topics")
@@ -214,7 +223,32 @@ def run_batch_sync(db, batch_id: int) -> None:
                 continue
             # Падение одной статьи не должно отменять остальные: билдер сам
             # пишет причину в error_text и оставляет статью в failed.
-            build_for(db, article, site, site_client, job.id)
+            try:
+                build_for(db, article, site, site_client, job.id)
+            except (SoftTimeLimitExceeded, AIConfigError, SecretDecryptionError):
+                # Лимит времени и ошибка конфигурации — общие для ВСЕЙ партии
+                # (ключ либо задан, либо нет; время либо вышло, либо нет), их
+                # обрабатывают внешние except ниже и обрывают партию целиком.
+                # Перевыброс, а не обработка здесь: семантика, описанная в их
+                # комментариях, не меняется.
+                raise
+            except Exception as exc:  # noqa: BLE001 — см. ниже, это и есть барьер
+                # Билдер сам ловит свои типы (LLMError/ImageError/SiteAPIError/
+                # PromptError/ArticleBuildError) и наружу их не отдаёт, поэтому
+                # сюда попадает только то, чего никто не предусмотрел. До
+                # 2026-09-12 такое исключение роняло задачу целиком: партия 25
+                # потеряла 23 статьи из-за одного необёрнутого
+                # requests.ConnectionError (отказ DNS по домену сайта). Тот
+                # конкретный тип закрыт обёрткой в SiteClient._send, но белый
+                # список по определению не покрывает следующий такой же случай —
+                # этот барьер покрывает весь класс.
+                # rollback обязателен: транзакция могла остаться незавершённой
+                # (тот же довод, что в ArticleBuilder.build()). Безусловный
+                # rollback на чистой сессии безопасен — no-op.
+                db.rollback()
+                article.status = "failed"
+                article.error_text = (f"непредвиденная ошибка: "
+                                      f"{type(exc).__name__}: {exc}")
             db.commit()
     except SoftTimeLimitExceeded:
         # Лимит вычисляется от числа статей (см. Task 18), так что сюда мы
@@ -244,6 +278,31 @@ def run_batch_sync(db, batch_id: int) -> None:
         db.commit()
         _finish_job(db, job, "failed", batch.error_text)
         return
+    except Exception as exc:  # noqa: BLE001 — барьер согласованности состояния
+        # Сбой ВНЕ цикла по статьям: open_site_client, обращение к
+        # batch.articles на оборвавшемся соединении с БД и прочее
+        # непредусмотренное. Внутрицикловый барьер выше сюда не пускает отказы
+        # отдельных статей, поэтому этот except означает «партию продолжать
+        # нечем», а не «одна статья не вышла».
+        #
+        # Порядок важен: этот except обязан оставаться ПОСЛЕДНИМ —
+        # SoftTimeLimitExceeded и AIConfigError/SecretDecryptionError его
+        # подклассы, и перестановка тихо отключила бы уже работающую и
+        # покрытую тестами обработку (см.
+        # test_run_batch_unexpected_exception_does_not_swallow_soft_time_limit).
+        db.rollback()
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "failed"
+        batch.error_text = (f"непредвиденная ошибка: {type(exc).__name__}: {exc}; "
+                            f"готово {done}/{len(batch.articles)}")
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        # raise — отличие от соседних обработчиков, и оно осознанное: таймаут и
+        # ошибка конфигурации ожидаемы и полностью описаны текстом в UI, а
+        # непредвиденное исключение нужно видеть трейсбеком в логах воркера,
+        # и задача в Celery должна быть FAILURE, а не SUCCESS. В БД к этому
+        # моменту уже всё согласовано.
+        raise
 
     batch.status = "done"
     db.commit()
@@ -293,6 +352,13 @@ def retry_article_sync(db, article_id: int) -> None:
         db.commit()
         _finish_job(db, job, "failed", str(exc))
         return
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        db.rollback()
+        article.status = "failed"
+        article.error_text = f"непредвиденная ошибка: {type(exc).__name__}: {exc}"
+        db.commit()
+        _finish_job(db, job, "failed", article.error_text)
+        raise
 
     db.commit()
     _finish_job(db, job, "ok" if article.status == "published" else "failed",
@@ -355,6 +421,16 @@ def regenerate_article_sync(db, article_id: int, *, text: bool, images: bool,
         db.commit()
         _finish_job(db, job, "failed", str(exc))
         return
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        # article.status НЕ трогаем — это запрещено докстрингом функции выше:
+        # страница на сайте продолжает существовать независимо от исхода
+        # раунда перегенерации. Снимается только флаг и пишется причина.
+        db.rollback()
+        article.regenerating = False
+        article.error_text = f"непредвиденная ошибка: {type(exc).__name__}: {exc}"
+        db.commit()
+        _finish_job(db, job, "failed", article.error_text)
+        raise
 
     # Подстраховка: ArticleBuilder.regenerate() сама снимает этот флаг по
     # завершении, но обёртка не должна полагаться на то, что он снят именно
@@ -401,7 +477,15 @@ def run_company_batch_sync(db, batch_id: int) -> None:
                 continue
             # Падение одной компании не должно отменять остальные: билдер сам
             # пишет причину в error_text и оставляет компанию в failed.
-            build_for_company(db, company, site, site_client, job.id)
+            try:
+                build_for_company(db, company, site, site_client, job.id)
+            except (SoftTimeLimitExceeded, AIConfigError, SecretDecryptionError):
+                raise       # общие для всей партии — см. run_batch_sync выше
+            except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+                db.rollback()
+                company.status = "failed"
+                company.error_text = (f"непредвиденная ошибка: "
+                                      f"{type(exc).__name__}: {exc}")
             db.commit()
     except SoftTimeLimitExceeded:
         done = len([c for c in batch.companies if c.status == "published"])
@@ -423,6 +507,15 @@ def run_company_batch_sync(db, batch_id: int) -> None:
         db.commit()
         _finish_job(db, job, "failed", batch.error_text)
         return
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        db.rollback()
+        done = len([c for c in batch.companies if c.status == "published"])
+        batch.status = "failed"
+        batch.error_text = (f"непредвиденная ошибка: {type(exc).__name__}: {exc}; "
+                            f"готово {done}/{len(batch.companies)}")
+        db.commit()
+        _finish_job(db, job, "failed", batch.error_text)
+        raise
 
     batch.status = "done"
     db.commit()
@@ -468,6 +561,16 @@ def retry_company_sync(db, company_id: int) -> None:
         db.commit()
         _finish_job(db, job, "failed", str(exc))
         return
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        # Именно так 2026-09-04 повисла компания 292: отказ DNS по
+        # stroybaza-kaluga.ru оставил её в "generating", а джобу 183 в
+        # "running" — на восемь дней.
+        db.rollback()
+        company.status = "failed"
+        company.error_text = f"непредвиденная ошибка: {type(exc).__name__}: {exc}"
+        db.commit()
+        _finish_job(db, job, "failed", company.error_text)
+        raise
 
     db.commit()
     _finish_job(db, job, "ok" if company.status == "published" else "failed",

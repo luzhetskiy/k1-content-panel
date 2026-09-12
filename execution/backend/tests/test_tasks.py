@@ -646,3 +646,199 @@ def test_retry_company_without_site_marks_failed(db_session):
     db_session.refresh(company)
     assert company.status == "failed"
     assert "сайт" in company.error_text.lower()
+
+
+# --- барьер непредвиденных исключений (дизайн 2026-09-12, §5) ---
+#
+# До 2026-09-12 каждый обработчик в *_sync-функциях был БЕЛЫМ СПИСКОМ типов.
+# Необёрнутый requests.ConnectionError (отказ DNS по домену сайта) не входил ни
+# в один из них: задача Celery падала необработанной, и в БД не исправлялось
+# ничего — партия 25 осталась в "running", 23 статьи в "draft" на девять дней.
+# Тесты ниже фиксируют, что любое непредвиденное исключение теперь приводит
+# состояние в согласованный вид, а падение ОДНОЙ статьи не уносит остальные.
+
+def test_run_batch_continues_after_unexpected_exception(db_session, batch, site, monkeypatch):
+    """Главный тест задачи: именно этого не хватило 2026-09-03."""
+    db_session.add_all([
+        Article(batch_id=batch.id, site_id=site.id, topic="А"),
+        Article(batch_id=batch.id, site_id=site.id, topic="Б"),
+        Article(batch_id=batch.id, site_id=site.id, topic="В"),
+    ])
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def build(db, article, site, site_client, job_run_id):
+        if article.topic == "Б":
+            raise RuntimeError("соединение оборвалось")
+        article.status = "published"
+
+    monkeypatch.setattr("app.tasks.build_for", build)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+
+    by_topic = {a.topic: a for a in batch.articles}
+    assert by_topic["А"].status == "published"
+    assert by_topic["Б"].status == "failed"
+    # Тип исключения обязан быть в тексте: трейсбека в UI нет, а str() у
+    # ConnectionError сам по себе малопонятен.
+    assert "RuntimeError" in by_topic["Б"].error_text
+    # Третья статья СОБРАНА, а не осталась в draft — суть фикса.
+    assert by_topic["В"].status == "published"
+    assert batch.status == "done"
+
+
+def test_run_batch_unexpected_exception_outside_loop_marks_batch_failed(
+        db_session, batch, site, monkeypatch):
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="А"))
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def broken(db, site):
+        raise RuntimeError("хранилище секретов недоступно")
+
+    monkeypatch.setattr("app.tasks.open_site_client", broken)
+
+    # Перевыброс обязателен: в БД состояние согласовано, но Celery должна
+    # увидеть FAILURE и положить трейсбек в лог воркера, а не SUCCESS.
+    with pytest.raises(RuntimeError):
+        run_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "RuntimeError" in batch.error_text
+    job = db_session.query(JobRun).order_by(JobRun.id.desc()).first()
+    assert job.status == "failed"
+    assert job.finished_at is not None
+
+
+def test_run_batch_unexpected_exception_does_not_swallow_soft_time_limit(
+        db_session, batch, site, monkeypatch):
+    """Порядок except критичен: SoftTimeLimitExceeded — подкласс Exception, и
+    новый барьер не должен перехватывать его вместо существующего обработчика
+    (тот пишет в error_text счёт готовых статей)."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="А"))
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id):
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr("app.tasks.build_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "превышен лимит времени партии" in batch.error_text
+
+
+def test_retry_article_unexpected_exception_marks_article_failed(
+        db_session, batch, site, monkeypatch):
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема", status="failed")
+    db_session.add(article)
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id):
+        raise RuntimeError("сеть отвалилась")
+
+    monkeypatch.setattr("app.tasks.build_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    with pytest.raises(RuntimeError):
+        retry_article_sync(db_session, article.id)
+
+    db_session.refresh(article)
+    assert article.status == "failed"
+    assert "RuntimeError" in article.error_text
+    job = db_session.query(JobRun).order_by(JobRun.id.desc()).first()
+    assert job.status == "failed"
+
+
+def test_generate_topics_unexpected_exception_marks_batch_failed(
+        db_session, batch, monkeypatch):
+    def broken(db):
+        raise RuntimeError("неожиданный сбой провайдера")
+
+    monkeypatch.setattr("app.tasks.build_text_client", broken)
+    monkeypatch.setattr(
+        "app.tasks.open_site_client",
+        lambda db, site: SimpleNamespace(list_section_pages=lambda prefix: []))
+
+    with pytest.raises(RuntimeError):
+        generate_topics_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "failed"
+    assert "RuntimeError" in batch.error_text
+    job = db_session.query(JobRun).order_by(JobRun.id.desc()).first()
+    assert job.status == "failed"
+
+
+def test_regenerate_article_unexpected_exception_keeps_published_status(
+        db_session, batch, site, monkeypatch):
+    """Барьер здесь НЕ трогает article.status — это запрещено докстрингом
+    regenerate_article_sync: страница на сайте продолжает существовать
+    независимо от исхода раунда перегенерации. Снимается только флаг
+    regenerating — иначе статья навсегда осталась бы с «перегенерация
+    выполняется» в UI (именно это и пряталось за чистым автослиянием: барьер
+    был написан до переименования images_regenerating → regenerating и молча
+    заводил мусорный атрибут вместо снятия настоящего флага)."""
+    from app.tasks import regenerate_article_sync
+
+    article = Article(batch_id=batch.id, site_id=site.id, topic="Тема",
+                      status="published", remote_page_id=501,
+                      regenerating=True)
+    db_session.add(article)
+    db_session.commit()
+
+    def broken(db, article, site, site_client, job_run_id, **parts):
+        raise RuntimeError("сеть отвалилась")
+
+    monkeypatch.setattr("app.tasks.regenerate_article_for", broken)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    with pytest.raises(RuntimeError):
+        regenerate_article_sync(db_session, article.id,
+                                text=False, images=True, cover=False)
+
+    db_session.refresh(article)
+    assert article.status == "published"
+    assert article.regenerating is False
+    assert "RuntimeError" in article.error_text
+
+
+def test_run_company_batch_continues_after_unexpected_exception(db_session, company_site):
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=2,
+                         status="running")
+    db_session.add(batch)
+    db_session.commit()
+    for key in ("dom.ru", "dom2.ru"):
+        company = Company(site_id=company_site.id, batch_id=batch.id, site_key=key,
+                          website=f"https://{key}", name=key, region="Самара")
+        db_session.add(company)
+        db_session.commit()
+        db_session.add(CompanyInfo(company_id=company.id, builder_name=key))
+        db_session.commit()
+
+    def build(db, company, site, client, job_id):
+        if company.site_key == "dom.ru":
+            raise RuntimeError("соединение оборвалось")
+        company.status = "published"
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company", side_effect=build):
+        run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    by_key = {c.site_key: c for c in batch.companies}
+    assert by_key["dom.ru"].status == "failed"
+    assert "RuntimeError" in by_key["dom.ru"].error_text
+    # Вторая компания собрана, а не потеряна вместе с задачей.
+    assert by_key["dom2.ru"].status == "published"
+    assert batch.status == "done"

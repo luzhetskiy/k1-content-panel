@@ -1700,7 +1700,7 @@ git commit -m "fix: контракт эталона требует оба эле
 ### Task 13: График работы в тизере, пустой адрес — внятный отказ
 
 **Files:**
-- Modify: `execution/backend/app/sites/client.py:215-261`
+- Modify: `execution/backend/app/sites/client.py:262-308` (`create_teaser`, `update_teaser` — оба уходят через ретрай-обёртку `self._send`, но тесты по-прежнему патчат `app.sites.client.requests.post`/`.patch`, так как функция передаётся в `_send` аргументом и резолвится из модуля в момент вызова)
 - Modify: `execution/backend/app/companies/builder.py` (`_create_teaser`)
 - Test: `execution/backend/tests/test_sites_client.py`, `tests/test_companies_builder.py`
 

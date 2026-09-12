@@ -31,11 +31,16 @@ def split_phone(raw: str) -> tuple[str, str]:
     Резать подпись по запятой уместно только когда номер распознан — это и
     подтверждает, что в ячейке список телефонов, а не свободный текст;
     иначе запятая может быть частью фразы, и обрезка теряет её половину.
+    Ведущую российскую междугороднюю «8» (как в «8 (800) 333-11-11», 285 из
+    5405 распознанных номеров) в href приводим к международной «7» — «+8» не
+    код страны, по такой ссылке не дозвониться; подпись при этом не трогаем.
     """
     raw = raw or ""
     first = re.split(r"[,;/|]", raw, maxsplit=1)[0].strip()
     match = _PHONE_LEAD.match(first)
     digits = normalize_phone(match.group(0)) if match else ""
+    if digits.startswith("8"):
+        digits = "7" + digits[1:]
     text = first if digits else raw.strip()
     return (f"+{digits}" if digits else ""), text
 

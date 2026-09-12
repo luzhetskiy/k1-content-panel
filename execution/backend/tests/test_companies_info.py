@@ -92,6 +92,15 @@ def test_split_phone_takes_first_of_several_numbers():
     assert text == "+7 (495) 157-12-25"
 
 
+def test_split_phone_converts_domestic_eight_prefix_for_href():
+    """8-800 — российская междугородняя запись. В href нужна международная
+    форма: +8 не код страны, по такой ссылке не дозвониться. В подписи
+    исходная запись остаётся как есть — компания печатает её именно так."""
+    href, text = split_phone("8 (800) 333-11-11,+7 (495) 150-11-11")
+    assert href == "+78003331111"
+    assert text == "8 (800) 333-11-11"
+
+
 def test_split_phone_returns_empty_href_for_unparseable_value():
     """Номер, который не привести к 10-11 цифрам, — не номер: пустой href
     лучше ссылки, по которой нельзя позвонить."""

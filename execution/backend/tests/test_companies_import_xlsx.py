@@ -116,3 +116,53 @@ def test_file_without_new_columns_still_imports():
     row = parse_workbook(buf.getvalue())[0]
     assert row.working_hours == ""
     assert row.logo_url == ""
+
+
+def test_whitespace_only_priority_phone_falls_back_to_next_column():
+    """Пробел в приоритетной колонке — не значение: сырая проверка на
+    истинность (`x or y`) приняла бы «   » за телефон и оборвала бы цепочку,
+    хотя дальше в «Все телефоны» есть реальный номер."""
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "   ", "https://dom-samara.ru", "info@dom-samara.ru",
+         "", "", "", 0, 0, None, "", "+7 846 111-22-33"],
+    ])
+    row = parse_workbook(data)[0]
+    assert row.phone == "+7 846 111-22-33"
+
+
+def test_priority_phone_wins_over_all_phones_when_both_present():
+    """«Немобильные» — приоритетная колонка; «Все телефоны» — запасная и не
+    должна побеждать, если приоритетная уже заполнена."""
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "+7 846 111-22-33", "https://dom-samara.ru",
+         "info@dom-samara.ru", "", "", "", 0, 0, None, "", "+7 900 999-99-99"],
+    ])
+    row = parse_workbook(data)[0]
+    assert row.phone == "+7 846 111-22-33"
+
+
+def test_logo_url_takes_first_segment_before_pipe():
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "", "https://dom-samara.ru", "info@dom-samara.ru",
+         "", "", "", 0, 0, None,
+         "https://avatars.mds.yandex.net/get-altay/1/XXXL | "
+         "https://avatars.mds.yandex.net/get-altay/2/XXXL", ""],
+    ])
+    row = parse_workbook(data)[0]
+    assert row.logo_url == "https://avatars.mds.yandex.net/get-altay/1/XXXL"
+
+
+def test_logo_url_rejects_non_url_value():
+    """Логотип из выгрузки безусловно перекрывает найденный скрейпингом —
+    мусорная ячейка вроде «нет логотипа» не должна попасть в logo_url и
+    вытеснить рабочую картинку."""
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "", "https://dom-samara.ru", "info@dom-samara.ru",
+         "", "", "", 0, 0, None, "нет логотипа", ""],
+    ])
+    row = parse_workbook(data)[0]
+    assert row.logo_url == ""

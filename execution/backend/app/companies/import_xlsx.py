@@ -72,10 +72,19 @@ def site_key(url: str) -> str:
     return s.rstrip("/")
 
 
+def _first_segment(value) -> str:
+    """Первый сегмент значения вида «А | Б | В» до первой вертикальной
+    черты — общий контракт колонок с несколькими значениями через «|»
+    (сайт, категории, логотип, фото)."""
+    if not value:
+        return ""
+    return str(value).split("|")[0].strip()
+
+
 def _normalize_site_url(url) -> str:
     if not url:
         return ""
-    raw = str(url).strip().split("|")[0].strip()
+    raw = _first_segment(url)
     if not raw:
         return ""
     if not raw.startswith(("http://", "https://")):
@@ -85,11 +94,29 @@ def _normalize_site_url(url) -> str:
 
 
 def _category_first_segment(value) -> str:
-    """Значение колонки «Категории» вида «А | Б | В» — берём только «А»:
-    остальное — уточнения источника, вносящие путаницу в справочник категорий."""
-    if not value:
-        return ""
-    return str(value).split("|")[0].strip()
+    """Колонка «Категории» — берём только первый сегмент до «|»: остальное —
+    уточнения источника, вносящие путаницу в справочник категорий."""
+    return _first_segment(value)
+
+
+def _logo_url(value) -> str:
+    """Логотип из выгрузки безусловно перекрывает найденный скрейпингом
+    (см. задачи 2-5 плана), поэтому не пропускаем мусор дальше: числовая
+    или текстовая ячейка («нет логотипа») заменила бы рабочий логотип
+    битой картинкой."""
+    url = _first_segment(value)
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _first_nonempty(row: tuple, header: dict, *keys: str) -> str:
+    """Первое непустое значение после strip. Сырая проверка на истинность
+    не годится: ячейка из одних пробелов оборвала бы цепочку запасных
+    колонок телефона, хотя значения в ней нет."""
+    for key in keys:
+        value = str(_get(row, header, key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _to_float(val) -> float | None:
@@ -154,9 +181,15 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
             if not name:
                 continue
 
-            phone = (_get(row, header, "phone_landline")
-                     or _get(row, header, "phone_mobile")
-                     or _get(row, header, "phone_all") or "")
+            # Порядок «Немобильные» → «Мобильные» → «Все телефоны» выбран
+            # осознанно и расходится со старым CLI-скриптом
+            # (execution/step1_import_yandex.py, first_phone), который
+            # пробовал «Все телефоны» первой: по реальной выгрузке из 5407
+            # непустых значений «Все телефоны» 13% содержат кириллическую
+            # пометку («Отдел продаж», «Канцелярия»), а 39% — несколько
+            # номеров через «|». Приоритетные колонки чище.
+            phone = _first_segment(_first_nonempty(
+                row, header, "phone_landline", "phone_mobile", "phone_all"))
 
             raw_row = {}
             for k in header:
@@ -171,10 +204,10 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
                 category_raw=_category_first_segment(_get(row, header, "category")),
                 city=str(_get(row, header, "city") or "").strip(),
                 address=str(_get(row, header, "address") or "").strip(),
-                phone=str(phone).split("|")[0].strip() if phone else "",
+                phone=phone,
                 email=str(_get(row, header, "email") or "").split(",")[0].strip(),
                 working_hours=str(_get(row, header, "working_hours") or "").strip(),
-                logo_url=str(_get(row, header, "logo_url") or "").split("|")[0].strip(),
+                logo_url=_logo_url(_get(row, header, "logo_url")),
                 rating=_to_float(_get(row, header, "rating")),
                 reviews_count=_to_int(_get(row, header, "reviews")),
                 ratings_count=_to_int(_get(row, header, "ratings")),

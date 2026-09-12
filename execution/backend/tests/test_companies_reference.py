@@ -5,6 +5,8 @@ from app.sites.reference import ReferenceError
 
 _VALID_TEMPLATE = (
     '<div id="builder">'
+    '<img id="builder-logo" src="/media/logo.svg">'
+    '<span class="h2 builder-logo-text" id="builder-logo-text"></span>'
     '<h1 id="builder-main-title"></h1>'
     '<div id="builder-contacts">'
     '<div id="builder-contacts-grid">'
@@ -64,6 +66,53 @@ def test_sync_rejects_page_missing_contact_template_item(db_session, site):
             '<div id="builder-contacts"><div id="builder-contacts-grid"></div></div></div>')
     with pytest.raises(ReferenceError, match="builder-contact-1"):
         sync_builder_reference(db_session, site, FakeClient(html=html))
+
+
+def test_missing_markers_rejects_reference_without_logo_text():
+    from app.companies.reference import _missing_markers
+
+    html = """
+    <div id="builder">
+      <img id="builder-logo" src="/media/logo.svg">
+      <h2 id="builder-main-title"></h2>
+      <div id="builder-contacts"><div id="builder-contacts-grid">
+        <div id="builder-contact-1"></div></div></div>
+    </div>
+    """
+    assert "builder-logo-text" in _missing_markers(html)
+
+
+def test_missing_markers_treats_commented_out_element_as_absent():
+    """Именно так эталоны и выглядят на проде: запасная подпись лежит внутри
+    HTML-комментария, а fill_builder_template вырезает комментарии первым
+    делом — значит для заполнения её нет."""
+    from app.companies.reference import _missing_markers
+
+    html = """
+    <div id="builder">
+      <img id="builder-logo" src="/media/logo.svg">
+      <!-- <span class="h2 builder-logo-text" id="builder-logo-text">ПИК</span> -->
+      <h2 id="builder-main-title"></h2>
+      <div id="builder-contacts"><div id="builder-contacts-grid">
+        <div id="builder-contact-1"></div></div></div>
+    </div>
+    """
+    assert "builder-logo-text" in _missing_markers(html)
+
+
+def test_missing_markers_accepts_reference_with_both_logo_elements():
+    from app.companies.reference import _missing_markers
+
+    html = """
+    <div id="builder">
+      <img id="builder-logo" src="/media/logo.svg">
+      <span class="h2 builder-logo-text" id="builder-logo-text" hidden></span>
+      <h2 id="builder-main-title"></h2>
+      <div id="builder-contacts"><div id="builder-contacts-grid">
+        <div id="builder-contact-1"></div></div></div>
+    </div>
+    """
+    assert _missing_markers(html) == []
 
 
 def test_sync_failure_does_not_clobber_previous_cache(db_session, site):

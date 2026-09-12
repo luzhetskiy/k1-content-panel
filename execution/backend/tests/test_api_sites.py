@@ -338,6 +338,8 @@ def test_sync_failure_preserves_previous_successful_cache(admin_client, db_sessi
 
 _VALID_BUILDER_TEMPLATE = (
     '<div id="builder">'
+    '<img id="builder-logo" src="/media/logo.svg">'
+    '<span class="h2 builder-logo-text" id="builder-logo-text"></span>'
     '<h1 id="builder-main-title"></h1>'
     '<div id="builder-contacts">'
     '<div id="builder-contacts-grid">'

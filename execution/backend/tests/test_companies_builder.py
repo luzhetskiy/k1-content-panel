@@ -268,6 +268,8 @@ def test_synced_template_builds_successfully(db_session, company):
         def get_page(self, page_id):
             return {"id": page_id, "text": (
                 '<div id="builder">'
+                '<img id="builder-logo" src="/media/logo.svg">'
+                '<span class="h2 builder-logo-text" id="builder-logo-text"></span>'
                 '<h1 id="builder-main-title"></h1>'
                 '<div id="builder-contacts">'
                 '<div id="builder-contacts-grid">'

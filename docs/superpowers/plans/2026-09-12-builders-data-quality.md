@@ -1109,8 +1109,12 @@ Expected: FAIL — первый тест возвращает `https://sip-lider
 В `app/companies/logo.py` добавить перед `_find_img_in_scope`:
 
 ```python
-# Порядок важен: src проверяется первым, и только если там не заглушка.
-_SRC_ATTRS = ("src", "data-src", "data-lazy", "data-lazy-src", "data-original")
+# Порядок важен: ленивые атрибуты проверяются ПЕРВЫМИ, src — последним.
+# В lazy-load-разметке настоящая картинка лежит в data-*, а в src стоит
+# заглушка, и она не всегда data:-URI — на sip-lider.ru это обычный файл
+# /local/templates/siplider/images/lazy.svg. Поставь src первым, и заглушка
+# победит настоящий логотип.
+_SRC_ATTRS = ("data-src", "data-lazy", "data-lazy-src", "data-original", "src")
 _SRCSET_ATTRS = ("srcset", "data-srcset")
 
 
@@ -1138,7 +1142,11 @@ def _find_img_in_scope(scope, base_url: str) -> str:
     containers = [t for t in scope.find_all(True) if _is_logo_candidate(t)]
     search_in = containers if containers else [scope]
     for container in search_in:
-        for img in container.find_all("img"):
+        # Сам <img> тоже может нести класс logo — тогда он попадает в
+        # containers, но find_all("img") внутри него пуст (картинка не
+        # содержит картинок), и кандидат молча терялся.
+        imgs = [container] if container.name == "img" else container.find_all("img")
+        for img in imgs:
             src = _img_src(img)
             if not src or _SKIP_SRC.search(src):
                 continue
@@ -1229,7 +1237,8 @@ def _find_img_in_scope(scope, base_url: str) -> str:
     containers = [t for t in scope.find_all(True) if _is_logo_candidate(t)]
     search_in = containers if containers else [scope]
     for container in search_in:
-        for img in container.find_all("img"):
+        imgs = [container] if container.name == "img" else container.find_all("img")
+        for img in imgs:
             src = _img_src(img)
             if not src or _in_skipped_container(img):
                 continue
@@ -1237,6 +1246,10 @@ def _find_img_in_scope(scope, base_url: str) -> str:
                 return urljoin(base_url, src)
     return ""
 ```
+
+Меняется ровно одна строка — условие фильтра (`_SKIP_SRC.search(src)` →
+`_in_skipped_container(img)`). Разбор `imgs` и комментарий к нему пришли из
+задачи 7, не трогай их.
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 

@@ -95,6 +95,35 @@ def test_build_success_publishes_company(db_session, site, company):
     assert "Строим дома под ключ" in company.info.scraped_text
 
 
+def test_build_refreshes_info_from_candidate(db_session, site, company):
+    """Компания собрана до доработки импорта: в contacts нет working_hours.
+    Пересборка обязана добрать его из кандидата, иначе график работы не
+    появится ни на странице, ни в тизере."""
+    from app.models.company import CompanyCandidate, CompanyInfo
+
+    _seed_prompts(db_session)
+    candidate = CompanyCandidate(
+        site_key="dom.ru", website_raw="https://dom.ru", name="ООО Дом",
+        region_raw="Самарская область", category_raw="Стройка", city="Самара",
+        address="ул. Ленина 1", phone="+7 846 000-00-00", email="i@dom.ru",
+        working_hours="пн-пт 09:00–18:00", logo_url="")
+    db_session.add(candidate)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.flush()
+    company.candidate_id = candidate.id
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    _builder(db_session, company, site).build()
+
+    assert company.status == "published"
+    assert company.info.contacts[0]["working_hours"] == "пн-пт 09:00–18:00"
+
+
 def test_build_normalizes_phone_before_creating_teaser(db_session, site, company):
     """Сырой телефон из выгрузки Яндекс.Карт (в произвольном написании, с
     несколькими номерами через запятую и т.п.) должен уйти в create_teaser
@@ -127,7 +156,7 @@ def test_build_normalizes_phone_before_creating_teaser(db_session, site, company
 
 def test_build_passes_coordinates_to_create_teaser(db_session, site, company):
     """CompanyInfo.coordinates ("lat, lon" из выгрузки Яндекс.Карт, см.
-    app/api/company_batches.py::_company_info_from_candidate) должны уйти в
+    app/companies/info.py::_fields_from_candidate) должны уйти в
     create_teaser — иначе координаты на карточке-тизере целевого сайта не
     заполняются, хотя в выгрузке они есть (баг, найденный на проде для
     партии на stroybaza-moscow.ru)."""

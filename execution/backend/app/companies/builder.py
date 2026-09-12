@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.ai.factory import build_text_client
 from app.ai.prompts import PromptError, render_prompt, resolve_prompt
 from app.ai.text import LLMError
+from app.companies.info import refresh_info_from_candidate
 from app.companies.logo import fetch_company_logo
 from app.companies.scrape import ScrapeError, fetch_company_text
 from app.companies.template import fill_builder_template
@@ -56,6 +57,7 @@ class CompanyBuilder:
             self._require_template()
             batch = self._require_batch()
             info = self._require_info()
+            refresh_info_from_candidate(self.db, self.company)
             scraped_text = self._scrape()
             ai_fields = self._generate_text(info, scraped_text)
             self._apply_ai_fields(info, ai_fields, scraped_text)

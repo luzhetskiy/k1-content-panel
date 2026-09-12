@@ -11,7 +11,8 @@ def _make_workbook(rows: list[list]) -> bytes:
     ws = wb.active
     ws.append(["Запрос", "Название", "Категории", "Регион", "Город", "Полный адрес",
               "Мобильные", "Немобильные", "Сайт", "Email с сайта компании", "График",
-              "Широта", "Долгота", "Оценок", "Отзывов", "Рейтинг"])
+              "Широта", "Долгота", "Оценок", "Отзывов", "Рейтинг",
+              "Логотип", "Все телефоны"])
     for row in rows:
         ws.append(row)
     buf = io.BytesIO()
@@ -84,3 +85,34 @@ def test_empty_workbook_raises_parse_error():
     wb.save(buf)
     with pytest.raises(XlsxParseError):
         parse_workbook(buf.getvalue())
+
+
+def test_parses_working_hours_logo_and_falls_back_to_all_phones():
+    """«График» и «Логотип» есть в выгрузке Яндекса (95% и 78% строк), но до
+    сентября 2026 не импортировались. «Все телефоны» — третий запасной
+    источник телефона после «Немобильные»/«Мобильные»."""
+    data = _make_workbook([
+        ["застройщик", "ООО Дом", "Стройка", "Самарская область", "Самара",
+         "ул. Ленина 1", "", "", "https://dom-samara.ru", "info@dom-samara.ru",
+         "пн-пт 09:00–18:00", 53.2, 50.1, 10, 5, 4.8,
+         "https://avatars.mds.yandex.net/get-altay/1/XXXL",
+         "+7 846 111-22-33 | +7 846 111-22-34"],
+    ])
+    row = parse_workbook(data)[0]
+    assert row.working_hours == "пн-пт 09:00–18:00"
+    assert row.logo_url == "https://avatars.mds.yandex.net/get-altay/1/XXXL"
+    assert row.phone == "+7 846 111-22-33"
+
+
+def test_file_without_new_columns_still_imports():
+    """Новые колонки необязательные: REQUIRED_KEYS не расширяется, файл без
+    них разбирается как раньше."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Название", "Категории", "Регион", "Город", "Сайт"])
+    ws.append(["ООО Дом", "Стройка", "Самарская область", "Самара", "https://dom.ru"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    row = parse_workbook(buf.getvalue())[0]
+    assert row.working_hours == ""
+    assert row.logo_url == ""

@@ -19,8 +19,11 @@ COLUMNS = {
     "address": "Полный адрес",
     "phone_mobile": "Мобильные",
     "phone_landline": "Немобильные",
+    "phone_all": "Все телефоны",
     "site": "Сайт",
     "email": "Email с сайта компании",
+    "working_hours": "График",
+    "logo_url": "Логотип",
     "lat": "Широта",
     "lon": "Долгота",
     "ratings": "Оценок",
@@ -47,6 +50,8 @@ class ParsedRow:
     address: str = ""
     phone: str = ""
     email: str = ""
+    working_hours: str = ""
+    logo_url: str = ""
     rating: float | None = None
     reviews_count: int = 0
     ratings_count: int = 0
@@ -150,7 +155,8 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
                 continue
 
             phone = (_get(row, header, "phone_landline")
-                     or _get(row, header, "phone_mobile") or "")
+                     or _get(row, header, "phone_mobile")
+                     or _get(row, header, "phone_all") or "")
 
             raw_row = {}
             for k in header:
@@ -167,6 +173,8 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
                 address=str(_get(row, header, "address") or "").strip(),
                 phone=str(phone).split("|")[0].strip() if phone else "",
                 email=str(_get(row, header, "email") or "").split(",")[0].strip(),
+                working_hours=str(_get(row, header, "working_hours") or "").strip(),
+                logo_url=str(_get(row, header, "logo_url") or "").split("|")[0].strip(),
                 rating=_to_float(_get(row, header, "rating")),
                 reviews_count=_to_int(_get(row, header, "reviews")),
                 ratings_count=_to_int(_get(row, header, "ratings")),

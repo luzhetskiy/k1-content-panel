@@ -204,11 +204,15 @@ class CompanyBuilder:
         детерминирован из имени+города и не меняется между сборками, так что
         повторный create_page бился бы в HTTP 400 "страница с таким url уже
         существует"."""
+        # У части сайтов base_url в настройках оканчивается слэшем — без
+        # rstrip ссылка на страницу склеивается с двойным слэшем
+        # (https://stroybaza-tveri.ru//s/tverstroy-tver/ на проде).
+        base_url = self.site.base_url.rstrip("/")
         if self.company.remote_page_id:
             page = self.site_client.update_page_text(self.company.remote_page_id, html)
             self.company.remote_page_id = page.get("id", self.company.remote_page_id)
             if page.get("url"):
-                self.company.remote_url = f"{self.site.base_url}{page['url']}"
+                self.company.remote_url = f"{base_url}{page['url']}"
         else:
             name = info.builder_name or self.company.name
             city = info.city_name or self.company.region
@@ -223,7 +227,7 @@ class CompanyBuilder:
                                  f"Контакты, услуги, отзывы.",
             )
             self.company.remote_page_id = page["id"]
-            self.company.remote_url = f"{self.site.base_url}{page.get('url', '')}"
+            self.company.remote_url = f"{base_url}{page.get('url', '')}"
         self.db.commit()
         return page
 

@@ -700,3 +700,26 @@ def test_slug_stays_nominative_regardless_of_prepositional(db_session, site, com
     """Slug детерминирован и уже опубликован — менять его нельзя, иначе
     пересборка создаст дубль страницы вместо обновления."""
     assert slug_for_company("ООО Дом", "Самара") == "ooo-dom-samara"
+
+
+def test_remote_url_has_no_double_slash_for_base_url_with_trailing_slash(db_session, company):
+    """На проде: https://stroybaza-tveri.ru//s/tverstroy-tver/ — у сайта
+    base_url оканчивается слэшем."""
+    _seed_prompts(db_session)
+    site = Site(id=1, name="С", domain="s.ru", base_url="https://s.ru/",
+               api_token_enc="e",
+               builder_template_html='<div id="builder"><h1 id="builder-main-title">'
+                                     '</h1></div>',
+               builder_parent_id=10, tone_of_voice="деловой")
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               address="ул. Ленина 1",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    _builder(db_session, company, site).build()
+
+    assert company.remote_url == "https://s.ru/s/ooo-dom-samara/"

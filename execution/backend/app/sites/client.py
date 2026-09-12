@@ -261,17 +261,20 @@ class SiteClient:
 
     def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
                       website: str, page_url: str, *, category: int, city: int,
-                      location: int, coordinates: str = "") -> int:
+                      location: int, coordinates: str = "", description: str = "") -> int:
         """Карточка-тизер услуги — /api/v1/addresses-services/, не обложка
         страницы. is_active=False: включает менеджер вручную, симметрично
         published=False у create_page. coordinates — "lat, lon" из CompanyInfo.
         coordinates (см. app/api/company_batches.py); API принимает список из
         одной такой строки, портируем контракт execution/step6_manage_
-        teasers.py — при пустой строке ключ вообще не шлём."""
+        teasers.py — при пустой строке ключ вообще не шлём. description —
+        режим работы (contacts[0]["working_hours"]): без него тизеры,
+        созданные сервисом, отличались от заведённых руками пустым полем."""
         payload = {
             "name": name, "slug": slug, "address": address, "phone": phone,
             "email": email, "website": website, "page_url": page_url,
             "is_active": False, "location": location, "category": category, "city": city,
+            "description": description,
         }
         if coordinates:
             payload["coordinates"] = [coordinates]
@@ -288,14 +291,17 @@ class SiteClient:
 
     def update_teaser(self, teaser_id: int, name: str, slug: str, address: str, phone: str,
                       email: str, website: str, page_url: str, *, category: int, city: int,
-                      location: int, coordinates: str = "") -> int:
+                      location: int, coordinates: str = "", description: str = "") -> int:
         """Пересборка компании (CompanyBuilder._create_teaser) — тот же payload,
-        что и create_teaser (см. его докстрок про coordinates), но PATCH на
-        уже существующий тизер вместо создания дубликата."""
+        что и create_teaser (см. его докстрок про coordinates и description),
+        но PATCH на уже существующий тизер вместо создания дубликата: график
+        работы должен обновляться и при пересборке, а не только при первом
+        создании."""
         payload = {
             "name": name, "slug": slug, "address": address, "phone": phone,
             "email": email, "website": website, "page_url": page_url,
             "is_active": False, "location": location, "category": category, "city": city,
+            "description": description,
         }
         if coordinates:
             payload["coordinates"] = [coordinates]

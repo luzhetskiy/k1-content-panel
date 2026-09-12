@@ -221,14 +221,22 @@ class CompanyBuilder:
     def _create_teaser(self, info: CompanyInfo, page: dict, batch: CompanyBatch) -> None:
         contacts = info.contacts or [{}]
         contact = contacts[0]
+        address = contact.get("address", "") or info.address
+        # Сайт отвергает тизер без адреса (HTTP 400), но своим текстом не
+        # объясняет оператору, что делать — проверяем до запроса.
+        if not address:
+            raise SiteAPIError(
+                "у компании нет адреса — тизер без адреса сайт не принимает; "
+                "заполните адрес у кандидата или исключите компанию из партии")
         kwargs = dict(
             name=info.builder_name or self.company.name,
             slug=page.get("url", "").removeprefix("/s/").rstrip("/"),
-            address=contact.get("address", "") or info.address,
+            address=address,
             phone=normalize_phone(contact.get("phone_tel", "")), email=contact.get("email", ""),
             website=self.company.website, page_url=page.get("url", ""),
             category=batch.teaser_category_id, city=batch.teaser_city_id,
             location=batch.teaser_location_id, coordinates=info.coordinates or "",
+            description=contact.get("working_hours", "") or "",
         )
         # Пересборка (Company.teaser_id уже задан) обновляет существующий
         # тизер вместо создания дубликата — та же причина, что и у

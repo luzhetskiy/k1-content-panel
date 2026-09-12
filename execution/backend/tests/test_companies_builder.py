@@ -406,6 +406,47 @@ def test_build_fails_company_on_site_api_error(db_session, site, company):
     site_client.create_teaser.assert_not_called()
 
 
+def test_teaser_gets_working_hours_from_contacts(db_session, site, company):
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(
+        company_id=company.id, builder_name="ООО Дом", address="ул. Ленина 1",
+        contacts=[{"address": "ул. Ленина 1", "phone_tel": "+7 846 000-00-00",
+                  "working_hours": "пн-пт 09:00–18:00"}]))
+    db_session.commit()
+
+    site_client = Mock(create_page=Mock(return_value={"id": 99, "url": "/s/x/"}),
+                       create_teaser=Mock(return_value=555), upload_file=Mock())
+    _builder(db_session, company, site, site_client=site_client).build()
+
+    assert site_client.create_teaser.call_args.kwargs["description"] == "пн-пт 09:00–18:00"
+
+
+def test_build_fails_readably_when_address_is_empty(db_session, site, company):
+    """Партия 11 (Тверь) легла целиком с «создание тизера: HTTP 400:
+    {"address":["Это поле не может быть пустым."]}» — сообщение ничего не
+    говорит оператору о том, что делать."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом",
+                               address="", contacts=[]))
+    db_session.commit()
+
+    site_client = Mock(create_page=Mock(return_value={"id": 99, "url": "/s/x/"}),
+                       create_teaser=Mock(), upload_file=Mock())
+    _builder(db_session, company, site, site_client=site_client).build()
+
+    site_client.create_teaser.assert_not_called()
+    assert company.status == "failed"
+    assert "адрес" in company.error_text.lower()
+
+
 def test_relocate_logo_downloads_and_reuploads_external_url(db_session, site, company):
     """До этого теста builder_logo_src в фикстурах успеха всегда пуст, и
     реальная логика _relocate_logo (скачать внешний логотип, перезалить на

@@ -493,6 +493,34 @@ def test_update_teaser_raises_on_error():
             pass
 
 
+def test_create_teaser_sends_working_hours_as_description():
+    """description у тизера — это режим работы: у 116 из 117 заведённых
+    руками карточек он заполнен, у всех созданных сервисом был пуст."""
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=201)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.post", return_value=response) as post:
+        client.create_teaser(
+            name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+            description="пн-пт 09:00–18:00")
+    assert post.call_args.kwargs["json"]["description"] == "пн-пт 09:00–18:00"
+
+
+def test_update_teaser_sends_working_hours_as_description():
+    client = SiteClient("https://s.ru", "tok")
+    response = Mock(ok=True, status_code=200)
+    response.json.return_value = {"id": 42}
+    with patch("app.sites.client.requests.patch", return_value=response) as patch_req:
+        client.update_teaser(
+            42, name="ООО Дом", slug="ooo-dom-samara", address="ул. Ленина 1",
+            phone="79991234567", email="info@dom.ru", website="https://dom.ru",
+            page_url="/s/ooo-dom-samara/", category=3, city=1, location=1,
+            description="пн-пт 09:00–18:00")
+    assert patch_req.call_args.kwargs["json"]["description"] == "пн-пт 09:00–18:00"
+
+
 # --- сетевые сбои ниже уровня HTTP (дизайн 2026-09-12, §4) ---
 #
 # Необёрнутый requests.ConnectionError 2026-09-03 убил партию 25: он не входит

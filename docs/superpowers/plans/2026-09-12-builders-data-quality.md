@@ -55,7 +55,7 @@ docker compose up -d postgres redis                           # для пров�
 docker compose run --rm backend alembic upgrade head
 ```
 
-Текущий head Alembic — `a2daefb8e7f3` (`a2daefb8e7f3_site_reference_image_ratios.py`).
+Текущий head Alembic — `b5a9c64497ea` (`b5a9c64497ea_rename_images_regenerating_to_.py`).
 
 ---
 
@@ -282,7 +282,7 @@ docker compose up -d postgres
 docker compose run --rm backend alembic revision -m "candidate working hours logo"
 ```
 
-В созданном файле проверить `down_revision = 'a2daefb8e7f3'` (текущий head) и
+В созданном файле проверить `down_revision = 'b5a9c64497ea'` (текущий head) и
 заполнить тело:
 
 ```python
@@ -306,7 +306,7 @@ def downgrade() -> None:
 - [ ] **Step 7: Применить миграцию на реальном Postgres**
 
 Run: `cd /Users/luzhetskiy/Documents/projects/vibe-coding/k1-content-panel/execution && docker compose run --rm backend alembic upgrade head`
-Expected: `Running upgrade a2daefb8e7f3 -> <new>, candidate working hours logo`
+Expected: `Running upgrade b5a9c64497ea -> <new>, candidate working hours logo`
 
 - [ ] **Step 8: Коммит**
 
@@ -1626,7 +1626,7 @@ git commit -m "fix: контракт эталона требует оба эле
 ### Task 13: График работы в тизере, пустой адрес — внятный отказ
 
 **Files:**
-- Modify: `execution/backend/app/sites/client.py:196-242`
+- Modify: `execution/backend/app/sites/client.py:215-261`
 - Modify: `execution/backend/app/companies/builder.py` (`_create_teaser`)
 - Test: `execution/backend/tests/test_sites_client.py`, `tests/test_companies_builder.py`
 

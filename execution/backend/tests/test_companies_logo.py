@@ -27,14 +27,25 @@ def test_find_logo_finds_img_inside_logo_class_wrapper_via_its_own_alt():
     assert find_logo(html, "https://dom.ru").url == "https://dom.ru/img/header1.png"
 
 
-def test_find_logo_skips_user_uploaded_media_even_with_logo_in_name():
-    """Картинки из /wp-content/uploads/, /upload/, /media/uploads/ — это
-    контент страницы (например, партнёрские логотипы в статье), а не
-    логотип самой компании — см. execution/step2_find_svg_logos.py."""
+def test_find_logo_finds_wordpress_uploaded_logo():
+    """skvlasov.ru: логотип лежит в /wp-content/uploads/. Старый фильтр по
+    пути резал его вместе с партнёрскими картинками — теперь фильтруем по
+    контейнеру, а не по каталогу."""
     html = """
     <header>
-      <img src="/wp-content/uploads/2024/logo-partner.png">
+      <img src="/wp-content/uploads/2024/11/logo.png" alt="">
     </header>
+    """
+    assert find_logo(html, "https://skvlasov.ru").url == \
+        "https://skvlasov.ru/wp-content/uploads/2024/11/logo.png"
+
+
+def test_find_logo_skips_images_inside_partner_block():
+    """Партнёрские логотипы в контенте страницы — не логотип самой компании."""
+    html = """
+    <div class="partners-list">
+      <img src="/wp-content/uploads/2024/logo-partner.png" alt="Logo">
+    </div>
     """
     assert find_logo(html, "https://dom.ru").url == ""
 

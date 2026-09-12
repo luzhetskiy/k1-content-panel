@@ -34,9 +34,19 @@ class LogoCandidate:
         return bool(self.url or self.svg_markup)
 
 
-# Загруженные пользователем медиа-файлы (партнёрские логотипы в контенте
-# страницы) — не логотип самой компании, даже если в имени есть "logo".
-_SKIP_SRC = re.compile(r"/wp-content/uploads/|/upload/|/media/uploads/")
+# Логотипы партнёров/клиентов в контенте страницы — не логотип самой
+# компании, даже если в имени файла есть "logo". Раньше это отсекалось по
+# каталогу (/wp-content/uploads/), но там же лежит и настоящий логотип
+# WordPress-сайта, поэтому фильтруем по контейнеру.
+_SKIP_CONTAINER = re.compile(r"partner|client|brand|portfolio|gallery|slider", re.I)
+
+
+def _in_skipped_container(tag) -> bool:
+    for parent in tag.parents:
+        blob = " ".join([parent.get("id") or "", " ".join(parent.get("class", []))])
+        if _SKIP_CONTAINER.search(blob):
+            return True
+    return False
 
 
 def _is_logo_candidate(tag) -> bool:
@@ -83,7 +93,7 @@ def _find_img_in_scope(scope, base_url: str) -> str:
         imgs = [container] if container.name == "img" else container.find_all("img")
         for img in imgs:
             src = _img_src(img)
-            if not src or _SKIP_SRC.search(src):
+            if not src or _in_skipped_container(img):
                 continue
             if re.search(r"logo|лого", src, re.IGNORECASE) or _is_logo_candidate(img):
                 return urljoin(base_url, src)

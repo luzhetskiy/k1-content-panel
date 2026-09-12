@@ -479,6 +479,34 @@ def test_build_finds_logo_on_company_site_when_yandex_data_has_none(db_session, 
     assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-7-logo.webp"
 
 
+def test_build_uploads_inline_svg_logo_as_file(db_session, site, company):
+    """rubkoff.ru: скрейпинг находит только inline-<svg> (см.
+    app/companies/logo.py). По требованию все картинки строителей хранятся
+    файлами в service-img, поэтому разметка заливается как .svg — тем же
+    _upload_logo, что и обычные картинки, а не вставляется в карточку как
+    есть."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом"))
+    db_session.commit()
+
+    site_client = Mock(
+        create_page=Mock(return_value={"id": 99, "url": "/s/ooo-dom-samara/"}),
+        create_teaser=Mock(return_value=555),
+        upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.svg"))
+    logo_fn = Mock(return_value=LogoCandidate(svg_markup='<svg xmlns="x"><path/></svg>'))
+
+    _builder(db_session, company, site, site_client=site_client, logo_fn=logo_fn).build()
+
+    data, filename, _ = site_client.upload_file.call_args.args
+    assert filename == "cp-company-7-logo.svg"
+    assert data == b'<svg xmlns="x"><path/></svg>'
+    assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-7-logo.svg"
+
+
 def test_build_does_not_search_company_site_when_yandex_logo_already_present(
         db_session, site, company):
     """Колонка «Логотип» в выгрузке — реже, но встречается; если она уже

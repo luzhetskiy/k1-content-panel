@@ -100,6 +100,26 @@ def _find_img_in_scope(scope, base_url: str) -> str:
     return ""
 
 
+_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+
+
+def _with_xmlns(markup: str) -> str:
+    """Без xmlns отдельный .svg-файл не откроется ни в браузере, ни в
+    редакторе: в HTML пространство имён подразумевается, в самостоятельном
+    файле — нет."""
+    if "xmlns=" in markup:
+        return markup
+    return markup.replace("<svg", f'<svg xmlns="{_SVG_NAMESPACE}"', 1)
+
+
+def _find_svg_in_scope(scope) -> str:
+    for container in [t for t in scope.find_all(True) if _is_logo_candidate(t)]:
+        svg = container.find("svg")
+        if svg is not None and not _in_skipped_container(svg):
+            return _with_xmlns(str(svg))
+    return ""
+
+
 def find_logo(html: str, base_url: str) -> LogoCandidate:
     soup = BeautifulSoup(html, "html.parser")
     scope = (
@@ -116,6 +136,10 @@ def find_logo(html: str, base_url: str) -> LogoCandidate:
         logo_src = _find_img_in_scope(container, base_url)
         if logo_src:
             return LogoCandidate(url=logo_src)
+
+    svg_markup = _find_svg_in_scope(soup)
+    if svg_markup:
+        return LogoCandidate(svg_markup=svg_markup)
     return LogoCandidate()
 
 

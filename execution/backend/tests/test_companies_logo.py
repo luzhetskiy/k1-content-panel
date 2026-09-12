@@ -111,6 +111,43 @@ def test_find_logo_takes_first_url_from_srcset():
     assert find_logo(html, "https://dom.ru").url == "https://dom.ru/img/logo.png"
 
 
+def test_find_logo_returns_inline_svg_from_header():
+    """rubkoff.ru: логотип — inline <svg> внутри <a class="header__logo">,
+    <img> на странице нет. Именно этот случай имелся в виду в жалобе «не все
+    svg умеем сохранять»."""
+    html = """
+    <header class="header">
+      <a class="header__logo" href="/">
+        <svg width="169" height="18" viewBox="0 0 169 18"><path d="M124 1.5"/></svg>
+      </a>
+    </header>
+    """
+    candidate = find_logo(html, "https://rubkoff.ru")
+    assert candidate.url == ""
+    assert "<svg" in candidate.svg_markup
+    assert 'xmlns="http://www.w3.org/2000/svg"' in candidate.svg_markup
+
+
+def test_find_logo_prefers_img_over_inline_svg():
+    """Файл предпочтительнее разметки: его можно перезалить как есть."""
+    html = """
+    <header>
+      <a class="logo"><svg><path d="M0 0"/></svg></a>
+      <img class="logo" src="/img/logo.png">
+    </header>
+    """
+    candidate = find_logo(html, "https://dom.ru")
+    assert candidate.url == "https://dom.ru/img/logo.png"
+    assert candidate.svg_markup == ""
+
+
+def test_find_logo_ignores_inline_svg_in_partner_block():
+    html = """
+    <div class="partners"><a class="logo"><svg><path d="M0 0"/></svg></a></div>
+    """
+    assert not find_logo(html, "https://dom.ru")
+
+
 def test_logo_candidate_is_falsy_when_nothing_found():
     """Билдер проверяет результат в булевом контексте — пустой кандидат не
     должен считаться найденным логотипом."""

@@ -146,7 +146,9 @@ class CompanyBuilder:
         if info.builder_logo_src:
             return
         candidate = self.logo_fn(self.company.website)
-        if candidate.url:
+        if candidate.svg_markup:
+            self._upload_logo(info, candidate.svg_markup.encode("utf-8"), ".svg")
+        elif candidate.url:
             info.builder_logo_src = candidate.url
             self.db.commit()
 

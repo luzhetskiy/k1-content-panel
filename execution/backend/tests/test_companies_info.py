@@ -100,6 +100,15 @@ def test_split_phone_returns_empty_href_for_unparseable_value():
     assert text == "звоните через сайт"
 
 
+def test_split_phone_keeps_free_text_label_intact():
+    """Запятая делит номера только тогда, когда в ячейке номера. Если номер
+    не распознан, это свободный текст — резать его по запятой значит терять
+    половину фразы."""
+    href, text = split_phone("звоните с 9 до 18, номер уточняйте на сайте")
+    assert href == ""
+    assert text == "звоните с 9 до 18, номер уточняйте на сайте"
+
+
 def test_build_info_splits_phone(db_session):
     candidate = _candidate(phone="+7 (846) 277-06-05 Приёмная")
     db_session.add(candidate)

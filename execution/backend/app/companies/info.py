@@ -28,11 +28,16 @@ def split_phone(raw: str) -> tuple[str, str]:
     `href="tel:+7 (495) 106-30-40 Отдел продаж"` (проверено на живой странице
     stroybaza-moscow.ru/s/akademik-stroy-moskva/). В href должен попадать
     только набираемый номер; пометка остаётся в подписи, она информативна.
+    Резать подпись по запятой уместно только когда номер распознан — это и
+    подтверждает, что в ячейке список телефонов, а не свободный текст;
+    иначе запятая может быть частью фразы, и обрезка теряет её половину.
     """
-    first = re.split(r"[,;/|]", raw or "", maxsplit=1)[0].strip()
+    raw = raw or ""
+    first = re.split(r"[,;/|]", raw, maxsplit=1)[0].strip()
     match = _PHONE_LEAD.match(first)
     digits = normalize_phone(match.group(0)) if match else ""
-    return (f"+{digits}" if digits else ""), first
+    text = first if digits else raw.strip()
+    return (f"+{digits}" if digits else ""), text
 
 
 def _fields_from_candidate(candidate: CompanyCandidate) -> dict:

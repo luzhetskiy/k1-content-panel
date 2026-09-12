@@ -140,16 +140,14 @@ class CompanyBuilder:
         self.db.commit()
 
     def _find_logo(self, info: CompanyInfo) -> None:
-        """В выгрузке Яндекс.Карт колонки «Логотип» нет — builder_logo_src
-        пуст почти всегда. Ищем логотип в шапке сайта компании (см.
-        app/companies/logo.py); найденный внешний URL уходит в тот же
-        _relocate_logo, что и логотип из выгрузки — то есть тоже
-        перезаливается в service-img."""
+        """Логотип из выгрузки Яндекса («Логотип», 78% строк) приезжает в
+        builder_logo_src через refresh_info_from_candidate. Скрейпинг шапки
+        сайта компании — запасной источник для остальных."""
         if info.builder_logo_src:
             return
-        logo_url = self.logo_fn(self.company.website)
-        if logo_url:
-            info.builder_logo_src = logo_url
+        candidate = self.logo_fn(self.company.website)
+        if candidate.url:
+            info.builder_logo_src = candidate.url
             self.db.commit()
 
     def _upload_logo(self, info: CompanyInfo, data: bytes, ext: str) -> None:

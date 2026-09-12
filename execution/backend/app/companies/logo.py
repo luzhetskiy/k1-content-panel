@@ -1,13 +1,14 @@
-"""Поиск логотипа на сайте компании-строителя, если его нет в выгрузке
-Яндекс.Карт (там такой колонки нет). Порт find_logo/find_logo_in_scope из
-execution/step2_find_svg_logos.py — только img-логотип: у новой схемы нет
-builder_logo_svg, и все картинки строителей по требованию загружаются в
-service-img как файлы (см. CompanyBuilder._relocate_logo), а не как
-встроенная SVG-разметка."""
+"""Поиск логотипа на сайте компании-строителя — запасной источник, когда в
+выгрузке Яндекс.Карт колонка «Логотип» пуста (это ~22% строк). Порт
+find_logo/find_logo_in_scope из execution/step2_find_svg_logos.py, дополненный
+ленивой загрузкой и inline-<svg>: все картинки строителей по требованию
+загружаются в service-img как файлы (см. CompanyBuilder._upload_logo), а не
+как встроенная в страницу SVG-разметка."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from urllib.parse import urljoin
 
 import requests
@@ -19,6 +20,19 @@ _HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
 }
 _TIMEOUT_SECONDS = 12
+
+
+@dataclass(frozen=True)
+class LogoCandidate:
+    """Логотип бывает двух видов: ссылка на файл (её качаем и перезаливаем)
+    и inline-<svg> прямо в разметке шапки (его заливаем как .svg)."""
+
+    url: str = ""
+    svg_markup: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.url or self.svg_markup)
+
 
 # Загруженные пользователем медиа-файлы (партнёрские логотипы в контенте
 # страницы) — не логотип самой компании, даже если в имени есть "logo".
@@ -48,7 +62,7 @@ def _find_img_in_scope(scope, base_url: str) -> str:
     return ""
 
 
-def find_logo_url(html: str, base_url: str) -> str:
+def find_logo(html: str, base_url: str) -> LogoCandidate:
     soup = BeautifulSoup(html, "html.parser")
     scope = (
         soup.find("header")
@@ -58,20 +72,20 @@ def find_logo_url(html: str, base_url: str) -> str:
     )
     logo_src = _find_img_in_scope(scope or soup, base_url)
     if logo_src:
-        return logo_src
+        return LogoCandidate(url=logo_src)
 
     for container in [t for t in soup.find_all(True) if _is_logo_candidate(t)]:
         logo_src = _find_img_in_scope(container, base_url)
         if logo_src:
-            return logo_src
-    return ""
+            return LogoCandidate(url=logo_src)
+    return LogoCandidate()
 
 
-def fetch_company_logo(website: str) -> str:
+def fetch_company_logo(website: str) -> LogoCandidate:
     try:
         response = requests.get(website, headers=_HEADERS, timeout=_TIMEOUT_SECONDS,
                                 allow_redirects=True)
         response.raise_for_status()
     except requests.RequestException:
-        return ""
-    return find_logo_url(response.text, website.rstrip("/"))
+        return LogoCandidate()
+    return find_logo(response.text, website.rstrip("/"))

@@ -4,6 +4,7 @@ import pytest
 
 from app.ai.text import JsonResult, LLMError
 from app.companies.builder import CompanyBuilder, logo_filename, slug_for_company
+from app.companies.logo import LogoCandidate
 from app.companies.scrape import ScrapeError
 from app.models.company import Company, CompanyBatch, CompanyInfo
 from app.models.site import Site
@@ -60,7 +61,7 @@ def _builder(db, company, site, text_client=None, site_client=None, scrape=None,
             upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
         ),
         scrape_fn=scrape or Mock(return_value="TITLE: ООО Дом\n\nСтроим дома под ключ."),
-        logo_fn=logo_fn or Mock(return_value=""),
+        logo_fn=logo_fn or Mock(return_value=LogoCandidate()),
         job_run_id=None,
     )
 
@@ -461,7 +462,7 @@ def test_build_finds_logo_on_company_site_when_yandex_data_has_none(db_session, 
         create_teaser=Mock(return_value=555),
         upload_file=Mock(return_value="/media/uploads/service-img/cp-company-7-logo.webp"),
     )
-    logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
+    logo_fn = Mock(return_value=LogoCandidate(url="https://dom.ru/static/logo.png"))
     builder = _builder(db_session, company, site, site_client=site_client, logo_fn=logo_fn)
 
     fake_response = Mock(content=b"logo-bytes", headers={"Content-Type": "image/webp"})
@@ -493,7 +494,7 @@ def test_build_does_not_search_company_site_when_yandex_logo_already_present(
                                contacts=[{"address": "ул. Ленина 1"}]))
     db_session.commit()
 
-    logo_fn = Mock(return_value="https://dom.ru/static/logo.png")
+    logo_fn = Mock(return_value=LogoCandidate(url="https://dom.ru/static/logo.png"))
     builder = _builder(db_session, company, site, logo_fn=logo_fn)
 
     fake_response = Mock(content=b"logo-bytes", headers={"Content-Type": "image/webp"})

@@ -159,13 +159,33 @@ def test_logo_candidate_is_falsy_when_nothing_found():
 def test_fetch_company_logo_delegates_to_find_logo_on_success():
     response = Mock(text='<header><img src="/logo.png"></header>')
     response.raise_for_status = Mock()
-    with patch("app.companies.logo.requests.get", return_value=response) as get:
+    session = Mock(get=Mock(return_value=response))
+    with patch("app.companies.logo.requests.Session", return_value=session):
         result = fetch_company_logo("https://dom.ru")
-    get.assert_called_once()
+    session.get.assert_called_once()
     assert result.url == "https://dom.ru/logo.png"
 
 
 def test_fetch_company_logo_returns_empty_string_on_request_error():
-    with patch("app.companies.logo.requests.get",
-              side_effect=requests.RequestException("timeout")):
+    session = Mock(get=Mock(side_effect=requests.RequestException("timeout")))
+    with patch("app.companies.logo.requests.Session", return_value=session):
         assert fetch_company_logo("https://dom.ru").url == ""
+
+
+def test_fetch_company_logo_retries_after_cookie_stub():
+    """timesvai.ru отдаёт 274 байта JavaScript, который ставит cookie
+    beget=begetok и перезагружает страницу. Без повтора мы разбираем
+    заглушку вместо сайта."""
+    stub = ("<html><head><script>function set_cookie(){document.cookie="
+            "'beget=begetok';}set_cookie();location.reload();</script></head></html>")
+    real = '<header><img class="logo" src="/img/logo.png"></header>'
+    responses = [Mock(text=stub, status_code=200), Mock(text=real, status_code=200)]
+    for r in responses:
+        r.raise_for_status = Mock()
+    session = Mock(get=Mock(side_effect=responses), cookies=Mock(set=Mock()))
+    with patch("app.companies.logo.requests.Session", return_value=session):
+        candidate = fetch_company_logo("https://timesvai.ru")
+
+    assert candidate.url == "https://timesvai.ru/img/logo.png"
+    session.cookies.set.assert_called_once_with("beget", "begetok")
+    assert session.get.call_count == 2

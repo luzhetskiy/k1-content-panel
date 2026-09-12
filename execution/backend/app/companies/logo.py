@@ -143,11 +143,25 @@ def find_logo(html: str, base_url: str) -> LogoCandidate:
     return LogoCandidate()
 
 
+# Короткий ответ, который только ставит cookie и перезагружает страницу —
+# защита хостинга (Beget) от ботов. Настоящая страница приходит вторым
+# запросом, уже с cookie.
+_COOKIE_STUB_LIMIT_BYTES = 1500
+_COOKIE_STUB = re.compile(r"set_cookie|document\.cookie", re.I)
+
+
 def fetch_company_logo(website: str) -> LogoCandidate:
+    session = requests.Session()
     try:
-        response = requests.get(website, headers=_HEADERS, timeout=_TIMEOUT_SECONDS,
-                                allow_redirects=True)
+        response = session.get(website, headers=_HEADERS, timeout=_TIMEOUT_SECONDS,
+                               allow_redirects=True)
         response.raise_for_status()
+        if (len(response.text) < _COOKIE_STUB_LIMIT_BYTES
+                and _COOKIE_STUB.search(response.text)):
+            session.cookies.set("beget", "begetok")
+            response = session.get(website, headers=_HEADERS, timeout=_TIMEOUT_SECONDS,
+                                   allow_redirects=True)
+            response.raise_for_status()
     except requests.RequestException:
         return LogoCandidate()
     return find_logo(response.text, website.rstrip("/"))

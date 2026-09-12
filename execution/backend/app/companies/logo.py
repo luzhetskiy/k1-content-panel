@@ -49,12 +49,40 @@ def _is_logo_candidate(tag) -> bool:
     return bool(re.search(r"logo|лого", attrs))
 
 
+# Порядок важен: при ленивой загрузке настоящий адрес лежит в data-атрибуте,
+# а src — лишь заглушка (крошечный gif, «lazy.svg», прозрачный data:-URI),
+# поэтому data-атрибуты проверяются раньше src, который остаётся резервом.
+_SRC_ATTRS = ("data-src", "data-lazy", "data-lazy-src", "data-original", "src")
+_SRCSET_ATTRS = ("srcset", "data-srcset")
+
+
+def _img_src(img) -> str:
+    """Адрес картинки с учётом ленивой загрузки. data:-URI не адрес, а
+    встроенная заглушка-прозрачность — для логотипа бесполезна."""
+    for attr in _SRC_ATTRS:
+        value = (img.get(attr) or "").strip()
+        if value and not value.startswith("data:"):
+            return value
+    for attr in _SRCSET_ATTRS:
+        value = (img.get(attr) or "").strip()
+        if not value:
+            continue
+        first = value.split(",")[0].strip().split(" ")[0]
+        if first and not first.startswith("data:"):
+            return first
+    return ""
+
+
 def _find_img_in_scope(scope, base_url: str) -> str:
     containers = [t for t in scope.find_all(True) if _is_logo_candidate(t)]
     search_in = containers if containers else [scope]
     for container in search_in:
-        for img in container.find_all("img"):
-            src = img.get("src", "")
+        # <img> не может содержать другой <img>: если сам он попал сюда как
+        # кандидат-контейнер (например, класс "logo" стоит прямо на нём, без
+        # обёртки), find_all("img") ничего не найдёт — нужно проверить его же.
+        imgs = [container] if container.name == "img" else container.find_all("img")
+        for img in imgs:
+            src = _img_src(img)
             if not src or _SKIP_SRC.search(src):
                 continue
             if re.search(r"logo|лого", src, re.IGNORECASE) or _is_logo_candidate(img):

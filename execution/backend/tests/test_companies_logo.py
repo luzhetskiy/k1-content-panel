@@ -57,6 +57,49 @@ def test_find_logo_resolves_relative_src_against_base_url():
     assert find_logo(html, "https://dom.ru").url == "https://dom.ru/logo.png"
 
 
+def test_find_logo_reads_lazy_attribute_when_src_is_placeholder():
+    """sip-lider.ru: в src заглушка lazy.svg, настоящий логотип в data-lazy."""
+    html = """
+    <header>
+      <img src="/local/templates/s/images/lazy.svg"
+           data-lazy="/local/templates/s/images/logo_animate.svg" alt="">
+    </header>
+    """
+    assert find_logo(html, "https://sip-lider.ru").url == \
+        "https://sip-lider.ru/local/templates/s/images/logo_animate.svg"
+
+
+def test_find_logo_ignores_data_uri_placeholder_in_src():
+    """project-me.ru: в src прозрачный data:image/svg+xml, реальный файл в
+    data-src. Раньше побеждала заглушка."""
+    html = """
+    <header>
+      <img class="component-logo-img" alt="Logo"
+           src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'></svg>"
+           data-src="/img/logo.png">
+    </header>
+    """
+    assert find_logo(html, "https://project-me.ru").url == "https://project-me.ru/img/logo.png"
+
+
+def test_find_logo_returns_nothing_when_only_data_uri_available():
+    html = """
+    <header>
+      <img class="logo" src="data:image/svg+xml;utf8,<svg></svg>">
+    </header>
+    """
+    assert find_logo(html, "https://dom.ru").url == ""
+
+
+def test_find_logo_takes_first_url_from_srcset():
+    html = """
+    <header>
+      <img class="logo" srcset="/img/logo.png 1x, /img/logo@2x.png 2x">
+    </header>
+    """
+    assert find_logo(html, "https://dom.ru").url == "https://dom.ru/img/logo.png"
+
+
 def test_logo_candidate_is_falsy_when_nothing_found():
     """Билдер проверяет результат в булевом контексте — пустой кандидат не
     должен считаться найденным логотипом."""

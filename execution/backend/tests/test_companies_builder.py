@@ -440,11 +440,12 @@ def test_relocate_logo_downloads_and_reuploads_external_url(db_session, site, co
 
 
 def test_build_finds_logo_on_company_site_when_yandex_data_has_none(db_session, site, company):
-    """В выгрузке Яндекс.Карт колонки «Логотип» нет — builder_logo_src у
-    CompanyInfo всегда пуст (см. app/api/company_batches.py). Если на сайте
-    компании нашёлся логотип, он должен уйти в тот же _relocate_logo — то
-    есть в итоге тоже оказаться перезалит в service-img, как и любая другая
-    картинка строителя."""
+    """Колонка «Логотип» в выгрузке Яндекс.Карт заполнена в ~78% строк (см.
+    app/companies/logo.py) — скрейпинг сайта лишь запасной источник для
+    оставшихся ~22%, где builder_logo_src у CompanyInfo пуст, как здесь.
+    Если на сайте компании нашёлся логотип, он должен уйти в тот же
+    _relocate_logo — то есть в итоге тоже оказаться перезалит в service-img,
+    как и любая другая картинка строителя."""
     _seed_prompts(db_session)
     db_session.add(site)
     db_session.add(company.batch)

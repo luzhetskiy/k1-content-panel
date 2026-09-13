@@ -145,3 +145,41 @@ def test_refresh_does_not_wipe_city_prepositional(db_session):
 
     refresh_info_from_candidate(db_session, company)
     assert company.info.city_prepositional == "Самаре"
+
+
+def test_refresh_keeps_already_relocated_logo(db_session):
+    """Логотип уже перезалит к нам (/media/...). Подменять его внешней
+    ссылкой из выгрузки незачем: перезаливка положит ровно тот же файл, а
+    сорвись она по сети — на опубликованной странице останется ссылка на
+    чужой CDN вместо нашего сайта. Осознанная переразметка делается сбросом
+    поля (reset_builder_logos.py)."""
+    candidate = _candidate(logo_url="https://avatars.mds.yandex.net/x/XXXL")
+    db_session.add(candidate)
+    db_session.flush()
+    company = Company(site_id=1, site_key="dom.ru", name="ООО Дом",
+                     candidate_id=candidate.id)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(
+        company_id=company.id,
+        builder_logo_src="/media/uploads/service-img/cp-company-1-logo.jpg"))
+    db_session.commit()
+
+    refresh_info_from_candidate(db_session, company)
+    assert company.info.builder_logo_src == "/media/uploads/service-img/cp-company-1-logo.jpg"
+
+
+def test_refresh_takes_export_logo_when_nothing_relocated_yet(db_session):
+    """Обратный случай: своего файла ещё нет — логотип из выгрузки берём."""
+    candidate = _candidate(logo_url="https://avatars.mds.yandex.net/x/XXXL")
+    db_session.add(candidate)
+    db_session.flush()
+    company = Company(site_id=1, site_key="dom.ru", name="ООО Дом",
+                     candidate_id=candidate.id)
+    db_session.add(company)
+    db_session.flush()
+    db_session.add(CompanyInfo(company_id=company.id, builder_logo_src=""))
+    db_session.commit()
+
+    refresh_info_from_candidate(db_session, company)
+    assert company.info.builder_logo_src == "https://avatars.mds.yandex.net/x/XXXL"

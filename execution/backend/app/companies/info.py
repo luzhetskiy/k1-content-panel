@@ -88,10 +88,24 @@ def refresh_info_from_candidate(db: Session, company: Company) -> None:
     if candidate is None or company.info is None:
         return
     for field, value in _fields_from_candidate(candidate).items():
-        # Логотип из выгрузки перекрывает всё; если в выгрузке его нет —
-        # оставляем найденный скрейпингом, иначе каждая пересборка заново
-        # ходила бы на сайт компании за тем же файлом.
-        if field == "builder_logo_src" and not value:
+        if field == "builder_logo_src" and not _should_replace_logo(company.info, value):
             continue
         setattr(company.info, field, value)
     db.commit()
+
+
+def _should_replace_logo(info: CompanyInfo, candidate_logo: str) -> bool:
+    """Стоит ли переписывать логотип значением из выгрузки.
+
+    Нет — в двух случаях. Если в выгрузке логотипа нет, оставляем найденный
+    скрейпингом: иначе каждая пересборка заново ходила бы на сайт компании за
+    тем же файлом. И если логотип уже лежит у нас локально (/media/...):
+    значит его однажды перезалили, и подменять путь внешней ссылкой незачем —
+    перезаливка скачает и положит ровно тот же файл, а сорвись она по сети,
+    _relocate_logo оставит внешнюю ссылку, и опубликованная страница начнёт
+    тянуть картинку с чужого CDN вместо нашего сайта. Осознанный повторный
+    поиск логотипа делается сбросом поля (reset_builder_logos.py).
+    """
+    if not candidate_logo:
+        return False
+    return not (info.builder_logo_src or "").startswith("/")

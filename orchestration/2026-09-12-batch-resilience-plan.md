@@ -54,7 +54,7 @@ docker compose run --rm frontend sh -c "npm install && npm run build"
 ...)` выбрана именно чтобы их не ломать; если какой-то из них упал, это ошибка
 реализации, а не повод править тест.
 
-- [ ] **Step 1: Тесты на обёртку (красные)**
+- [x] **Step 1: Тесты на обёртку (красные)**
 
 В `tests/test_sites_client.py`:
 
@@ -110,7 +110,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_sites_clien
 Expected: 4 новых теста падают с `requests.exceptions.ConnectionError`/`Timeout`
 (не с `SiteAPIError`) — подтверждение, что сейчас сбой летит наружу голым.
 
-- [ ] **Step 2: `_send` рядом с `_check`**
+- [x] **Step 2: `_send` рядом с `_check`**
 
 ```python
     def _send(self, fn, url: str, what: str, **kwargs):
@@ -149,7 +149,7 @@ Expected: 4 новых теста падают с `requests.exceptions.Connectio
 `SiteAPIError` из `_check` не подкласс `RequestException`, поэтому HTTP-ошибки
 этим `except` не перехватываются и текст «сеть недоступна» к ним не приклеится.
 
-- [ ] **Step 3: перевести все 9 мест вызова на `_send`**
+- [x] **Step 3: перевести все 9 мест вызова на `_send`**
 
 Было `self._check(requests.X(url, ...), what)` → стало `self._send(requests.X,
 url, what, ...)`. Порядок аргументов: функция, url, `what`, затем остальные
@@ -167,7 +167,7 @@ url, what, ...)`. Порядок аргументов: функция, url, `wha
 | `upload_file` | `self._send(requests.post, f"{self.base_url}{FILEMANAGER_PATH}", "загрузка файла", headers=self._headers, files={...}, data={"upload_to": upload_to}, timeout=self.upload_timeout)` |
 | `fetch_file` | `self._send(requests.get, absolute, f"файл {url}", timeout=self.timeout)` |
 
-- [ ] **Step 4: проверить, что необёрнутых вызовов не осталось**
+- [x] **Step 4: проверить, что необёрнутых вызовов не осталось**
 
 Run: `grep -n "requests\.\(get\|post\|patch\|put\|delete\)(" execution/backend/app/sites/client.py`
 Expected: пусто — все вхождения теперь передаются в `_send` как `requests.get`
@@ -177,7 +177,7 @@ Expected: пусто — все вхождения теперь передают
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_sites_client.py`
 Expected: все тесты зелёные, включая ~20 существующих.
 
-- [ ] **Step 5: полный регресс бэкенда**
+- [x] **Step 5: полный регресс бэкенда**
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
 Expected: зелёно. Отдельно убедиться, что не упали `tests/test_articles_builder.py`
@@ -197,7 +197,7 @@ Expected: зелёно. Отдельно убедиться, что не упа�
 `except Exception` — оба их класса его подклассы, и перестановка тихо отключит
 уже работающую и покрытую тестами обработку.
 
-- [ ] **Step 1: Тесты (красные)**
+- [x] **Step 1: Тесты (красные)**
 
 ```python
 def test_run_batch_continues_after_unexpected_exception(db_session, batch, site, monkeypatch):
@@ -262,7 +262,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_tasks.py`
 Expected: новые тесты падают — `RuntimeError` вылетает из `run_batch_sync`
 наружу, партия остаётся `running`, джоба `running`.
 
-- [ ] **Step 2: внутренний барьер в `run_batch_sync`**
+- [x] **Step 2: внутренний барьер в `run_batch_sync`**
 
 ```python
         for article in batch.articles:
@@ -291,7 +291,7 @@ Expected: новые тесты падают — `RuntimeError` вылетает
             db.commit()
 ```
 
-- [ ] **Step 3: внешний барьер в `run_batch_sync`**
+- [x] **Step 3: внешний барьер в `run_batch_sync`**
 
 После существующего `except (AIConfigError, SecretDecryptionError)`:
 
@@ -315,10 +315,10 @@ Expected: новые тесты падают — `RuntimeError` вылетает
 и ошибка конфигурации ожидаемы и полностью описаны текстом в UI, а
 непредвиденное исключение нужно видеть трейсбеком в логах воркера.
 
-- [ ] **Step 4: то же в `run_company_batch_sync`** (внутренний + внешний,
+- [x] **Step 4: то же в `run_company_batch_sync`** (внутренний + внешний,
       дословно тот же приём, `company` вместо `article`).
 
-- [ ] **Step 5: внешний барьер в остальных четырёх**
+- [x] **Step 5: внешний барьер в остальных четырёх**
 
 `generate_topics_sync`, `retry_article_sync`, `regenerate_article_images_sync`,
 `retry_company_sync` — по одному `except Exception as exc` в конце, повторяющему
@@ -327,7 +327,7 @@ Expected: новые тесты падают — `RuntimeError` вылетает
 НЕ трогать — там это запрещено докстрингом функции, снимается только
 `images_regenerating` и пишется `error_text`.
 
-- [ ] **Step 6: мутационная проверка**
+- [x] **Step 6: мутационная проверка**
 
 Убрать `except Exception` из цикла `run_batch_sync`, прогнать
 `tests/test_tasks.py`.
@@ -335,7 +335,7 @@ Expected: падает именно `test_run_batch_continues_after_unexpected_e
 Вернуть код. (Приём из `plan1-execution-workflow`: тест, который не ловит
 снятие защиты, не считается покрытием.)
 
-- [ ] **Step 7: полный регресс**
+- [x] **Step 7: полный регресс**
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
 Expected: зелёно.
@@ -347,12 +347,12 @@ Expected: зелёно.
 **Files:**
 - Modify: `execution/docker-compose.prod.yml` (якорь `x-backend-base`)
 
-- [ ] **Step 1** В `x-backend-base` добавить `dns: ["77.88.8.8", "1.1.1.1"]`
+- [x] **Step 1** В `x-backend-base` добавить `dns: ["77.88.8.8", "1.1.1.1"]`
       с комментарием: цепочка «контейнер → 127.0.0.11 → 127.0.0.53
       (systemd-resolved) → внешний» падала на втором хопе 3, 4, 7, 8 и 10
       сентября; `dns:` убирает этот хоп. Якорь общий для `api`, `worker` и
       `migrate`.
-- [ ] **Step 2** Проверить, что dev-compose не задет (`docker-compose.yml`
+- [x] **Step 2** Проверить, что dev-compose не задет (`docker-compose.yml`
       отдельный файл, правка только прод).
 
 Run на проде после деплоя: `docker exec execution-worker-1 cat /etc/resolv.conf`
@@ -366,18 +366,18 @@ Expected: `nameserver 127.0.0.11`, но в `ExtServers` — указанные �
 Операционная задача, не код. Выполняется только после зелёного регресса
 Task 1–3.
 
-- [ ] **Step 1** Коммит, пуш, деплой. После деплоя обязательно проверить
+- [x] **Step 1** Коммит, пуш, деплой. После деплоя обязательно проверить
       `curl https://content-panel.nastroyker.ru/api/health`; при 502 —
       `ssh k1-panel-vps "docker exec execution-frontend-1 nginx -s reload"`
       (известная ловушка кэша nginx, см. память проекта).
-- [ ] **Step 2** Проверить DNS в контейнере (Task 3, Step 2).
-- [ ] **Step 3** Привести партию 25 в согласованное состояние: джоба 140 →
+- [x] **Step 2** Проверить DNS в контейнере (Task 3, Step 2).
+- [x] **Step 3** Привести партию 25 в согласованное состояние: джоба 140 →
       `failed` с текстом про оборванную задачу, статья 232 → `failed`, партия
       25 → `failed`. До Task 7 это делается SQL, после — кнопкой.
-- [ ] **Step 4** `POST /api/article-batches/25/run` — дособрать 24 статьи
+- [x] **Step 4** `POST /api/article-batches/25/run` — дособрать 24 статьи
       (темы целы, повторный подбор не нужен; уже опубликованные 25 статей
       пропустит существующая проверка `status == "published"`).
-- [ ] **Step 5** Следить за `/jobs` и за `llm_usage` по новой джобе. Ожидаемый
+- [x] **Step 5** Следить за `/jobs` и за `llm_usage` по новой джобе. Ожидаемый
       расход — порядка 1000 единиц, время — около 2 часов.
 
 ---
@@ -390,14 +390,14 @@ Task 1–3.
 - Modify: `execution/backend/app/tasks.py` (`_start_job` пишет `celery_task_id`)
 - Modify: `execution/backend/tests/test_models_article.py`, `tests/test_tasks.py`
 
-- [ ] Step 1: тест, что новая партия имеет `run_requested_at is None`, а после
+- [x] Step 1: тест, что новая партия имеет `run_requested_at is None`, а после
       `run()` — заполненный.
-- [ ] Step 2: колонка `run_requested_at` (nullable `DateTime(timezone=True)`)
+- [x] Step 2: колонка `run_requested_at` (nullable `DateTime(timezone=True)`)
       с комментарием, почему не годится `created_at` (создание партии может
       быть на дни раньше запуска — партия 25: создана 11:04, запущена 11:24,
       но в общем случае разрыв произвольный).
-- [ ] Step 3: миграция; применить на живом Postgres, а не только на SQLite.
-- [ ] Step 4: `_start_job` пишет `celery_task_id` из `current_task.request.id`
+- [x] Step 3: миграция; применить на живом Postgres, а не только на SQLite.
+- [x] Step 4: `_start_job` пишет `celery_task_id` из `current_task.request.id`
       (пусто, когда функция вызвана напрямую из теста — не падать).
 
 ---
@@ -408,15 +408,15 @@ Task 1–3.
 - Modify: `execution/backend/app/api/article_batches.py`
 - Modify: `execution/backend/tests/test_api_batches.py`
 
-- [ ] Step 1: по тесту на каждое из пяти правил таблицы §6.1 дизайна, включая
+- [x] Step 1: по тесту на каждое из пяти правил таблицы §6.1 дизайна, включая
       «джоба завершена, а партия всё ещё running» (это состояние реально есть
       в проде: партия 10 `done` при джобе 29 `running`).
-- [ ] Step 2: реализация. Лимит — из существующей
+- [x] Step 2: реализация. Лимит — из существующей
       `_batch_time_limits(len(batch.articles))[1]`, без второго источника правды.
       Джоба ищется по `JobRun.kind == 'run_batch'` и `params_json['batch_id']`.
-- [ ] Step 3: проверить JSON-запрос на живом Postgres (JSONB), а не только на
+- [x] Step 3: проверить JSON-запрос на живом Postgres (JSONB), а не только на
       SQLite — это единственное место плана, где диалекты расходятся.
-- [ ] Step 4: `runtime_state` и `run_requested_at` в `BatchOut` + `_to_out`.
+- [x] Step 4: `runtime_state` и `run_requested_at` в `BatchOut` + `_to_out`.
 
 ---
 
@@ -426,12 +426,12 @@ Task 1–3.
 - Modify: `execution/backend/app/api/article_batches.py`
 - Modify: `execution/backend/tests/test_api_batches.py`
 
-- [ ] Step 1: тесты — зависшая партия перезапускается и её `generating`-статьи
+- [x] Step 1: тесты — зависшая партия перезапускается и её `generating`-статьи
       становятся `failed`; `working` даёт 400 «уже выполняется»; `queued` даёт
       400 «ждёт свободный воркер»; зависшая джоба помечается `failed`.
-- [ ] Step 2: реализация в ветке `if batch.status == "running"`; `run_requested_at`
+- [x] Step 2: реализация в ветке `if batch.status == "running"`; `run_requested_at`
       выставляется при каждом запуске.
-- [ ] Step 3: убедиться, что `test_run_twice_dispatches_once` (защита от
+- [x] Step 3: убедиться, что `test_run_twice_dispatches_once` (защита от
       двойного клика) по-прежнему зелёный — новая ветка не должна её ослабить.
 
 ---
@@ -443,36 +443,62 @@ Task 1–3.
 - Modify: `execution/frontend/src/api.ts`, `src/pages/ArticlesPage.tsx`,
   `src/pages/BatchPage.tsx`
 
-- [ ] Step 1: вынести карту статусов партии в `statuses.ts`, `ArticlesPage`
+- [x] Step 1: вынести карту статусов партии в `statuses.ts`, `ArticlesPage`
       импортирует её оттуда (подписи на двух экранах не должны разойтись).
-- [ ] Step 2: шапка страницы партии — тег статуса + «готово N из M»
+- [x] Step 2: шапка страницы партии — тег статуса + «готово N из M»
       (считается по уже приходящему списку `articles`).
-- [ ] Step 3: алерт «Не удалось подобрать темы» только когда статей нет;
+- [x] Step 3: алерт «Не удалось подобрать темы» только когда статей нет;
       иначе «Сборка прервалась».
-- [ ] Step 4: `runtime_state === 'stuck'` → предупреждение с кнопкой
+- [x] Step 4: `runtime_state === 'stuck'` → предупреждение с кнопкой
       «Дособрать партию»; `'queued'` → «Ждёт свободного воркера».
-- [ ] Step 5: кнопка «Дособрать партию» также для `done`/`failed` при наличии
+- [x] Step 5: кнопка «Дособрать партию» также для `done`/`failed` при наличии
       статей не в `published`.
-- [ ] Step 6: кнопка повтора в строке — и для `draft`.
-- [ ] Step 7: поллинг останавливается при `stuck`.
-- [ ] Step 8: `npm run build` (tsc + vite) зелёный.
+- [x] Step 6: кнопка повтора в строке — и для `draft`.
+- [x] Step 7: поллинг останавливается при `stuck`.
+- [x] Step 8: `npm run build` (tsc + vite) зелёный.
 
 ---
 
 ### Task 9: Уборка наследия
 
-- [ ] Зависшие джобы: 140 и 29 (`run_batch`), 183 (`retry_company`) → `failed`
+- [x] Зависшие джобы: 140 и 29 (`run_batch`), 183 (`retry_company`) → `failed`
       с текстом про оборванную задачу.
-- [ ] Компания 292 — в `generating` с 4 сентября по той же причине (DNS по
+- [x] Компания 292 — в `generating` с 4 сентября по той же причине (DNS по
       `stroybaza-kaluga.ru`): → `failed`, затем повтор кнопкой.
-- [ ] Шесть статей в `draft` вне партии 25 — разобрать по партиям: дособрать
+- [x] Шесть статей в `draft` вне партии 25 — разобрать по партиям: дособрать
       или признать неактуальными.
+
+## Что разошлось с планом при исполнении
+
+План исполнен целиком (Task 1–9, 13 сентября 2026). Три расхождения, которые
+стоит знать, если по этому тексту будут повторять:
+
+**Порядок оказался обратным.** План считал `2026-09-09-article-full-regeneration`
+неисполненным и шёл первым. Фактически те 16 коммитов влились в `origin/main`
+параллельно и раньше; фиксы 1–3 влиты поверх мержем. Подробности разбора
+конфликта — в §9 дизайна.
+
+**Отдельного `/reset` не появилось, как и планировалось, но причина уточнилась.**
+Сброс зависшего состояния делает сам `run()` через `_reset_stuck_batch` — одна
+кнопка, один вызов, без второго окна гонки.
+
+**Два дефекта найдены не тестами.** Первый: сравнение хранимого в БД времени с
+текущим падает `TypeError` на SQLite (naive) и молчит на Postgres (aware) —
+поэтому появился `app/clock.py: seconds_since`, единственная точка такого
+сравнения. Второй, важнее: сразу после перезапуска зависшей партии последняя её
+джоба — ЗАКРЫТАЯ джоба прошлой попытки, и правило «джоба завершена, а партия
+running» объявляло партию зависшей снова; интерфейс минутами предлагал бы
+«Дособрать» ещё раз, то есть звал бы оплатить партию дважды. Нашлось прогоном
+сценария на живом стенде через API, тесты написаны следом. Вывод для будущих
+задач этого плана: шаг «прогнать сценарий на живом стенде» не факультативный —
+обе находки тестами не ловились, потому что тесты писал тот же, кто писал код,
+и обе дырки были в его же представлении о происходящем.
 
 ## Итоговая проверка
 
-- [ ] `docker compose run --rm --no-deps backend pytest -q` — зелёно.
-- [ ] `docker compose run --rm frontend sh -c "npm install && npm run build"` — зелёно.
-- [ ] `grep -n "requests\.\(get\|post\|patch\)(" app/sites/client.py` — пусто.
-- [ ] Миграции применяются с нуля на живом Postgres.
-- [ ] На проде: партия 25 собрана целиком (49/49), `job_runs` без записей
+- [x] `docker compose run --rm --no-deps backend pytest -q` — зелёно.
+- [x] `docker compose run --rm frontend sh -c "npm install && npm run build"` — зелёно.
+- [x] `grep -n "requests\.\(get\|post\|patch\)(" app/sites/client.py` — пусто.
+- [x] Миграции применяются с нуля на живом Postgres.
+- [x] На проде: партия 25 собрана целиком (49/49), `job_runs` без записей
       `running` старше часа, `articles` без `draft` и `generating` в партии 25.

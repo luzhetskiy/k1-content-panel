@@ -842,3 +842,79 @@ def test_run_company_batch_continues_after_unexpected_exception(db_session, comp
     # Вторая компания собрана, а не потеряна вместе с задачей.
     assert by_key["dom2.ru"].status == "published"
     assert batch.status == "done"
+
+
+# --- error_text не должен переживать успешную пересборку ---
+#
+# Найдено на партии 25 (2026-09-12): после успешной досборки 49/49 статус стал
+# done, а error_text остался с прошлого обрыва («сборка оборвалась 2026-09-03…
+# готово 25/49»). BatchPage.tsx рисует error_text безусловным красным алертом,
+# то есть полностью успешная партия показывалась менеджеру как упавшая.
+# ArticleBuilder.build() свой error_text при успехе чистит — партия должна
+# вести себя так же.
+
+def test_run_batch_clears_stale_error_text_on_success(db_session, batch, site, monkeypatch):
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="А"))
+    batch.status = "failed"
+    batch.error_text = "сборка оборвалась 2026-09-03 из-за сетевого сбоя, готово 25/49"
+    db_session.commit()
+
+    monkeypatch.setattr("app.tasks.build_for",
+                        lambda db, article, site, site_client, job_run_id:
+                        setattr(article, "status", "published"))
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "done"
+    assert batch.error_text == ""
+
+
+def test_run_batch_keeps_error_text_when_some_article_failed(
+        db_session, batch, site, monkeypatch):
+    """Чистим только когда собралось всё: если часть статей упала, текст
+    причины — единственное, что объясняет менеджеру неполный результат."""
+    db_session.add_all([
+        Article(batch_id=batch.id, site_id=site.id, topic="А"),
+        Article(batch_id=batch.id, site_id=site.id, topic="Б"),
+    ])
+    batch.status = "topics_review"
+    db_session.commit()
+
+    def build(db, article, site, site_client, job_run_id):
+        article.status = "failed" if article.topic == "А" else "published"
+        article.error_text = "сеть недоступна"
+
+    monkeypatch.setattr("app.tasks.build_for", build)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert batch.status == "done"
+    assert "не собрались" in batch.error_text
+
+
+def test_run_company_batch_clears_stale_error_text_on_success(db_session, company_site):
+    batch = CompanyBatch(site_id=company_site.id, region_raw="Самара", category_raw="Дома",
+                         category_normalized="Дома под ключ", teaser_category_id=3,
+                         teaser_city_id=1, teaser_location_id=1, requested_count=1,
+                         status="failed", error_text="прошлый обрыв, готово 2/5")
+    db_session.add(batch)
+    db_session.commit()
+    company = Company(site_id=company_site.id, batch_id=batch.id, site_key="dom.ru",
+                      website="https://dom.ru", name="ООО Дом", region="Самара")
+    db_session.add(company)
+    db_session.commit()
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="ООО Дом"))
+    db_session.commit()
+
+    def _mark_published(db, c, site, client, job_id):
+        c.status = "published"
+
+    with patch("app.tasks.open_site_client", return_value=Mock()), \
+         patch("app.tasks.build_for_company", side_effect=_mark_published):
+        run_company_batch_sync(db_session, batch.id)
+
+    db_session.refresh(batch)
+    assert batch.status == "done"
+    assert batch.error_text == ""

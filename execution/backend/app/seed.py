@@ -35,7 +35,15 @@ INT_KEYS = {"image_workers", "llm_max_retries"}
 # котором параллелизм просто вырождается в последовательную генерацию.
 # Данные, а не условие в роутере: следующие настройки с границами
 # добавляются сюда же, без правки app/api/admin_settings.py.
-INT_RANGES = {"image_workers": (1, 8)}
+# Верхняя граница llm_max_retries — это app.ai.factory.SETTING_MAX_RETRIES.
+# Держим здесь литералом, а не импортом: factory сам импортирует этот модуль
+# (DEFAULT_SETTINGS, INT_RANGES), и обратная ссылка дала бы цикл. От расхождения
+# двух чисел страхует test_admin_range_matches_factory_ceiling в
+# tests/test_ai_factory.py, а не дисциплина.
+# Без этой границы админка принимала любое целое: значение уезжало в БД с 200,
+# а код молча срезал его до потолка, сообщая об этом только в лог воркера —
+# то есть настройка показывала одно, а система делала другое (2026-09-12).
+INT_RANGES = {"image_workers": (1, 8), "llm_max_retries": (1, 3)}
 
 
 def seed_settings(db: Session) -> None:

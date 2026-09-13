@@ -1,10 +1,13 @@
 """Фабрика клиентов RouterAI: дефолты, границы числа попыток и понятные
 ошибки конфигурации вместо 401 от провайдера."""
 
+import logging
+
 import pytest
 
 from app.ai.factory import (
     IMAGE_MAX_RETRIES,
+    SETTING_MAX_RETRIES,
     TEXT_MAX_RETRIES,
     AIConfigError,
     build_image_generator,
@@ -77,10 +80,11 @@ def test_retries_setting_is_applied(db_session, service):
 
 
 def test_retries_are_bounded_by_time_budget(db_session, service):
-    """llm_max_retries проверяется в админке только как «целое число».
-    0 превратил бы _call в цикл без единой итерации (мгновенный «LLM
-    недоступна после 0 попыток»), а завышенное значение выносит одну статью
-    за ARTICLE_TIME_BUDGET_SECONDS = 900 с."""
+    """Админка с 2026-09-12 отклоняет значения вне 1..3 (INT_RANGES), но
+    значение могли записать прямо в БД в обход неё, поэтому срезание остаётся
+    и на стороне фабрики: 0 превратил бы _call в цикл без единой итерации
+    (мгновенный «LLM недоступна после 0 попыток»), а завышенное значение
+    выносит одну статью за ARTICLE_TIME_BUDGET_SECONDS = 900 с."""
     service.set("llm_max_retries", "99")
     assert build_text_client(db_session).max_retries == TEXT_MAX_RETRIES
     assert build_image_generator(db_session).max_retries == IMAGE_MAX_RETRIES
@@ -133,3 +137,39 @@ def test_image_workers_bounded(db_session, service):
     assert image_params(db_session)["workers"] == 1
     service.set("image_workers", "40")
     assert image_params(db_session)["workers"] == 8
+
+
+# --- предупреждение только о некорректном значении (найдено 2026-09-12) ---
+
+def test_valid_setting_clamped_by_image_ceiling_does_not_warn(db_session, service, caplog):
+    """llm_max_retries=3 законен (TEXT_MAX_RETRIES=3), но клиент картинок
+    срезает его до своих 2 — это его собственный потолок по бюджету времени,
+    а не ошибка администратора. Раньше на КАЖДОЙ сборке статьи в лог уходило
+    «llm_max_retries=3 вне диапазона 1..2», то есть лог уверял, что значение
+    неверное, хотя оно допустимое (замечено в логах воркера при досборке
+    партии 25)."""
+    service.set("llm_max_retries", "3")
+    with caplog.at_level(logging.WARNING, logger="app.ai.factory"):
+        assert build_image_generator(db_session).max_retries == IMAGE_MAX_RETRIES
+    assert "llm_max_retries" not in caplog.text
+
+
+def test_out_of_range_setting_still_warns(db_session, service, caplog):
+    """А вот значение за самым широким потолком не подходит ни одному клиенту —
+    о нём сказать надо, иначе администратор не узнает, что настройка не
+    действует."""
+    service.set("llm_max_retries", "99")
+    with caplog.at_level(logging.WARNING, logger="app.ai.factory"):
+        assert build_text_client(db_session).max_retries == TEXT_MAX_RETRIES
+    assert "вне допустимого диапазона" in caplog.text
+    assert f"1..{SETTING_MAX_RETRIES}" in caplog.text
+
+
+def test_admin_range_matches_factory_ceiling():
+    """INT_RANGES в app/seed.py держит верхнюю границу llm_max_retries
+    литералом (обратный импорт из factory дал бы цикл). Если потолок здесь
+    поменяют, а там нет, админка снова начнёт принимать значения, которые код
+    молча срезает, — этот тест ловит именно такое расхождение."""
+    from app.seed import INT_RANGES
+
+    assert INT_RANGES["llm_max_retries"] == (1, SETTING_MAX_RETRIES)

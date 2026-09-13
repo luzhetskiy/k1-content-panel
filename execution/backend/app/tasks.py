@@ -305,8 +305,18 @@ def run_batch_sync(db, batch_id: int) -> None:
         raise
 
     batch.status = "done"
-    db.commit()
     failed = [a for a in batch.articles if a.status == "failed"]
+    # error_text — поле «что не так СЕЙЧАС», а не журнал прошлых обрывов:
+    # BatchPage.tsx рисует его безусловным красным алертом. Найдено на партии 25
+    # (2026-09-12): после успешной досборки 49/49 статус стал done, а текст
+    # остался с обрыва 3 сентября («готово 25/49») — полностью собранная партия
+    # показывалась менеджеру как упавшая. Поэтому на завершении текст всегда
+    # перезаписывается актуальным, а не дописывается и не сохраняется:
+    # пусто, если собралось всё. ArticleBuilder.build() со своим
+    # article.error_text поступает точно так же.
+    batch.error_text = (f"{len(failed)} из {len(batch.articles)} статей не собрались — "
+                        f"причины в таблице" if failed else "")
+    db.commit()
     _finish_job(db, job, "ok" if not failed else "failed",
                 f"готово {len(batch.articles) - len(failed)}/{len(batch.articles)}")
 
@@ -518,8 +528,12 @@ def run_company_batch_sync(db, batch_id: int) -> None:
         raise
 
     batch.status = "done"
-    db.commit()
     failed = [c for c in batch.companies if c.status == "failed"]
+    # Тот же довод, что и у партии статей выше: error_text описывает текущее
+    # состояние, а не прошлое.
+    batch.error_text = (f"{len(failed)} из {len(batch.companies)} компаний не собрались — "
+                        f"причины в таблице" if failed else "")
+    db.commit()
     _finish_job(db, job, "ok" if not failed else "failed",
                f"готово {len(batch.companies) - len(failed)}/{len(batch.companies)}")
 

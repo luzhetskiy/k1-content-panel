@@ -428,3 +428,255 @@ def test_batch_detail_includes_regenerating_flag(manager_client, db_session, sit
 
     body = manager_client.get(f"/api/article-batches/{batch_id}").json()
     assert body["articles"][0]["regenerating"] is True
+
+
+# --- batch_runtime_state: отличить «работает» от «зависла» (дизайн 2026-09-12 §6.1) ---
+#
+# Партия 25 девять дней показывала статус running без признаков того, что
+# задача давно мертва: статус в БД — обещание, которое исправляет только сама
+# задача, а она может умереть. Эти правила дают ответ на чтении, не полагаясь
+# на то, что кто-то закрыл журнал.
+
+def _batch(db_session, site_id, *, status="running", articles=1, run_ago_minutes=1):
+    from datetime import timedelta
+
+    from app.clock import utcnow
+    from app.models.article import Article, ArticleBatch
+
+    batch = ArticleBatch(site_id=site_id, requested_count=articles, created_by_id=1,
+                         status=status,
+                         run_requested_at=utcnow() - timedelta(minutes=run_ago_minutes))
+    db_session.add(batch)
+    db_session.commit()
+    for i in range(articles):
+        db_session.add(Article(batch_id=batch.id, site_id=site_id, topic=f"Тема {i}"))
+    db_session.commit()
+    return batch
+
+
+def _job(db_session, batch, *, status="running", started_ago_seconds=60):
+    """Джоба сборки партии.
+
+    Заодно двигает run_requested_at партии на полминуты РАНЬШЕ старта джобы —
+    это не косметика, а воспроизведение настоящей последовательности: сначала
+    run() записывает запрос на запуск, и только потом воркер, взяв задачу,
+    создаёт JobRun. Без этого хелпер делал оба момента ровесниками, и проверка
+    «джоба от предыдущей попытки» (batch_runtime_state) на равных значениях
+    давала результат, зависящий от порядка микросекунд.
+    """
+    from datetime import timedelta
+
+    from app.clock import utcnow
+    from app.models.job import JobRun
+
+    started_at = utcnow() - timedelta(seconds=started_ago_seconds)
+    job = JobRun(kind="run_batch", site_id=batch.site_id,
+                 params_json={"batch_id": batch.id, "articles": len(batch.articles)},
+                 status=status, started_at=started_at)
+    db_session.add(job)
+    batch.run_requested_at = started_at - timedelta(seconds=30)
+    db_session.commit()
+    return job
+
+
+def test_runtime_state_is_none_for_not_running_batch(db_session, site_id):
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id, status="done")
+    assert batch_runtime_state(db_session, batch) is None
+
+
+def test_runtime_state_queued_while_no_job_yet(db_session, site_id):
+    """Задача поставлена, но воркеры заняты — JobRun появляется только в момент
+    реального старта. Это не зависание, воркеров всего два."""
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id, run_ago_minutes=2)
+    assert batch_runtime_state(db_session, batch) == "queued"
+
+
+def test_runtime_state_stuck_when_job_never_started(db_session, site_id):
+    """Если джобы нет спустя час — задача до воркера не дошла (брокер не принял
+    постановку), и партия висит в running без всякой задачи."""
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id, run_ago_minutes=60)
+    assert batch_runtime_state(db_session, batch) == "stuck"
+
+
+def test_runtime_state_working_within_time_limit(db_session, site_id):
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id, articles=3)
+    _job(db_session, batch, started_ago_seconds=120)
+    assert batch_runtime_state(db_session, batch) == "working"
+
+
+def test_runtime_state_stuck_when_job_outlived_its_limit(db_session, site_id):
+    """Граница — тот же жёсткий лимит, что выставлялся при постановке
+    (_batch_time_limits), а не отдельное число: двух источников правды о
+    лимите быть не должно."""
+    from app.api.article_batches import _batch_time_limits, batch_runtime_state
+
+    batch = _batch(db_session, site_id, articles=1)
+    _, hard = _batch_time_limits(1)
+    _job(db_session, batch, started_ago_seconds=hard + 60)
+    assert batch_runtime_state(db_session, batch) == "stuck"
+
+
+def test_runtime_state_stuck_when_job_finished_but_batch_still_running(db_session, site_id):
+    """Это состояние реально есть в проде: партия 10 — done, а её джоба 29
+    осталась running (задача умерла между двумя коммитами). Обратный случай —
+    джоба закрыта, а партия всё ещё running — так же противоречив и означает,
+    что статус партии уже никто не исправит."""
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id)
+    _job(db_session, batch, status="failed", started_ago_seconds=120)
+    assert batch_runtime_state(db_session, batch) == "stuck"
+
+
+def test_runtime_state_uses_latest_job_of_the_batch(db_session, site_id):
+    """У партии с повторными запусками джоб несколько — решает последняя."""
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id)
+    _job(db_session, batch, status="failed", started_ago_seconds=9000)
+    _job(db_session, batch, status="running", started_ago_seconds=60)
+    assert batch_runtime_state(db_session, batch) == "working"
+
+
+def test_runtime_state_ignores_jobs_of_other_batches(db_session, site_id):
+    from app.api.article_batches import batch_runtime_state
+
+    other = _batch(db_session, site_id, status="done")
+    batch = _batch(db_session, site_id, run_ago_minutes=60)
+    _job(db_session, other, status="running", started_ago_seconds=60)
+    assert batch_runtime_state(db_session, batch) == "stuck"
+
+
+def test_batch_out_exposes_runtime_state(admin_client, db_session, site_id):
+    batch = _batch(db_session, site_id)
+    _job(db_session, batch, started_ago_seconds=60)
+    body = admin_client.get(f"/api/article-batches/{batch.id}").json()
+    assert body["runtime_state"] == "working"
+    assert body["run_requested_at"] is not None
+
+
+# --- запуск и перезапуск (дизайн 2026-09-12 §6.2) ---
+
+def test_run_twice_dispatches_once(manager_client, db_session, site_id, no_celery):
+    """Защита от двойного клика, на которую ссылается комментарий в run(): до
+    2026-09-13 теста на неё для статей не было (он существовал только у
+    строителей), то есть правка этого эндпоинта могла её молча снять."""
+    batch = _batch(db_session, site_id, status="topics_review")
+    assert manager_client.post(f"/api/article-batches/{batch.id}/run").status_code == 200
+    second = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert second.status_code == 400
+    assert len([s for s in no_celery if s[0] == "run"]) == 1
+
+
+def test_run_records_run_requested_at(manager_client, db_session, site_id, no_celery):
+    from app.models.article import ArticleBatch
+
+    batch = _batch(db_session, site_id, status="topics_review")
+    db_session.query(ArticleBatch).filter_by(id=batch.id).update({"run_requested_at": None})
+    db_session.commit()
+
+    manager_client.post(f"/api/article-batches/{batch.id}/run")
+    db_session.expire_all()
+    assert db_session.get(ArticleBatch, batch.id).run_requested_at is not None
+
+
+def test_run_rejects_working_batch(manager_client, db_session, site_id, no_celery):
+    batch = _batch(db_session, site_id, articles=3)
+    _job(db_session, batch, started_ago_seconds=120)
+    response = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert response.status_code == 400
+    assert "уже выполняется" in response.json()["detail"]
+    assert not [s for s in no_celery if s[0] == "run"]
+
+
+def test_run_rejects_queued_batch_with_its_own_message(
+        manager_client, db_session, site_id, no_celery):
+    """Отдельный текст, а не «уже выполняется»: менеджеру важно понимать, что
+    партия не сломана, а ждёт свободный воркер — их всего два."""
+    batch = _batch(db_session, site_id, run_ago_minutes=2)
+    response = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert response.status_code == 400
+    assert "ждёт свободный воркер" in response.json()["detail"]
+
+
+def test_run_restarts_stuck_batch_and_clears_its_state(
+        manager_client, db_session, site_id, no_celery):
+    """Главное: партию, зависшую в running, до 2026-09-13 нельзя было
+    перезапустить ни из интерфейса, ни через API — только правкой БД. Ровно это
+    и случилось с партией 25."""
+    from app.models.article import Article, ArticleBatch
+    from app.models.job import JobRun
+
+    batch = _batch(db_session, site_id, articles=2)
+    stale_job = _job(db_session, batch, status="running",
+                     started_ago_seconds=_batch_hard_limit(2) + 600)
+    articles = sorted(batch.articles, key=lambda a: a.id)
+    articles[0].status = "published"
+    articles[1].status = "generating"
+    db_session.commit()
+
+    response = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert response.status_code == 200
+    assert len([s for s in no_celery if s[0] == "run"]) == 1
+
+    db_session.expire_all()
+    # Недосчитанная статья переведена в failed — иначе она осталась бы
+    # «Генерируется» навсегда, а её кнопка повтора недоступна в этом статусе.
+    assert db_session.get(Article, articles[1].id).status == "failed"
+    assert "оборвалась" in db_session.get(Article, articles[1].id).error_text
+    # Опубликованную не трогаем: она уже есть на сайте, её пропустит сборка.
+    assert db_session.get(Article, articles[0].id).status == "published"
+    # Зависшая джоба закрыта, иначе она вечно висит в «Выполняется сейчас».
+    closed = db_session.get(JobRun, stale_job.id)
+    assert closed.status == "failed"
+    assert closed.finished_at is not None
+    assert db_session.get(ArticleBatch, batch.id).status == "running"
+
+
+def _batch_hard_limit(article_count: int) -> int:
+    from app.api.article_batches import _batch_time_limits
+
+    return _batch_time_limits(article_count)[1]
+
+
+def test_runtime_state_after_restart_is_queued_not_stuck(db_session, site_id):
+    """Найдено прогоном на живом стенде: сразу после перезапуска зависшей партии
+    последняя её джоба — ЗАКРЫТАЯ джоба прошлой попытки, и правило «джоба
+    завершена, а партия running» объявляло партию зависшей снова. В проде окно
+    между перезапуском и реальным стартом задачи — минуты (воркеров два), и всё
+    это время интерфейс предлагал бы «Дособрать партию» ещё раз, то есть звал
+    бы поставить вторую задачу на ту же партию и оплатить её дважды."""
+    from datetime import timedelta
+
+    from app.api.article_batches import batch_runtime_state
+    from app.clock import utcnow
+    from app.models.article import ArticleBatch
+
+    batch = _batch(db_session, site_id, run_ago_minutes=120)
+    _job(db_session, batch, status="failed", started_ago_seconds=9000)
+    # Перезапуск: run() пишет свежий run_requested_at, джоба ещё не появилась.
+    db_session.query(ArticleBatch).filter_by(id=batch.id).update(
+        {"run_requested_at": utcnow() - timedelta(seconds=30)})
+    db_session.commit()
+    db_session.expire_all()
+
+    batch = db_session.get(ArticleBatch, batch.id)
+    assert batch_runtime_state(db_session, batch) == "queued"
+
+
+def test_runtime_state_stuck_when_old_job_and_no_restart(db_session, site_id):
+    """Обратная сторона того же правила: если перезапуска НЕ было, закрытая
+    джоба при running-партии по-прежнему означает зависание."""
+    from app.api.article_batches import batch_runtime_state
+
+    batch = _batch(db_session, site_id, run_ago_minutes=180)
+    _job(db_session, batch, status="failed", started_ago_seconds=9000)
+    assert batch_runtime_state(db_session, batch) == "stuck"

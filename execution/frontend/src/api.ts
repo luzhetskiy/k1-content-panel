@@ -96,6 +96,11 @@ export interface Batch {
   id: number; site_id: number; site_name: string; site_domain: string
   requested_count: number; status: string; error_text: string
   created_at: string; articles: ArticleRow[]
+  // Вычисляется бэкендом на чтении, в БД не хранится (batch_runtime_state,
+  // app/api/article_batches.py): идёт ли сборка на самом деле. Заполнено
+  // только для партии в статусе running, иначе null.
+  runtime_state: 'queued' | 'working' | 'stuck' | null
+  run_requested_at: string | null
 }
 export interface Prompt { id: number; key: string; site_id: number | null; text: string }
 export interface JobRow {

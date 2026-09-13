@@ -6,7 +6,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.clock import seconds_since, utcnow
 from app.models.article import Article, ArticleBatch, ArticleImage
+from app.models.job import JobRun
 from app.models.site import Site
 from app.models.user import User
 from app.tasks import generate_topics, regenerate_article, retry_article, run_batch
@@ -40,6 +42,10 @@ class BatchOut(BaseModel):
     status: str
     error_text: str
     created_at: datetime
+    # Вычисляется на чтении, в БД не хранится: queued | working | stuck для
+    # партии в running, иначе None. См. batch_runtime_state ниже.
+    runtime_state: str | None = None
+    run_requested_at: datetime | None = None
     articles: list[ArticleOut] = []
 
 
@@ -51,6 +57,8 @@ def _to_out(db: Session, batch: ArticleBatch) -> BatchOut:
         site_domain=site.domain if site else "—",
         requested_count=batch.requested_count, status=batch.status,
         error_text=batch.error_text, created_at=batch.created_at,
+        runtime_state=batch_runtime_state(db, batch),
+        run_requested_at=batch.run_requested_at,
         articles=[ArticleOut(id=a.id, topic=a.topic, title=a.title, status=a.status,
                              remote_url=a.remote_url, error_text=a.error_text,
                              regenerating=a.regenerating)
@@ -157,6 +165,88 @@ def _batch_time_limits(article_count: int) -> tuple[int, int]:
     return soft, soft + TIME_LIMIT_GAP_SECONDS
 
 
+# Сколько партия может простоять в очереди, прежде чем отсутствие JobRun станет
+# подозрительным. Воркеров два (--concurrency=2), партия идёт часами, так что
+# реальное ожидание бывает долгим — но JobRun создаётся в первую же секунду
+# РЕАЛЬНОГО старта задачи, и десяти минут с запасом хватает, чтобы отличить
+# «ждёт слот» от «постановка в брокер не удалась и задачи нет вовсе».
+# Влияет только на подпись в интерфейсе и на доступность кнопки «Дособрать»,
+# не на саму сборку.
+QUEUE_GRACE_SECONDS = 600
+
+
+def _latest_run_job(db: Session, batch_id: int) -> JobRun | None:
+    """Последняя джоба сборки этой партии. Партия ищется по params_json, а не по
+    отдельной колонке-связке: batch_id там лежит с Task 17, и вторая ссылка на
+    то же самое разошлась бы с первой при первом же повторном запуске.
+    Индексация JSON одинаково работает на JSONB (прод) и JSON (SQLite в
+    тестах) — проверено на обоих контурах."""
+    return db.scalars(
+        select(JobRun)
+        .where(JobRun.kind == "run_batch",
+               JobRun.params_json["batch_id"].as_integer() == batch_id)
+        .order_by(JobRun.id.desc())
+        .limit(1)
+    ).first()
+
+
+def batch_runtime_state(db: Session, batch: ArticleBatch) -> str | None:
+    """Идёт ли сборка на самом деле: queued | working | stuck, либо None, если
+    партия не в running и вопрос не стоит.
+
+    Зачем это вообще нужно: статус партии в БД — обещание, и исправить его
+    может только сама задача. Если задача умерла жёстко (SIGKILL по лимиту,
+    OOM, рестарт контейнера при деплое), обещание остаётся навсегда. Партия 25
+    простояла так девять дней, и по панели это было неотличимо от работы
+    (см. directions/2026-09-12-batch-resilience-design.md §6.1).
+
+    Сознательно НЕ спрашиваем Celery через AsyncResult: у Redis-бэкенда
+    результат живёт сутки, после чего PENDING приходит и для мёртвой задачи, и
+    для стоящей в очереди, — то есть именно в тех случаях, которые надо
+    различить, ответ бесполезен. Журнал JobRun хранится вечно и даёт больше.
+    """
+    if batch.status != "running":
+        return None
+
+    job = _latest_run_job(db, batch.id)
+    # Джоба, начавшаяся ДО текущего запроса на запуск, относится к предыдущей
+    # попытке и о нынешней ничего не говорит. Без этой отсечки сразу после
+    # перезапуска зависшей партии срабатывало правило «джоба завершена, а партия
+    # running» — и партия объявлялась зависшей снова, хотя её только что
+    # запустили. В проде окно до реального старта задачи — минуты (воркеров
+    # два), и всё это время интерфейс предлагал бы «Дособрать партию» ещё раз,
+    # то есть звал бы поставить вторую задачу на ту же партию и оплатить её
+    # дважды. Найдено прогоном на живом стенде, а не тестами — тесты пришли
+    # следом (test_runtime_state_after_restart_is_queued_not_stuck).
+    # Сравниваем через seconds_since: «прошло больше времени» == «началось
+    # раньше», и это единственный способ сравнить два момента, не напоровшись
+    # на naive/aware (см. app/clock.py).
+    if (job is not None and batch.run_requested_at is not None
+            and seconds_since(job.started_at) > seconds_since(batch.run_requested_at)):
+        job = None
+
+    if job is None:
+        # Задачи ещё (или уже) нет. run_requested_at == None — партия в running
+        # без записи о запуске: так не бывает в штатном потоке (run() пишет его
+        # одним коммитом со статусом), значит состояние испорчено и это stuck.
+        if batch.run_requested_at is None:
+            return "stuck"
+        waiting = seconds_since(batch.run_requested_at)
+        return "queued" if waiting < QUEUE_GRACE_SECONDS else "stuck"
+
+    if job.status != "running":
+        # Джоба закрыта, а партия всё ещё running — противоречие: закрывает
+        # джобу тот же код, который дальше доводит партию до done/failed,
+        # поэтому сюда можно попасть только если он до этого не дошёл.
+        return "stuck"
+
+    # Жёсткий лимит берём из той же функции, что выставляла его при постановке,
+    # и по тому же числу статей — иначе появится второй источник правды о том,
+    # сколько партии отведено.
+    _, hard = _batch_time_limits(len(batch.articles))
+    return "working" if seconds_since(job.started_at) < hard else "stuck"
+
+
 # Находка №4 ревью Task 17 (полный расчёт — в app/celery_app.py, раздел
 # «⚠️ Находка №4»). ARTICLE_TIME_BUDGET_SECONDS=900 выше — не точный худший
 # случай одной статьи, а генерозный средний слот ВНУТРИ СУММЫ на партию:
@@ -202,6 +292,33 @@ def _regen_time_limits(*, text: bool, image_count: int, cover: bool) -> tuple[in
     if cover:
         soft += _REGEN_COVER_SECONDS
     return soft, soft + TIME_LIMIT_GAP_SECONDS
+
+
+def _reset_stuck_batch(db: Session, batch: ArticleBatch) -> None:
+    """Привести в порядок состояние партии, чья задача умерла, не закрыв за
+    собой: статьи, застрявшие в «Генерируется», и незакрытую джобу.
+
+    Статьи в `generating` обязательно перевести в `failed`: сборка их всё равно
+    пересоберёт (пропускается только `published`), но в статусе `generating`
+    их собственная кнопка повтора недоступна — а она может понадобиться, если
+    именно эта статья упадёт снова. Опубликованные не трогаем: страницы на
+    сайте существуют, и повторно за них не платят.
+
+    Джобу закрываем, иначе она вечно считается в «Выполняется сейчас» на экране
+    журнала и скрывает реальную картину — так три таких записи и накопились
+    к 2026-09-12 (джобы 29, 140, 183).
+    """
+    for article in batch.articles:
+        if article.status == "generating":
+            article.status = "failed"
+            article.error_text = ("задача партии оборвалась на этой статье — "
+                                 "она не досчитана")
+    job = _latest_run_job(db, batch.id)
+    if job is not None and job.status == "running":
+        job.status = "failed"
+        job.finished_at = utcnow()
+        job.log_text = "задача оборвалась, не закрыв журнал — партия перезапущена вручную"
+    db.commit()
 
 
 class TopicsIn(BaseModel):
@@ -264,7 +381,18 @@ def run(batch_id: int, db: Session = Depends(get_db),
     if not batch.articles:
         raise HTTPException(400, "в партии нет тем")
     if batch.status == "running":
-        raise HTTPException(400, "партия уже выполняется")
+        # До 2026-09-13 здесь был безусловный отказ, и партию, зависшую в
+        # running, нельзя было перезапустить вообще ничем — ни из интерфейса,
+        # ни через API. Партия 25 простояла так девять дней и потребовала
+        # правки БД руками. Теперь отказ только когда сборка действительно
+        # идёт или честно ждёт очереди; зависшую разрешаем перезапустить,
+        # предварительно приведя её состояние в порядок.
+        state = batch_runtime_state(db, batch)
+        if state != "stuck":
+            raise HTTPException(
+                400, "партия ждёт свободный воркер" if state == "queued"
+                else "партия уже выполняется")
+        _reset_stuck_batch(db, batch)
     # Находка №2 ревью Task 18: раньше в "running" партию переводила только
     # run_batch_sync (app/tasks.py) — АСИНХРОННО, когда Celery реально начнёт
     # исполнять задачу. Между apply_async(...) ниже и фактическим стартом
@@ -296,6 +424,10 @@ def run(batch_id: int, db: Session = Depends(get_db),
     # рамках одного HTTP-запроса» — а именно такую гонку (двойной клик,
     # повторный запрос) и требовалось закрыть.
     batch.status = "running"
+    # Одним коммитом со статусом: пара (running, run_requested_at) должна быть
+    # согласованной, иначе batch_runtime_state увидит running без момента
+    # запуска и сочтёт партию сломанной.
+    batch.run_requested_at = utcnow()
     db.commit()
     # Лимит времени вычисляется здесь, а не берётся из глобальной настройки
     # Celery: партия идёт последовательно, и её длительность пропорциональна

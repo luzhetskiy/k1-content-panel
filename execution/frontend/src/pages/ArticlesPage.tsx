@@ -8,14 +8,7 @@ import dayjs from 'dayjs'
 import {
   Batch, RegenerateParts, SiteBrief, createBatch, getBatches, getSites, regenerateArticle,
 } from '../api'
-
-const STATUS: Record<string, { color: string; label: string }> = {
-  topics_pending: { color: 'processing', label: 'Подбираются темы' },
-  topics_review: { color: 'warning', label: 'Темы на согласовании' },
-  running: { color: 'processing', label: 'Генерируется' },
-  done: { color: 'success', label: 'Готово' },
-  failed: { color: 'error', label: 'Ошибка' },
-}
+import { BATCH_STATUS } from '../statuses'
 
 // Находка Task 22, п.1: «по {N} картинки» верно только для 2-4 — для 1 нужно
 // «картинка», для 5+ и для 11-14 — «картинок». reference_images приходит из
@@ -115,7 +108,7 @@ export default function ArticlesPage() {
             {
               title: 'Статус', dataIndex: 'status', width: 200,
               render: (s: string) => (
-                <Tag color={STATUS[s]?.color}>{STATUS[s]?.label ?? s}</Tag>
+                <Tag color={BATCH_STATUS[s]?.color}>{BATCH_STATUS[s]?.label ?? s}</Tag>
               ),
             },
             {

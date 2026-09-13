@@ -162,3 +162,14 @@ def test_same_slug_allowed_on_different_sites(db_session):
         Article(batch_id=batch2.id, site_id=2, topic="Б", slug="odna-tema"),
     ])
     db_session.commit()   # не должно бросить IntegrityError
+
+
+def test_new_batch_has_no_run_requested_at(db_session):
+    """run_requested_at отмечает момент НАЖАТИЯ «Запустить», а не создания
+    партии: созданная партия может простоять на согласовании тем дни (в проде
+    есть партии в topics_review с августа), поэтому created_at как точка
+    отсчёта ожидания в очереди не годится."""
+    batch = ArticleBatch(site_id=1, requested_count=1, created_by_id=1)
+    db_session.add(batch)
+    db_session.commit()
+    assert batch.run_requested_at is None

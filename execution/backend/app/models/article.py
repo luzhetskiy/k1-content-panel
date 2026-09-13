@@ -56,6 +56,16 @@ class ArticleBatch(Base):
     created_by_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Момент НАЖАТИЯ «Запустить генерацию», а не создания партии. Нужен, чтобы
+    # отличить «задача ещё ждёт свободный воркер» от «задача умерла, не
+    # начавшись» (брокер не принял постановку): воркеров два, очередь реальна.
+    # created_at для этого не годится — партия может простоять на согласовании
+    # тем сколько угодно (в проде есть партии в topics_review с августа), и
+    # разрыв между созданием и запуском произвольный. Выставляется в run()
+    # (app/api/article_batches.py) при каждом запуске, включая повторный.
+    # Читается batch_runtime_state там же.
+    run_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
     articles: Mapped[list["Article"]] = relationship(
         back_populates="batch", cascade="all, delete-orphan", order_by="Article.id")

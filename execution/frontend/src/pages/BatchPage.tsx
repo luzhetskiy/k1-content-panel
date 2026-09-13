@@ -4,9 +4,11 @@ import {
   Alert, Button, Card, Input, Popconfirm, Space, Table, Tag, Typography, message,
 } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import dayjs from 'dayjs'
 import {
   ArticleRow, Batch, getBatch, regenerateArticle, retryArticle, runBatch, saveTopics,
 } from '../api'
+import { BATCH_STATUS, RUNTIME_STATE } from '../statuses'
 
 const EDITABLE = ['topics_pending', 'topics_review', 'failed']
 
@@ -55,6 +57,11 @@ export default function BatchPage() {
 
   useEffect(() => {
     if (!batch) return
+    // Партия, признанная зависшей, сама уже не изменится: собиравшая её задача
+    // мертва, и статусы в БД некому исправить. До 2026-09-13 поллинг этого не
+    // знал и крутился вечно — страница партии 25 опрашивала сервер каждые пять
+    // секунд девять дней подряд, показывая всё то же самое.
+    if (batch.runtime_state === 'stuck') return
     const active = batch.status === 'topics_pending' || batch.status === 'running'
       || batch.articles.some(a => a.status === 'generating' || a.regenerating)
     if (!active) return
@@ -80,6 +87,33 @@ export default function BatchPage() {
   // кнопкой повтора для конкретных упавших статей.
   const hasPublished = batch.articles.some(a => a.status === 'published')
   const editable = EDITABLE.includes(batch.status) && !hasPublished
+
+  const publishedCount = batch.articles.filter(a => a.status === 'published').length
+  const unfinished = batch.articles.length - publishedCount
+  const isStuck = batch.runtime_state === 'stuck'
+  // Сборка реально идёт (или вот-вот начнётся) — в это время нельзя предлагать
+  // ни «Дособрать партию», ни повтор отдельной статьи: задача сама дойдёт до
+  // каждой неопубликованной статьи, а параллельный запуск собрал бы её второй
+  // раз и второй раз за неё заплатил.
+  const busy = batch.runtime_state === 'working' || batch.runtime_state === 'queued'
+  // Зависшую партию перезапускает тот же эндпоинт run(): он сам приводит в
+  // порядок её состояние, а сборка пропускает уже опубликованные статьи.
+  const canContinue = unfinished > 0 && !busy
+    && (isStuck || batch.status === 'done' || batch.status === 'failed')
+  const stateTag = batch.runtime_state
+    ? RUNTIME_STATE[batch.runtime_state]
+    : BATCH_STATUS[batch.status]
+
+  const continueBatch = async () => {
+    setStarting(true)
+    try {
+      await runBatch(batchId)
+      message.success('Сборка продолжена — опубликованные статьи пропускаются')
+      await load()
+    } finally {
+      setStarting(false)
+    }
+  }
 
   const persist = async (next: string[]) => {
     setBatch(await saveTopics(batchId, next))
@@ -120,9 +154,56 @@ export default function BatchPage() {
         вручную в админке сайта.
       </Typography.Paragraph>
 
+      {/* Статуса партии на этой странице не было вовсе — он показывался только
+          в списке партий. Из-за этого оборвавшаяся партия 25 выглядела так же,
+          как работающая: таблица со статьями и никаких признаков того, идёт
+          сборка или давно умерла. Тег берём из runtime_state, когда он есть:
+          «Генерируется» в статусе партии означает лишь, что кто-то нажал
+          кнопку, — статус выставляет эндпоинт до постановки задачи в очередь. */}
+      <Space style={{ marginBottom: 16 }} size={12}>
+        <Tag color={stateTag?.color}>{stateTag?.label ?? batch.status}</Tag>
+        {batch.articles.length > 0 && (
+          <Typography.Text type="secondary">
+            готово {publishedCount} из {batch.articles.length}
+          </Typography.Text>
+        )}
+      </Space>
+
       {batch.error_text && (
         <Alert type="error" showIcon style={{ marginBottom: 16 }}
-               message="Не удалось подобрать темы" description={batch.error_text} />
+               message={batch.articles.length === 0
+                 ? 'Не удалось подобрать темы'
+                 : 'Сборка прервалась'}
+               description={batch.error_text} />
+      )}
+
+      {isStuck && (
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }}
+               message="Похоже, задача зависла"
+               description={
+                 <>
+                   Партия числится в работе
+                   {batch.run_requested_at
+                     ? ` с ${dayjs(batch.run_requested_at).format('D MMMM, HH:mm')}`
+                     : ''}
+                   , но собирающая её задача не подаёт признаков жизни — скорее
+                   всего, она оборвалась. Нажми «Дособрать партию»: уже
+                   опубликованные статьи пропустятся, платить за них второй раз
+                   не придётся.
+                 </>
+               }
+               action={
+                 <Button type="primary" loading={starting} onClick={continueBatch}>
+                   Дособрать партию
+                 </Button>
+               } />
+      )}
+
+      {batch.runtime_state === 'queued' && (
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+               message="Ждёт свободного места"
+               description="Одновременно собираются не больше двух партий. Эта стоит
+                            в очереди и начнётся, как только освободится место." />
       )}
 
       {batch.status === 'topics_pending' && (
@@ -186,7 +267,20 @@ export default function BatchPage() {
           </Space>
         </Card>
       ) : (
-        <Card styles={{ body: { padding: 0 } }}>
+        <Card
+          styles={{ body: { padding: 0 } }}
+          title="Статьи"
+          extra={canContinue && !isStuck && (
+            // При isStuck кнопка уже стоит в предупреждении выше — второй раз
+            // рядом с таблицей она была бы шумом.
+            <Popconfirm
+              title={`Дособрать ${unfinished} ${unfinished === 1 ? 'статью' : 'статьи'}?`}
+              description="Опубликованные статьи пропускаются — заново за них не платим."
+              onConfirm={continueBatch}>
+              <Button type="primary" loading={starting}>Дособрать партию</Button>
+            </Popconfirm>
+          )}
+        >
           <Table
             rowKey="id"
             dataSource={batch.articles}
@@ -208,9 +302,17 @@ export default function BatchPage() {
               {
                 title: '', width: 300,
                 render: (_, r: ArticleRow) => {
-                  if (r.status === 'failed') {
+                  // draft здесь появился 2026-09-13. Бэкенд повтор статьи в
+                  // этом статусе принимал и раньше (отклоняются только
+                  // published и generating), но кнопки не было — у партии 25
+                  // 23 статьи висели в «Ожидает» без единого действия рядом.
+                  // Пока сборка идёт, кнопку не показываем: задача сама дойдёт
+                  // до этой статьи, а параллельный повтор собрал бы её дважды.
+                  if (r.status === 'failed' || (r.status === 'draft' && !busy)) {
                     return (
-                      <Popconfirm title="Повторить генерацию этой статьи?"
+                      <Popconfirm title={r.status === 'draft'
+                        ? 'Собрать эту статью отдельно?'
+                        : 'Повторить генерацию этой статьи?'}
                                   onConfirm={async () => { await retryArticle(r.id); load() }}>
                         <Button type="text" icon={<ReloadOutlined />} />
                       </Popconfirm>

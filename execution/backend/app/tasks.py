@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from celery import current_task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.ai.factory import AIConfigError, build_text_client
@@ -43,8 +44,18 @@ _TOPICS_TOPUP_ROUNDS = 2
 
 def _start_job(db, kind: str, site_id: int | None, created_by_id: int | None,
                params: dict) -> JobRun:
+    # celery_task_id существует в модели с Task 14, но до 2026-09-13 никогда не
+    # заполнялся — по строке журнала нельзя было найти задачу в логах воркера,
+    # а именно это понадобилось при разборе партии 25. Логика видимости
+    # зависших (batch_runtime_state) на него НЕ опирается: у Redis-бэкенда
+    # результат живёт сутки, после чего AsyncResult отдаёт PENDING и для
+    # мёртвой задачи, и для стоящей в очереди. Поле — для человека с логами.
+    # current_task пуст, когда *_sync вызвана напрямую (тесты) — тогда пустая
+    # строка, как и раньше.
+    task = current_task
     job = JobRun(kind=kind, site_id=site_id, created_by_id=created_by_id,
-                 params_json=params, status="running")
+                 params_json=params, status="running",
+                 celery_task_id=(task.request.id or "") if task else "")
     db.add(job)
     db.commit()
     return job

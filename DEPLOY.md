@@ -74,26 +74,47 @@ ssh k1-panel-vps
 cd ~/k1-content-panel/execution
 git pull origin main
 
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 
 # миграции применяет сервис migrate — он отрабатывает до api/worker
-docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
 ```
 
 `--build` обязателен: образы собираются из исходников, bind-mount'ов в
 проде нет, без пересборки контейнеры поднимутся на старом коде.
 
+`--env-file .env.prod` обязателен в КАЖДОЙ команде compose на проде: сам
+compose подхватывает только файл с именем `.env`, а секреты лежат в
+`.env.prod`. Без флага команда падает сразу и внятно («DB_PASSWORD не задан»
+из формы `${VAR:?}`, см. docker-compose.prod.yml) — но падает она и на
+безобидных `ps`/`logs`, поэтому флаг проще держать всегда, чем вспоминать,
+какой команде он нужен.
+
 Проверка после деплоя:
 
 ```bash
+# 1. ОБЯЗАТЕЛЬНО: перезагрузить nginx фронтенда.
+#
+# Не «если что-то сломалось», а всегда, когда пересобрались api/worker.
+# Контейнер frontend пересоздаётся ТОЛЬКО если менялись файлы фронта; если
+# релиз чисто бэкендный, он продолжает работать со старым IP контейнера api,
+# который его nginx зарезолвил при СВОЁМ старте (`proxy_pass http://api:8000`
+# резолвится один раз). У пересозданного api internal IP другой — снаружи
+# 502, при этом изнутри контейнера всё отвечает 200, и деплой выглядит
+# сломанным, хотя сломан только кэш резолвера.
+# Проверено 2026-09-12: бэкендный релиз дал ровно эту картину.
+docker exec execution-frontend-1 nginx -s reload
+
+# 2. Здоровье снаружи, а не изнутри: изнутри контейнера DNS резолвится заново
+# на каждый вызов и 502 не воспроизводится.
 curl -s https://content-panel.nastroyker.ru/api/health   # {"status":"ok"}
-docker compose -f docker-compose.prod.yml logs --tail=50 api
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail=50 api
 
 # Воркер обязан перечислить задачи generate_topics/run_batch/retry_article.
 # Пустой список или строки `Received unregistered task of type ...` означают,
 # что задачи уходят в никуда и конвейер молча стоит, хотя health отвечает 200.
-docker compose -f docker-compose.prod.yml logs worker | grep -A6 '\[tasks\]'
-docker compose -f docker-compose.prod.yml logs worker | grep -c unregistered   # 0
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs worker | grep -A6 '\[tasks\]'
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs worker | grep -c unregistered   # 0
 ```
 
 Откат — на предыдущий коммит, той же командой:
@@ -101,7 +122,8 @@ docker compose -f docker-compose.prod.yml logs worker | grep -c unregistered   #
 ```bash
 git log --oneline -5
 git checkout <sha>
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+docker exec execution-frontend-1 nginx -s reload
 ```
 
 Схему БД откат назад не отменяет: если релиз содержал миграцию, откатывать

@@ -22,18 +22,54 @@ def _set_text(tag, text: str) -> None:
     tag.append(NavigableString(text))
 
 
+_DISPLAY_NONE = "display:none"
+
+
+def _declarations(tag) -> list[str]:
+    return [d.strip() for d in (tag.get("style") or "").split(";") if d.strip()]
+
+
+def _set_style(tag, declarations: list[str]) -> None:
+    if declarations:
+        tag["style"] = ";".join(declarations)
+    elif "style" in tag.attrs:
+        del tag["style"]
+
+
+def _without_display(declarations: list[str]) -> list[str]:
+    return [d for d in declarations if d.split(":", 1)[0].strip().lower() != "display"]
+
+
 def _hide(tag) -> None:
     """Лишний элемент блока логотипа скрывается, а не удаляется: шаблон
     сайта синхронизируется с уже собранной страницы (app/companies/
     reference.py), поэтому удалённый элемент исчез бы из шаблона навсегда —
     и следующая компания осталась бы либо без картинки, либо без подписи."""
     tag["hidden"] = ""
+    # Одного атрибута мало: он работает правилом [hidden]{display:none} из
+    # таблицы стилей браузера, а любое авторское правило перебивает её
+    # независимо от специфичности. У запасной подписи класс h2, и в CSS
+    # сайтов есть h2,.h2{display:block;line-height:28px;margin-bottom:25px} —
+    # из-за этого скрытая пустая подпись занимала полосу под логотипом на
+    # каждой странице строителя. Инлайновый стиль не перебивает ничто, кроме
+    # !important.
+    _set_style(tag, _without_display(_declarations(tag)) + [_DISPLAY_NONE])
     if tag.name == "img" and "src" in tag.attrs:
         # без src скрытая картинка не делает лишнего запроса; пустой src
         # (как в шаблоне по умолчанию) сохранять в data-src незачем
         if tag["src"]:
             tag["data-src"] = tag["src"]
         del tag["src"]
+
+
+def _show(tag) -> None:
+    """Обратная _hide операция. Снять инлайновый display:none так же важно,
+    как и атрибут: в шаблон элемент приезжает с уже собранной страницы, где
+    прошлая компания его скрыла, — без снятия логотип следующей компании был
+    бы невидим."""
+    if "hidden" in tag.attrs:
+        del tag["hidden"]
+    _set_style(tag, _without_display(_declarations(tag)))
 
 
 def fill_builder_template(template: str, info: dict) -> str:
@@ -75,7 +111,7 @@ def fill_builder_template(template: str, info: dict) -> str:
         if logo_img:
             logo_img["src"] = logo_src
             logo_img["alt"] = logo_alt
-            del logo_img["hidden"]
+            _show(logo_img)
         if logo_text_span:
             _set_text(logo_text_span, "")
             _hide(logo_text_span)
@@ -84,7 +120,7 @@ def fill_builder_template(template: str, info: dict) -> str:
             _hide(logo_img)
         if logo_text_span:
             _set_text(logo_text_span, name)
-            del logo_text_span["hidden"]
+            _show(logo_text_span)
 
     main_title = soup.find(id="builder-main-title")
     if main_title:

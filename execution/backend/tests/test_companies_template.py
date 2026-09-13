@@ -152,3 +152,66 @@ def test_fill_hidden_image_keeps_reference_src_in_data_attribute():
     html = fill_builder_template(template, _info(builder_logo_src=""))
     soup = BeautifulSoup(html, "html.parser")
     assert soup.find(id="builder-logo").get("data-src") == "/media/ref.svg"
+
+
+def test_fill_hides_text_with_inline_style_not_only_attribute():
+    """Атрибута hidden мало. Он работает правилом [hidden]{display:none} из
+    таблицы стилей браузера, а любое авторское правило перебивает её
+    независимо от специфичности. У запасной подписи класс h2, и в CSS сайтов
+    есть h2,.h2{display:block;line-height:28px;margin-bottom:25px} — из-за
+    этого пустая подпись занимала полосу под логотипом на каждой странице
+    строителя (жалоба по проду 13.09.2026)."""
+    html = fill_builder_template(TEMPLATE, _info(builder_logo_src="/media/logo.svg"))
+    soup = BeautifulSoup(html, "html.parser")
+    assert "display:none" in soup.find(id="builder-logo-text").get("style", "")
+
+
+def test_fill_hides_image_with_inline_style_not_only_attribute():
+    html = fill_builder_template(TEMPLATE, _info(builder_logo_src=""))
+    soup = BeautifulSoup(html, "html.parser")
+    assert "display:none" in soup.find(id="builder-logo").get("style", "")
+
+
+def test_fill_strips_inline_display_none_from_shown_image():
+    """Петля «страница → шаблон → страница»: шаблон синхронизируется с уже
+    собранной страницы, поэтому скрытый в прошлой сборке элемент приезжает в
+    шаблон вместе со стилем — без снятия следующая компания получила бы
+    невидимый логотип."""
+    template = TEMPLATE.replace(
+        '<img id="builder-logo" src="" alt="">',
+        '<img id="builder-logo" src="" alt="" hidden style="display:none">')
+    html = fill_builder_template(template, _info(builder_logo_src="/media/logo.svg"))
+    logo = BeautifulSoup(html, "html.parser").find(id="builder-logo")
+    assert not logo.has_attr("hidden")
+    assert "display" not in logo.get("style", "")
+
+
+def test_fill_strips_inline_display_none_from_shown_text():
+    template = TEMPLATE.replace(
+        '<span id="builder-logo-text"></span>',
+        '<span id="builder-logo-text" hidden style="display:none"></span>')
+    html = fill_builder_template(template, _info(builder_logo_src=""))
+    span = BeautifulSoup(html, "html.parser").find(id="builder-logo-text")
+    assert not span.has_attr("hidden")
+    assert "display" not in span.get("style", "")
+    assert span.get_text(strip=True) == "ООО Дом"
+
+
+def test_fill_keeps_unrelated_inline_styles_when_hiding():
+    template = TEMPLATE.replace(
+        '<span id="builder-logo-text"></span>',
+        '<span id="builder-logo-text" style="color:red"></span>')
+    html = fill_builder_template(template, _info(builder_logo_src="/media/logo.svg"))
+    style = BeautifulSoup(html, "html.parser").find(id="builder-logo-text").get("style", "")
+    assert "color:red" in style
+    assert "display:none" in style
+
+
+def test_fill_keeps_unrelated_inline_styles_when_showing():
+    template = TEMPLATE.replace(
+        '<span id="builder-logo-text"></span>',
+        '<span id="builder-logo-text" hidden style="color:red;display:none"></span>')
+    html = fill_builder_template(template, _info(builder_logo_src=""))
+    style = BeautifulSoup(html, "html.parser").find(id="builder-logo-text").get("style", "")
+    assert "color:red" in style
+    assert "display" not in style

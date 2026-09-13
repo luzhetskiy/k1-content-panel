@@ -4,7 +4,7 @@ import { ConfigProvider, Layout, Menu, Drawer, Button, Dropdown } from 'antd'
 import {
   FileTextOutlined, HomeOutlined, GlobalOutlined, BulbOutlined,
   SettingOutlined, TeamOutlined, HistoryOutlined, MenuOutlined,
-  CloseOutlined, UserOutlined,
+  CloseOutlined, UserOutlined, NotificationOutlined,
 } from '@ant-design/icons'
 import { useAuth } from './auth'
 import { logout } from './api'
@@ -18,6 +18,7 @@ import AdminSitesPage from './pages/AdminSitesPage'
 import AdminPromptsPage from './pages/AdminPromptsPage'
 import AdminSettingsPage from './pages/AdminSettingsPage'
 import AdminUsersPage from './pages/AdminUsersPage'
+import ChangelogPage from './pages/ChangelogPage'
 
 const { Sider, Content } = Layout
 
@@ -31,6 +32,7 @@ const navItems = [
   // а не «нет проверки роли», которую всё равно делает бэкенд на каждый запрос.
   { key: '/admin/sites', label: 'Сайты', icon: <GlobalOutlined />, admin: false },
   { key: '/admin/prompts', label: 'Промпты', icon: <BulbOutlined />, admin: false },
+  { key: '/changelog', label: 'Доработки', icon: <NotificationOutlined />, admin: false },
   { key: '/admin/settings', label: 'Настройки', icon: <SettingOutlined />, admin: true },
   { key: '/admin/users', label: 'Пользователи', icon: <TeamOutlined />, admin: true },
 ]
@@ -205,6 +207,7 @@ function Shell() {
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/admin/sites" element={<AdminSitesPage />} />
             <Route path="/admin/prompts" element={<AdminPromptsPage />} />
+            <Route path="/changelog" element={<ChangelogPage />} />
             <Route path="/admin/settings" element={<AdminRoute><AdminSettingsPage /></AdminRoute>} />
             <Route path="/admin/users" element={<AdminRoute><AdminUsersPage /></AdminRoute>} />
           </Routes>

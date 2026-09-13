@@ -723,3 +723,32 @@ def test_remote_url_has_no_double_slash_for_base_url_with_trailing_slash(db_sess
     _builder(db_session, company, site).build()
 
     assert company.remote_url == "https://s.ru/s/ooo-dom-samara/"
+
+
+def test_rebuild_updates_page_title_with_prepositional_city(db_session, site, company):
+    """Пересборка правит и шапку страницы, а не только текст: иначе у уже
+    созданных карточек навсегда осталось бы «Рубкофф — монтаж в Москва» —
+    ровно та форма именительного падежа, ради которой заводился
+    city_prepositional. Обнаружено на проде при пересборке страницы 338."""
+    _seed_prompts(db_session)
+    db_session.add(site)
+    db_session.add(company.batch)
+    db_session.commit()
+    company.batch_id = company.batch.id
+    company.remote_page_id = 338
+    db_session.add(company)
+    db_session.add(CompanyInfo(company_id=company.id, builder_name="Рубкофф",
+                               city_name="Москва", city_prepositional="Москве",
+                               address="ул. Ленина 1",
+                               contacts=[{"address": "ул. Ленина 1"}]))
+    db_session.commit()
+
+    site_client = Mock(
+        update_page_text=Mock(return_value={"id": 338, "url": "/s/rubkoff-moskva/"}),
+        update_teaser=Mock(return_value=90), create_teaser=Mock(return_value=90),
+        upload_file=Mock())
+    _builder(db_session, company, site, site_client=site_client).build()
+
+    kwargs = site_client.update_page_text.call_args.kwargs
+    assert "в Москве" in kwargs["title"]
+    assert "в Москве" in kwargs["meta_description"]

@@ -208,23 +208,31 @@ class CompanyBuilder:
         # rstrip ссылка на страницу склеивается с двойным слэшем
         # (https://stroybaza-tveri.ru//s/tverstroy-tver/ на проде).
         base_url = self.site.base_url.rstrip("/")
+        name = info.builder_name or self.company.name
+        city = info.city_name or self.company.region
+        city_in = info.city_prepositional or city
+        title = f"{name} — {self.company.category_normalized} в {city_in}"
+        meta_description = (f"{name} — {self.company.category_normalized} в {city_in}. "
+                            f"Контакты, услуги, отзывы.")
         if self.company.remote_page_id:
-            page = self.site_client.update_page_text(self.company.remote_page_id, html)
+            # Заголовок и описание обновляются наравне с текстом: иначе у уже
+            # созданных страниц навсегда осталась бы форма именительного
+            # падежа («Рубкофф — монтаж в Москва»), ради которой и заводился
+            # city_prepositional — пересборка правит текст, но не шапку.
+            page = self.site_client.update_page_text(
+                self.company.remote_page_id, html, title=title,
+                meta_description=meta_description)
             self.company.remote_page_id = page.get("id", self.company.remote_page_id)
             if page.get("url"):
                 self.company.remote_url = f"{base_url}{page['url']}"
         else:
-            name = info.builder_name or self.company.name
-            city = info.city_name or self.company.region
             # Slug остаётся в именительном падеже: он детерминирован и уже
             # опубликован, смена ломала бы обновление существующих страниц.
             slug = slug_for_company(name, city)
-            city_in = info.city_prepositional or city
             page = self.site_client.create_page(
-                title=f"{name} — {self.company.category_normalized} в {city_in}",
+                title=title,
                 url=f"/s/{slug}/", html=html, parent_id=self.site.builder_parent_id,
-                meta_description=f"{name} — {self.company.category_normalized} в {city_in}. "
-                                 f"Контакты, услуги, отзывы.",
+                meta_description=meta_description,
             )
             self.company.remote_page_id = page["id"]
             self.company.remote_url = f"{base_url}{page.get('url', '')}"

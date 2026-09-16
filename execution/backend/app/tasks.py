@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
+
 from celery import current_task
 from celery.exceptions import SoftTimeLimitExceeded
 
@@ -13,16 +16,28 @@ from app.ai.text import LLMError
 from app.api.admin_sites import open_client as open_site_client
 from app.articles.builder import build_for, regenerate_article_for
 from app.articles.topics import filter_duplicates
+from app.category_meta.generator import MetaValidationError, generate_category
+from app.category_meta.runs import active_run, finish_run_if_complete, next_queued
+from app.category_meta.seeds import SeedsError, generate_seeds, needs_seed
+from app.category_meta.tree import sync_categories
 from app.celery_app import celery_app
 from app.clock import utcnow
 from app.companies.builder import build_for as build_for_company
 from app.db import SessionLocal
 from app.models.article import Article, ArticleBatch
 from app.models.company import Company, CompanyBatch
-from app.models.job import JobRun
+from app.models.category_meta import CategoryMeta, MetaRun
+from app.models.job import JobRun, LlmUsage
 from app.models.site import Site
 from app.settings.crypto import SecretDecryptionError
 from app.sites.client import SiteAPIError
+from app.wordstat.client import WordstatAuthError, WordstatError
+from app.wordstat.factory import (
+    WordstatConfigError, build_wordstat_client, hourly_limit, stoplist,
+)
+from app.wordstat.quota import QuotaExceeded
+
+logger = logging.getLogger(__name__)
 
 # Статусы партии, из которых имеет смысл (пере)генерировать темы — находка №3
 # ревью Task 17. topics_pending — обычный старт; failed — ручной перезапуск
@@ -609,3 +624,238 @@ def retry_company(company_id: int) -> None:
         retry_company_sync(db, company_id)
     finally:
         db.close()
+
+
+# --- метатеги категорий (directions/2026-09-16-category-meta-design.md) ---
+#
+# Цепочка: запуск ставит в Celery только первую категорию, каждая задача по
+# завершении — следующую. Проект занимает не больше одного слота воркера из двух.
+
+# Худший случай категории: Wordstat 3 запроса × (30 с × 3 попытки + паузы 2+4)
+# = 288 с; LLM 2 попытки × 366 с = 732 с; запись на сайт 3 попытки ×
+# (список метатегов 120 с + запись 60 с) + паузы 1+2 = 543 с. Итого ≈ 1563 с.
+CATEGORY_SOFT_LIMIT = 1600
+CATEGORY_HARD_LIMIT = 1780
+# Подготовка запуска: страницы категорий и sitemap (~360 с) + фразы LLM пачками
+# по 60 категорий (366 с на пачку). 2400 с хватает на ~250 категорий.
+RUN_START_SOFT_LIMIT = 2400
+RUN_START_HARD_LIMIT = 2580
+# У Redis-брокера visibility_timeout — час: задача с ETA дольше него
+# доставляется повторно. Поэтому ждём квоту кусками не больше 10 минут.
+MAX_QUOTA_COUNTDOWN_SECONDS = 600
+
+SEED_MISSING_TEXT = ("модель не вернула поисковую фразу для категории — "
+                     "запустите обновление ещё раз")
+
+
+def _record_usage(db, job_run_id: int, model: str, tokens_prompt: int,
+                  tokens_completion: int, cost: float) -> None:
+    db.add(LlmUsage(job_run_id=job_run_id, kind="text", model=model,
+                    tokens_prompt=tokens_prompt, tokens_completion=tokens_completion, cost=cost))
+    db.commit()
+
+
+def _close_run_job(db, run: MetaRun) -> None:
+    job = db.get(JobRun, run.job_run_id) if run.job_run_id else None
+    if job is None or job.finished_at is not None:
+        return
+    if run.error_text:
+        _finish_job(db, job, "failed", run.error_text)
+        return
+    failed = db.query(CategoryMeta).filter(CategoryMeta.site_id == run.site_id,
+                                           CategoryMeta.status == "failed").count()
+    done = db.query(CategoryMeta).filter(CategoryMeta.site_id == run.site_id,
+                                         CategoryMeta.status == "done").count()
+    _finish_job(db, job, "ok" if not failed else "failed",
+                f"готово {done}/{run.total}, ошибок {failed}")
+
+
+def _complete_run(db, site_id: int) -> None:
+    run = finish_run_if_complete(db, site_id)
+    if run is not None:
+        _close_run_job(db, run)
+
+
+def _fail_run(db, run: MetaRun, text: str) -> None:
+    run.error_text = text
+    run.finished_at = utcnow()
+    db.commit()
+    _close_run_job(db, run)
+
+
+def start_meta_run_sync(db, run_id: int) -> int | None:
+    """Синхронизация дерева и фразы; возвращает id первой категории для цепочки."""
+    run = db.get(MetaRun, run_id)
+    site = db.get(Site, run.site_id)
+    job = _start_job(db, "category_meta_run", site.id, run.created_by_id, {"run_id": run_id})
+    run.job_run_id = job.id
+    db.commit()
+    try:
+        synced = sync_categories(db, site, open_site_client(db, site))
+        pending = [row for row in synced.active if needs_seed(row)]
+        missing_ids: set[int] = set()
+        if pending:
+            text_client = build_text_client(db)
+            missing = generate_seeds(
+                db, site, pending, text_client,
+                lambda tp, tc, cost: _record_usage(db, job.id, text_client.model, tp, tc, cost))
+            missing_ids = {row.id for row in missing}
+        for row in synced.active:
+            row.wait_until = None
+            row.started_at = None
+            row.updated_at = utcnow()
+            if row.id in missing_ids or not row.seed_phrase:
+                row.status, row.error_text = "failed", SEED_MISSING_TEXT
+            else:
+                row.status, row.error_text = "queued", ""
+        run.total = len(synced.active)
+        db.commit()
+    except SoftTimeLimitExceeded:
+        db.rollback()
+        _fail_run(db, run, "превышен лимит времени подготовки запуска")
+        return None
+    except (SiteAPIError, LLMError, PromptError, SeedsError, AIConfigError,
+            SecretDecryptionError) as exc:
+        db.rollback()
+        _fail_run(db, run, str(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        db.rollback()
+        _fail_run(db, run, f"непредвиденная ошибка: {type(exc).__name__}: {exc}")
+        raise
+
+    first = next_queued(db, site.id)
+    if first is None:
+        _complete_run(db, site.id)
+        return None
+    return first.id
+
+
+def _fail_category(db, category: CategoryMeta, text: str) -> None:
+    category.status = "failed"
+    category.error_text = text
+    category.wait_until = None
+    category.updated_at = utcnow()
+    db.commit()
+
+
+def _fail_queued(db, site_id: int, text: str) -> None:
+    """Ошибка конфигурации (ключ Wordstat, RouterAI) — одна на весь запуск:
+    остальные категории в очереди получают тот же текст, запуск закрывается."""
+    for row in db.query(CategoryMeta).filter(CategoryMeta.site_id == site_id,
+                                             CategoryMeta.status == "queued").all():
+        row.status, row.error_text, row.wait_until = "failed", text, None
+        row.updated_at = utcnow()
+    db.commit()
+
+
+def generate_category_meta_sync(db, category_id: int,
+                                continue_run: bool = True) -> tuple[float | None, int | None]:
+    """Возвращает (countdown для повтора этой же задачи, id следующей категории цепочки)."""
+    category = db.get(CategoryMeta, category_id)
+    if category is None:
+        return None, None
+    site = db.get(Site, category.site_id)
+    if category.status != "queued":
+        # Категорию уже взяла другая задача (перегенерация или вторая цепочка
+        # после перезапуска) — не обрабатываем дважды, но цепочку не рвём.
+        if not continue_run:
+            return None, None
+        following = next_queued(db, site.id)
+        return None, (following.id if following and following.id != category_id else None)
+
+    run = active_run(db, site.id) if continue_run else None
+    own_job: JobRun | None = None
+
+    def job_id() -> int:
+        nonlocal own_job
+        if run is not None and run.job_run_id is not None:
+            return run.job_run_id
+        if own_job is None:
+            own_job = _start_job(db, "category_meta", site.id, None, {"category_id": category_id})
+        return own_job.id
+
+    category.status = "in_work"
+    category.started_at = utcnow()
+    category.updated_at = utcnow()
+    db.commit()
+
+    stop_run_text = ""
+    try:
+        text_client = build_text_client(db)
+        generate_category(
+            db, category, site,
+            wordstat_factory=lambda: build_wordstat_client(db),
+            text_client=text_client, site_client=open_site_client(db, site),
+            limit=hourly_limit(db), stoplist=stoplist(db),
+            record_usage=lambda tp, tc, cost: _record_usage(db, job_id(), text_client.model,
+                                                            tp, tc, cost))
+    except QuotaExceeded as wait:
+        db.rollback()
+        category.status = "queued"
+        category.wait_until = utcnow() + timedelta(seconds=wait.seconds)
+        category.updated_at = utcnow()
+        db.commit()
+        return min(wait.seconds, MAX_QUOTA_COUNTDOWN_SECONDS), None
+    except SoftTimeLimitExceeded:
+        db.rollback()
+        _fail_category(db, category, "превышен лимит времени задачи")
+    except (WordstatAuthError, WordstatConfigError, AIConfigError, SecretDecryptionError) as exc:
+        db.rollback()
+        _fail_category(db, category, str(exc))
+        stop_run_text = str(exc)
+    except (WordstatError, LLMError, PromptError, SiteAPIError, MetaValidationError,
+            SeedsError) as exc:
+        db.rollback()
+        _fail_category(db, category, str(exc))
+    except Exception as exc:  # noqa: BLE001 — барьер: цепочка не должна рваться
+        logger.exception("метатеги категории %s: непредвиденная ошибка", category_id)
+        db.rollback()
+        _fail_category(db, category, f"непредвиденная ошибка: {type(exc).__name__}: {exc}")
+
+    if own_job is not None:
+        _finish_job(db, own_job, "ok" if category.status == "done" else "failed",
+                    category.error_text)
+    if stop_run_text:
+        _fail_queued(db, site.id, stop_run_text)
+    _complete_run(db, site.id)
+    if not continue_run:
+        return None, None
+    following = next_queued(db, site.id)
+    return None, (following.id if following else None)
+
+
+def enqueue_category_meta(category_id: int, *, continue_run: bool = True,
+                          countdown: float = 0) -> None:
+    generate_category_meta.apply_async(
+        args=[category_id], kwargs={"continue_run": continue_run}, countdown=countdown,
+        soft_time_limit=CATEGORY_SOFT_LIMIT, time_limit=CATEGORY_HARD_LIMIT)
+
+
+def enqueue_meta_run(run_id: int) -> None:
+    start_meta_run.apply_async(args=[run_id], soft_time_limit=RUN_START_SOFT_LIMIT,
+                               time_limit=RUN_START_HARD_LIMIT)
+
+
+@celery_app.task(name="app.tasks.start_meta_run")
+def start_meta_run(run_id: int) -> None:
+    db = SessionLocal()
+    try:
+        first = start_meta_run_sync(db, run_id)
+    finally:
+        db.close()
+    if first is not None:
+        enqueue_category_meta(first)
+
+
+@celery_app.task(name="app.tasks.generate_category_meta")
+def generate_category_meta(category_id: int, continue_run: bool = True) -> None:
+    db = SessionLocal()
+    try:
+        countdown, following = generate_category_meta_sync(db, category_id, continue_run)
+    finally:
+        db.close()
+    if countdown:
+        enqueue_category_meta(category_id, continue_run=continue_run, countdown=countdown)
+    elif following is not None:
+        enqueue_category_meta(following)

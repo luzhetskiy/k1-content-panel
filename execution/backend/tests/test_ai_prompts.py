@@ -96,6 +96,15 @@ def test_default_prompts_render_with_real_contexts(db_session):
         "builder_text": {"company_name": "ООО Стройка", "city": "Пермь",
                          "category": "застройщик", "site_name": "X", "tone_of_voice": "тон",
                          "scraped_text": "О компании: строим дома с 2010 года."},
+        "category_seeds": {"site_name": "X", "site_description": "описание",
+                           "categories": ["46: Листовые материалы / Фанера"]},
+        "category_meta": {"site_name": "X", "site_description": "описание",
+                          "category_name": "Фанера", "category_path": "Листовые материалы / Фанера",
+                          "form_nominative": "фанера", "form_buy": "купить фанеру",
+                          "form_price": "цена фанеры", "chosen_form": "nominative",
+                          "sell_word": "купить", "city_in": "в Москве", "brand": "Стройбаза",
+                          "total_count": 96275, "phrases": ["фанера — 96275"],
+                          "violations": ["h1 пустой"]},
     }
     for key in PROMPT_KEYS:
         # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из

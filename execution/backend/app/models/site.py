@@ -76,3 +76,12 @@ class Site(Base):
     builder_reference_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     builder_reference_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
+
+    # --- метатеги категорий (directions/2026-09-16-category-meta-design.md) ---
+    meta_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    city: Mapped[str] = mapped_column(String(200), default="")
+    # С предлогом: «в Москве», «во Владимире» — предлог зависит от слова, поэтому
+    # хранится готовой фразой, а не падежной формой.
+    city_in: Mapped[str] = mapped_column(String(200), default="")
+    wordstat_region_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    brand: Mapped[str] = mapped_column(String(200), default="")

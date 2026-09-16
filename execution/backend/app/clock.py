@@ -6,6 +6,14 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def as_utc(moment: datetime) -> datetime:
+    """Момент из БД — с таймзоной. Postgres отдаёт aware, SQLite (тесты) — naive;
+    naive трактуем как UTC, как и в seconds_since ниже."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
 def seconds_since(moment: datetime) -> float:
     """Сколько секунд прошло с `moment`, прочитанного из БД.
 

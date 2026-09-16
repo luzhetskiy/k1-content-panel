@@ -1,4 +1,5 @@
 from app.models.article import Article, ArticleBatch, ArticleImage
+from app.models.category_meta import CategoryMeta, MetaRun, WordstatCache, WordstatCall
 from app.models.company import (
     Company, CompanyBatch, CompanyCandidate, CompanyImport, CompanyInfo,
 )
@@ -13,6 +14,7 @@ from app.models.user import User
 # модель — добавляй сюда, а не в env.py/conftest.py по отдельности.
 __all__ = [
     "Article", "ArticleBatch", "ArticleImage",
+    "CategoryMeta", "MetaRun", "WordstatCache", "WordstatCall",
     "Company", "CompanyBatch", "CompanyCandidate", "CompanyImport", "CompanyInfo",
     "JobRun", "LlmUsage",
     "PromptTemplate", "Setting", "Site", "User",

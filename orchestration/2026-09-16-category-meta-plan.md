@@ -1639,6 +1639,18 @@ def test_normalize_tags_joins_lists_and_lowercases_keywords():
     assert tags["ai_keywords"] == "Где купить, фанеру"
 
 
+def test_normalize_tags_capitalizes_visible_fields():
+    """2026-09-16 на живой проверке модель вернула title «купить профнастил в Москве…»."""
+    tags = normalize_tags({"title": "купить профнастил в Москве | Стройбаза", "h1": "профнастил",
+                           "meta_description": "профнастил в Москве", "meta_keywords": "профнастил",
+                           "ai_keywords": "где купить профнастил"})
+    assert tags["title"] == "Купить профнастил в Москве | Стройбаза"
+    assert tags["h1"] == "Профнастил"
+    assert tags["meta_description"] == "Профнастил в Москве"
+    assert tags["meta_keywords"] == "профнастил"
+    assert tags["ai_keywords"] == "где купить профнастил"
+
+
 def test_normalize_tags_rejects_non_object():
     with pytest.raises(ValueError):
         normalize_tags(["title"])
@@ -1714,6 +1726,10 @@ def normalize_tags(raw: object) -> dict:
         if isinstance(value, list):
             value = ", ".join(str(item) for item in value)
         tags[name] = " ".join(str(value or "").split())
+    # Видимые поля — с заглавной: модель иногда начинает title со строчной
+    # («купить профнастил в Москве…», живая проверка 2026-09-16).
+    for name in ("title", "h1", "meta_description"):
+        tags[name] = tags[name][:1].upper() + tags[name][1:]
     tags["meta_keywords"] = ", ".join(p.casefold() for p in split_phrases(tags["meta_keywords"]))
     tags["ai_keywords"] = ", ".join(split_phrases(tags["ai_keywords"]))
     return tags
@@ -1791,7 +1807,7 @@ def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
 - [ ] **Step 4: Тесты зелёные**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_category_meta_validate.py`
-Expected: PASS (14 passed).
+Expected: PASS (15 passed).
 
 - [ ] **Step 5: Мутационная проверка**
 

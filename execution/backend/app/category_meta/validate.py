@@ -56,6 +56,10 @@ def normalize_tags(raw: object) -> dict:
         if isinstance(value, list):
             value = ", ".join(str(item) for item in value)
         tags[name] = " ".join(str(value or "").split())
+    # Видимые поля — с заглавной: модель иногда начинает title со строчной
+    # («купить профнастил в Москве…», живая проверка 2026-09-16).
+    for name in ("title", "h1", "meta_description"):
+        tags[name] = tags[name][:1].upper() + tags[name][1:]
     tags["meta_keywords"] = ", ".join(p.casefold() for p in split_phrases(tags["meta_keywords"]))
     tags["ai_keywords"] = ", ".join(split_phrases(tags["ai_keywords"]))
     return tags

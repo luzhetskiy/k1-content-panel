@@ -125,6 +125,18 @@ def test_normalize_tags_joins_lists_and_lowercases_keywords():
     assert tags["ai_keywords"] == "Где купить, фанеру"
 
 
+def test_normalize_tags_capitalizes_visible_fields():
+    """2026-09-16 на живой проверке модель вернула title «купить профнастил в Москве…»."""
+    tags = normalize_tags({"title": "купить профнастил в Москве | Стройбаза", "h1": "профнастил",
+                           "meta_description": "профнастил в Москве", "meta_keywords": "профнастил",
+                           "ai_keywords": "где купить профнастил"})
+    assert tags["title"] == "Купить профнастил в Москве | Стройбаза"
+    assert tags["h1"] == "Профнастил"
+    assert tags["meta_description"] == "Профнастил в Москве"
+    assert tags["meta_keywords"] == "профнастил"
+    assert tags["ai_keywords"] == "где купить профнастил"
+
+
 def test_normalize_tags_rejects_non_object():
     with pytest.raises(ValueError):
         normalize_tags(["title"])

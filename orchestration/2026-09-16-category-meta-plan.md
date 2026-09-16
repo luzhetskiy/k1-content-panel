@@ -2469,11 +2469,21 @@ def test_city_in_normalizes_answer():
     assert "«Владимир»" in prompts[0]
 
 
-def test_city_in_rejects_garbage():
+@pytest.mark.parametrize("answer,expected", [
+    # 2026-09-16 на живой проверке модель вернула всю фразу из примера промпта
+    ("купить стройматериалы в Москве", "в Москве"),
+    ("Ответ: в Великом Новгороде.", "в Великом Новгороде"),
+    ("в Ростове-на-Дону", "в Ростове-на-Дону"),
+])
+def test_city_in_extracted_from_longer_answer(answer, expected):
+    assert city_in_for(client(answer), "Город") == expected
+
+
+def test_city_in_rejects_answer_without_preposition():
     with pytest.raises(CityFormError):
         city_in_for(client("Москве"), "Москва")
     with pytest.raises(CityFormError):
-        city_in_for(client("Конечно! Вот ответ: в Москве"), "Москва")
+        city_in_for(client("не знаю такого города"), "Москва")
 ```
 
 - [ ] **Step 2: Поправить существующие тесты промптов**
@@ -2686,13 +2696,16 @@ from __future__ import annotations
 
 import re
 
-CITY_IN_PROMPT = """Поставь название города «{city}» в предложный падеж вместе с
-правильным предлогом «в» или «во» — так, как оно встанет во фразу «купить
-стройматериалы …». Примеры: Москва → в Москве; Владимир → во Владимире;
+CITY_IN_PROMPT = """Поставь название города «{city}» в предложный падеж с правильным
+предлогом «в» или «во». Примеры: Москва → в Москве; Владимир → во Владимире;
 Тверь → в Твери; Великий Новгород → в Великом Новгороде.
-Верни только эту фразу, без кавычек и пояснений."""
+Верни ТОЛЬКО предлог и название города — например «в Москве», без других слов,
+кавычек и пояснений."""
 
-_CITY_IN = re.compile(r"^во?\s+\S", re.IGNORECASE)
+# Предлог и название из заглавных слов в КОНЦЕ ответа: 2026-09-16 модель вернула
+# «купить стройматериалы в Москве» — лишние слова перед городом отбрасываем.
+_CITY_IN = re.compile(r"(?:^|\s)(во?\s+[А-ЯЁA-Z][\w-]*(?:\s+[А-ЯЁA-Z][\w-]*)*)$", re.IGNORECASE)
+_CAPITAL = re.compile(r"^[А-ЯЁA-Z]")
 
 
 class CityFormError(RuntimeError):
@@ -2701,16 +2714,23 @@ class CityFormError(RuntimeError):
 
 def city_in_for(text_client, city: str) -> str:
     result = text_client.complete_text(CITY_IN_PROMPT.format(city=city.strip()))
-    value = " ".join(result.text.strip().strip("\"'«»").split())
-    if not _CITY_IN.match(value) or len(value) > 100:
+    value = " ".join(result.text.strip().strip("\"'«».").split()).rstrip(".!")
+    match = _CITY_IN.search(value)
+    if match is None:
         raise CityFormError(f"модель вернула неожиданную форму города: {value[:100]!r}")
-    return value[0].lower() + value[1:]
+    phrase = match.group(1)
+    preposition, _, name = phrase.partition(" ")
+    # IGNORECASE нужен для «Во», но название города обязано быть с заглавной —
+    # иначе «не знаю такого города» сошло бы за «в» + слово.
+    if not _CAPITAL.match(name):
+        raise CityFormError(f"модель вернула неожиданную форму города: {value[:100]!r}")
+    return f"{preposition.lower()} {name}"
 ```
 
 - [ ] **Step 8: Тесты зелёные**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_category_meta_prompts.py tests/test_category_meta_seeds.py tests/test_category_meta_city.py tests/test_ai_prompts.py tests/test_api_admin_prompts.py`
-Expected: PASS (58 passed).
+Expected: PASS (60 passed).
 
 - [ ] **Step 9: Commit**
 

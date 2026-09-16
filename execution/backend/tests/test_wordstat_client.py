@@ -60,7 +60,8 @@ def test_top_requests_without_region_omits_regions(monkeypatch):
 def test_regions_tree_posts_empty_body(monkeypatch):
     calls = scripted_post(monkeypatch, [FakeResponse(payload={"regions": []})])
     assert client().regions_tree() == {"regions": []}
-    assert calls[0]["url"].endswith("/regionsTree")
+    # Метод называется getRegionsTree: «regionsTree» отвечает 404 (проверено 2026-09-16).
+    assert calls[0]["url"] == "https://searchapi.api.cloud.yandex.net/v2/wordstat/getRegionsTree"
     assert calls[0]["json"] == {}
 
 

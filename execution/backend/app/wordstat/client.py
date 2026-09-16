@@ -1,7 +1,8 @@
 """Клиент Yandex Search API — Wordstat.
 
 Проверено 2026-09-16 (directions/2026-09-16-category-meta-design.md):
-- POST {base}/topRequests и {base}/regionsTree, `Authorization: Api-Key ...`;
+- POST {base}/topRequests и {base}/getRegionsTree, `Authorization: Api-Key ...`
+  (именно getRegionsTree: «regionsTree» отвечает 404);
   folderId не нужен — папка берётся из сервисного аккаунта ключа;
 - числа в ответе приходят строками;
 - квота 100 запросов в час — считает её не клиент, а app/wordstat/quota.py.
@@ -73,7 +74,7 @@ class WordstatClient:
         return self._post("topRequests", payload)
 
     def regions_tree(self) -> dict:
-        return self._post("regionsTree", {})
+        return self._post("getRegionsTree", {})
 
     def _post(self, method: str, payload: dict) -> dict:
         url = f"{self.base_url}/{method}"

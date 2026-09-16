@@ -17,14 +17,21 @@ DEFAULT_SETTINGS = {
     "image_size": "1536x1024",
     "image_workers": "4",
     "llm_max_retries": "3",
+    # Квота Yandex Search API на статистику Wordstat — 100 запросов в час
+    # (проверено 2026-09-16). Выше — только если Яндекс поднимет квоту.
+    "wordstat_hourly_limit": "100",
+    # Через запятую; сравнение по подстроке без учёта регистра. Фразы с этими
+    # словами не попадают ни в промпт, ни в теги.
+    "meta_stoplist": ("леруа, мерлен, лемана, петрович, авито, озон, ozon, wildberries, "
+                      "вайлдберриз, яндекс маркет, своими руками"),
 }
 
-SECRET_KEYS = {"routerai_api_key"}
+SECRET_KEYS = {"routerai_api_key", "wordstat_api_key"}
 
 # int-настройки валидируются на PUT до записи (см. admin_settings.py) —
 # иначе опечатка проходит с 200 и падает позже необработанным ValueError
 # внутри celery-таски (Task 8), где её уже никто не увидит.
-INT_KEYS = {"image_workers", "llm_max_retries"}
+INT_KEYS = {"image_workers", "llm_max_retries", "wordstat_hourly_limit"}
 
 # Диапазоны для тех int-настроек, которым мало быть просто целым числом.
 # image_workers — ширина ThreadPoolExecutor(max_workers=...) в Task 8/16:
@@ -43,7 +50,8 @@ INT_KEYS = {"image_workers", "llm_max_retries"}
 # Без этой границы админка принимала любое целое: значение уезжало в БД с 200,
 # а код молча срезал его до потолка, сообщая об этом только в лог воркера —
 # то есть настройка показывала одно, а система делала другое (2026-09-12).
-INT_RANGES = {"image_workers": (1, 8), "llm_max_retries": (1, 3)}
+INT_RANGES = {"image_workers": (1, 8), "llm_max_retries": (1, 3),
+              "wordstat_hourly_limit": (1, 100000)}
 
 
 def seed_settings(db: Session) -> None:

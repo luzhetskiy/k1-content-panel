@@ -9,6 +9,8 @@ const KEYS = [
   { key: 'article_body', label: 'Текст статьи', vars: { topic: 'Чем утеплить каркасный дом', site_name: 'Стройбаза', site_description: 'Строительная база в Самаре, аудитория — частные застройщики', tone_of_voice: 'практичный, без рекламных обещаний', reference_html: '<article><p>образец</p><img></article>', image_count: 2, image_paths: ['/media/uploads/article-img/article_1-1.webp', '/media/uploads/article-img/article_1-2.webp'] } },
   { key: 'cover', label: 'Обложка', vars: { topic: 'Чем утеплить каркасный дом', cover_style: 'широкая обложка' } },
   { key: 'content_image', label: 'Картинка в тексте', vars: { topic: 'Чем утеплить каркасный дом', paragraph: 'иллюстрация 1 из 2', image_style: 'фото стройки' } },
+  { key: 'category_seeds', label: 'Метатеги: фразы', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', categories: ['46: Листовые материалы / Фанера', '112: Металлопрокат / Уголок металлический'] } },
+  { key: 'category_meta', label: 'Метатеги: теги', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', category_name: 'Фанера', category_path: 'Листовые материалы / Фанера', form_nominative: 'фанера', form_buy: 'купить фанеру', form_price: 'цена фанеры', chosen_form: 'nominative', sell_word: 'купить', city_in: 'в Москве', brand: 'Стройбаза', total_count: 96275, phrases: ['фанера — 96275', 'фанера купить — 12238', 'фанера цена — 5300'], violations: [] } },
 ]
 
 export default function AdminPromptsPage() {

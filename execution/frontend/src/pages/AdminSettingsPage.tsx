@@ -18,7 +18,7 @@ export default function AdminSettingsPage() {
 
   useEffect(() => {
     getSettings().then(({ _errors, ...values }) => {
-      form.setFieldsValue({ ...values, routerai_api_key: '' })
+      form.setFieldsValue({ ...values, routerai_api_key: '', wordstat_api_key: '' })
       setErrors(_errors && Object.keys(_errors).length > 0 ? _errors : null)
     })
   }, [])
@@ -27,7 +27,7 @@ export default function AdminSettingsPage() {
     setLoading(true)
     try {
       const { _errors, ...saved } = await updateSettings(values)
-      form.setFieldsValue({ ...saved, routerai_api_key: '' })
+      form.setFieldsValue({ ...saved, routerai_api_key: '', wordstat_api_key: '' })
       setErrors(_errors && Object.keys(_errors).length > 0 ? _errors : null)
       message.success('Настройки сохранены')
     } catch {
@@ -42,7 +42,7 @@ export default function AdminSettingsPage() {
 
   return (
     <>
-      <Typography.Title level={4} style={{ marginTop: 0 }}>Настройки RouterAI</Typography.Title>
+      <Typography.Title level={4} style={{ marginTop: 0 }}>Настройки</Typography.Title>
 
       {errors && (
         <Alert
@@ -93,6 +93,19 @@ export default function AdminSettingsPage() {
           </Form.Item>
           <Form.Item name="llm_max_retries" label="Повторов при сбое">
             <Input />
+          </Form.Item>
+          <Typography.Title level={5}>Wordstat — метатеги категорий</Typography.Title>
+          <Form.Item name="wordstat_api_key" label="Ключ Yandex Search API"
+                     extra="Пусто — оставить текущий ключ">
+            <Input.Password placeholder="не отображается" />
+          </Form.Item>
+          <Form.Item name="wordstat_hourly_limit" label="Запросов к Wordstat в час"
+                     extra="Квота Яндекса — 100 в час. Меняйте, только если Яндекс поднимет квоту">
+            <Input />
+          </Form.Item>
+          <Form.Item name="meta_stoplist" label="Стоп-лист для метатегов"
+                     extra="Через запятую: конкуренты и мусорные фразы — не попадут ни в один тег">
+            <Input.TextArea autoSize={{ minRows: 2 }} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={loading}>Сохранить</Button>
         </Form>

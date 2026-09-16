@@ -33,7 +33,8 @@ from __future__ import annotations
 import io
 import mimetypes
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
+from xml.etree import ElementTree
 
 import requests
 
@@ -41,6 +42,13 @@ STATICPAGES_PATH = "/api/v1/staticpages/"
 ARTICLES_PATH = "/api/v1/articles/"
 FILEMANAGER_PATH = "/api/v1/filemanager/"
 ADDRESSES_SERVICES_PATH = "/api/v1/addresses-services/"
+CATALOG_CATEGORIES_PATH = "/api/v1/catalog-categories/"
+METATAGS_PATH = "/api/v1/metatags/"
+SITEMAP_PATH = "/sitemap.xml"
+
+# Хостинг сайтов отдаёт cookie-заглушку запросам без браузерного User-Agent
+# (см. обход в app/companies/logo.py) — sitemap публичный, токен ему не нужен.
+SITEMAP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; k1-content-panel)"}
 
 ARTICLE_IMG_DIR = "uploads/article-img/"
 SERVICE_IMG_DIR = "uploads/service-img/"
@@ -96,11 +104,14 @@ def strip_html_comments(html: str) -> str:
 
 class SiteClient:
     def __init__(self, base_url: str, token: str, timeout: int = 60,
-                upload_timeout: int = 120):
+                upload_timeout: int = 120, heavy_timeout: int = 120):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
         self.upload_timeout = upload_timeout
+        # Тяжёлые списки: страница catalog-categories — ~155 КБ с seo_text внутри,
+        # 2026-09-16 первое чтение вернуло обрезанное тело.
+        self.heavy_timeout = heavy_timeout
 
     @property
     def _headers(self) -> dict:
@@ -312,6 +323,74 @@ class SiteClient:
             timeout=self.timeout)
         body = self._json(response, f"обновление тизера {teaser_id}")
         return body.get("id", teaser_id)
+
+    # --- каталог и метатеги (directions/2026-09-16-category-meta-design.md) ---
+
+    def _list_all(self, path: str, what: str) -> list[dict]:
+        """Все страницы списка DRF: пагинация ?page=N до пустого next."""
+        items, page_number = [], 1
+        while True:
+            response = self._send(
+                requests.get, f"{self.base_url}{path}?page={page_number}", what,
+                headers=self._headers, timeout=self.heavy_timeout)
+            body = self._json(response, what)
+            items += body.get("results", [])
+            if not body.get("next"):
+                return items
+            page_number += 1
+
+    def list_catalog_categories(self) -> list[dict]:
+        return self._list_all(CATALOG_CATEGORIES_PATH, "список категорий каталога")
+
+    def list_metatags(self) -> list[dict]:
+        """Полный список: фильтр ?url= сайт игнорирует (проверено 2026-09-16)."""
+        return self._list_all(METATAGS_PATH, "список метатегов")
+
+    def create_metatag(self, url: str, fields: dict) -> dict:
+        response = self._send(
+            requests.post, f"{self.base_url}{METATAGS_PATH}", "создание метатега",
+            json={"url": url, **fields},
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
+        body = self._json(response, "создание метатега")
+        if body.get("id") is None:
+            raise SiteAPIError(f"создание метатега: ответ без id: {body}")
+        return body
+
+    def update_metatag(self, metatag_id: int, fields: dict) -> dict:
+        what = f"обновление метатега {metatag_id}"
+        response = self._send(
+            requests.patch, f"{self.base_url}{METATAGS_PATH}{metatag_id}/", what,
+            json=fields, headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
+        return self._json(response, what)
+
+    def fetch_sitemap_paths(self) -> set[str]:
+        """Пути страниц из sitemap.xml; индекс sitemap разворачивается. Url с
+        query (~860 фильтр-страниц на stroybaza-moscow.ru) отбрасываются."""
+        paths: set[str] = set()
+        pending, seen = [f"{self.base_url}{SITEMAP_PATH}"], set()
+        while pending:
+            url = pending.pop()
+            if url in seen:
+                continue
+            seen.add(url)
+            response = self._send(requests.get, url, "sitemap", headers=SITEMAP_HEADERS,
+                                  timeout=self.heavy_timeout)
+            try:
+                root = ElementTree.fromstring(response.content)
+            except ElementTree.ParseError as exc:
+                raise SiteAPIError(f"sitemap: ответ не XML: {exc}") from exc
+            locs = [node.text.strip() for node in root.iter()
+                    if node.tag.endswith("loc") and node.text]
+            if root.tag.endswith("sitemapindex"):
+                pending += locs
+                continue
+            for loc in locs:
+                parts = urlsplit(loc)
+                if not parts.query:
+                    paths.add(parts.path)
+        return paths
 
     # --- файлы ---
 

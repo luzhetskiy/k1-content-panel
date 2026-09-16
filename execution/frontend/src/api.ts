@@ -229,4 +229,46 @@ export const updateUser = (id: number, d: Record<string, unknown>) =>
   api.put<UserRow>(`/admin/users/${id}`, d).then(r => r.data)
 export const deleteUser = (id: number) => api.delete(`/admin/users/${id}`)
 
+// --- метатеги категорий ---
+export interface MetaRunState {
+  id: number; total: number; done: number; failed: number
+  started_at: string; wait_until: string | null; stale: boolean
+}
+export interface MetaProject {
+  site_id: number; name: string; domain: string; base_url: string
+  city: string; city_in: string; brand: string; wordstat_region_id: number | null
+  updated_at: string | null; last_error: string; run: MetaRunState | null
+}
+export interface MetaProjectIn {
+  site_id: number; city: string; city_in: string; brand: string; wordstat_region_id: number
+}
+export interface WordstatRegion { id: number; label: string; path: string }
+export interface CategoryMetaRow {
+  id: number; remote_id: number; remote_parent_id: number | null
+  name: string; path: string; url: string; page_url: string
+  status: string; skip_reason: string; error_text: string; stuck: boolean
+  seed_phrase: string; form_nominative: string; form_buy: string; chosen_form: string
+  nominative_count: number | null; declined_count: number | null
+  total_count: number | null; low_demand: boolean
+  title: string; h1: string; meta_description: string; meta_keywords: string; ai_keywords: string
+  previous_json: Record<string, string> | null
+  wait_until: string | null; updated_at: string
+}
+export const getMetaProjects = () =>
+  api.get<MetaProject[]>('/category-meta/projects').then(r => r.data)
+export const createMetaProject = (d: MetaProjectIn) =>
+  api.post<MetaProject>('/category-meta/projects', d).then(r => r.data)
+export const updateMetaProject = (siteId: number, d: MetaProjectIn) =>
+  api.put<MetaProject>(`/category-meta/projects/${siteId}`, d).then(r => r.data)
+export const deleteMetaProject = (siteId: number) =>
+  api.delete(`/category-meta/projects/${siteId}`)
+export const searchWordstatRegions = (q: string) =>
+  api.get<WordstatRegion[]>('/category-meta/regions', { params: { q } }).then(r => r.data)
+export const runMetaProject = (siteId: number) =>
+  api.post<MetaProject>(`/category-meta/projects/${siteId}/run`).then(r => r.data)
+export const getMetaCategories = (siteId: number) =>
+  api.get<CategoryMetaRow[]>(`/category-meta/projects/${siteId}/categories`).then(r => r.data)
+export const regenerateMetaCategory = (id: number) =>
+  api.post<CategoryMetaRow>(`/category-meta/categories/${id}/regenerate`).then(r => r.data)
+
 export default api

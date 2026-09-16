@@ -24,3 +24,13 @@ export const RUNTIME_STATE: Record<string, { color: string; label: string }> = {
   working: { color: 'processing', label: 'Генерируется' },
   stuck: { color: 'error', label: 'Похоже, зависла' },
 }
+
+/** Статусы категории в разделе «Метатеги категорий». */
+export const CATEGORY_META_STATUS: Record<string, { color: string; label: string }> = {
+  new: { color: 'default', label: 'Ещё не обрабатывалась' },
+  queued: { color: 'default', label: 'В очереди' },
+  in_work: { color: 'processing', label: 'В работе' },
+  done: { color: 'success', label: 'Готово' },
+  failed: { color: 'error', label: 'Ошибка' },
+  skipped: { color: 'default', label: 'Пропущена' },
+}

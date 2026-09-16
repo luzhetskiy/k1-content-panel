@@ -4,7 +4,7 @@ import { ConfigProvider, Layout, Menu, Drawer, Button, Dropdown } from 'antd'
 import {
   FileTextOutlined, HomeOutlined, GlobalOutlined, BulbOutlined,
   SettingOutlined, TeamOutlined, HistoryOutlined, MenuOutlined,
-  CloseOutlined, UserOutlined, NotificationOutlined,
+  CloseOutlined, UserOutlined, NotificationOutlined, TagsOutlined,
 } from '@ant-design/icons'
 import { useAuth } from './auth'
 import { logout } from './api'
@@ -13,6 +13,7 @@ import ArticlesPage from './pages/ArticlesPage'
 import BatchPage from './pages/BatchPage'
 import BuildersPage from './pages/BuildersPage'
 import BuilderBatchPage from './pages/BuilderBatchPage'
+import CategoryMetaPage from './pages/CategoryMetaPage'
 import JobsPage from './pages/JobsPage'
 import AdminSitesPage from './pages/AdminSitesPage'
 import AdminPromptsPage from './pages/AdminPromptsPage'
@@ -25,6 +26,7 @@ const { Sider, Content } = Layout
 const navItems = [
   { key: '/articles', label: 'Статьи', icon: <FileTextOutlined />, admin: false },
   { key: '/builders', label: 'Строители', icon: <HomeOutlined />, admin: false },
+  { key: '/category-meta', label: 'Метатеги категорий', icon: <TagsOutlined />, admin: false },
   { key: '/jobs', label: 'Журнал', icon: <HistoryOutlined />, admin: false },
   // Сайты/Промпты доступны и менеджеру (require_role("admin", "manager")
   // на бэкенде, app/api/admin_sites.py и app/api/admin_prompts.py) — admin:
@@ -204,6 +206,7 @@ function Shell() {
             <Route path="/articles/:id" element={<BatchPage />} />
             <Route path="/builders" element={<BuildersPage />} />
             <Route path="/builders/:id" element={<BuilderBatchPage />} />
+            <Route path="/category-meta" element={<CategoryMetaPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/admin/sites" element={<AdminSitesPage />} />
             <Route path="/admin/prompts" element={<AdminPromptsPage />} />

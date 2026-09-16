@@ -57,6 +57,18 @@ def test_apply_seeds_with_variants_keeps_all_and_seeds_first():
         ("гипсокартон", "цена гипсокартона", "ГКЛ")
 
 
+def test_word_order_and_hyphen_variants_are_one_query():
+    """Wordstat не различает порядок слов и дефис — «анкер клиновой» и «клиновой
+    анкер» дали бы один и тот же ответ за два запроса квоты (живая проверка 2026-09-16)."""
+    anchor, blockhouse = category(62, "Анкер клиновой"), category(80, "Блок-хаус")
+    apply_seeds([anchor, blockhouse], [
+        {"id": 62, "variants": [variant("анкер клиновой"), variant("клиновой анкер"),
+                                variant("клиновой анкер-болт")]},
+        {"id": 80, "variants": [variant("блок хаус"), variant("блок-хаус")]}])
+    assert [v["phrase"] for v in anchor.candidates_json] == ["анкер клиновой", "клиновой анкер-болт"]
+    assert [v["phrase"] for v in blockhouse.candidates_json] == ["блок хаус"]
+
+
 def test_apply_seeds_accepts_flat_item_as_single_variant():
     """Отредактированный в админке промпт мог остаться в старом формате без variants."""
     fanera = category(46, "Фанера")

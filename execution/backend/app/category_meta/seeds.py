@@ -31,21 +31,36 @@ def seed_lines(rows: list[CategoryMeta]) -> list[str]:
     return [f"{row.remote_id}: {row.path or row.name}" for row in rows]
 
 
+def variant_key(phrase: str) -> frozenset[str]:
+    """Wordstat в широком соответствии не различает порядок слов и дефис:
+    «анкер клиновой» = «клиновой анкер», «блок-хаус» = «блок хаус». Одинаковый
+    ключ — один и тот же запрос, второй раз квоту на него не тратим."""
+    return frozenset(phrase.casefold().replace("-", " ").split())
+
+
+def dedupe_variants(variants: list[dict]) -> list[dict]:
+    result, seen = [], set()
+    for variant in variants:
+        key = variant_key(variant["phrase"])
+        if key not in seen:
+            seen.add(key)
+            result.append(variant)
+    return result
+
+
 def _variants(item: dict) -> list[dict]:
     """Полные, без дублей, не больше MAX_VARIANTS. Элемент без "variants" —
     старый формат ответа (одна фраза прямо в объекте): отредактированный в
     админке промпт мог в нём остаться."""
     raw = item.get("variants") if isinstance(item.get("variants"), list) else [item]
-    variants, seen = [], set()
+    variants = []
     for candidate in raw:
         if not isinstance(candidate, dict):
             continue
         values = [" ".join(str(candidate.get(name) or "").split()) for name in SEED_FIELDS]
-        if not all(values) or values[0].casefold() in seen:
-            continue
-        seen.add(values[0].casefold())
-        variants.append(dict(zip(SEED_FIELDS, values)))
-    return variants[:MAX_VARIANTS]
+        if all(values):
+            variants.append(dict(zip(SEED_FIELDS, values)))
+    return dedupe_variants(variants)[:MAX_VARIANTS]
 
 
 def apply_seeds(rows: list[CategoryMeta], data: object) -> list[CategoryMeta]:

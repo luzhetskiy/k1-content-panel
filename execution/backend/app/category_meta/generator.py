@@ -21,7 +21,7 @@ from app.category_meta.forms import (
     LOW_DEMAND_THRESHOLD, buy_queries, choose_form, filter_stoplist, forms_differ, sell_word,
 )
 from app.category_meta.publish import publish_metatag
-from app.category_meta.seeds import SeedsError
+from app.category_meta.seeds import SeedsError, dedupe_variants
 from app.category_meta.validate import (
     TAG_FIELDS, MetaContext, normalize_tags, validate_tags,
 )
@@ -55,10 +55,12 @@ class WordstatFacts:
 
 
 def seed_variants(category: CategoryMeta) -> list[dict]:
-    """Варианты названия от LLM; без них — единственный вариант из seed-полей."""
-    variants = [{name: v.get(name, "") for name in ("phrase", "nominative", "buy", "price")}
-                for v in (category.candidates_json or [])
-                if isinstance(v, dict) and v.get("phrase")]
+    """Варианты названия от LLM; без них — единственный вариант из seed-полей.
+    Дубли по порядку слов отсеиваются и здесь: варианты могли быть сохранены до
+    появления dedupe_variants."""
+    variants = dedupe_variants([
+        {name: v.get(name, "") for name in ("phrase", "nominative", "buy", "price")}
+        for v in (category.candidates_json or []) if isinstance(v, dict) and v.get("phrase")])
     return variants or [{"phrase": category.seed_phrase, "nominative": category.form_nominative,
                          "buy": category.form_buy, "price": category.form_price}]
 

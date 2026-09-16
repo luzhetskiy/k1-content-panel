@@ -242,6 +242,15 @@ def test_most_searched_variant_wins(db_session, site, gkl):
     assert "гипсокартон купить — 3221" in text.prompts[0]
 
 
+def test_duplicate_variants_saved_before_dedup_are_queried_once(db_session, site, gkl):
+    gkl.candidates_json = [*gkl.candidates_json,
+                           {"phrase": "лист гипсокартонный", "nominative": "лист гипсокартонный",
+                            "buy": "купить лист гипсокартонный", "price": "цена"}]
+    wordstat = GklWordstat()
+    run(db_session, gkl, site, wordstat=wordstat, text=FakeText([GKL_VALID]))
+    assert [call[0] for call in wordstat.calls] == ["гкл", "гипсокартон", "гипсокартонный лист"]
+
+
 def test_variant_tie_keeps_llm_order(db_session, site, gkl):
     tops = {"гкл": {"totalCount": "10"}, "гипсокартон": {"totalCount": "10"},
             "гипсокартонный лист": {"totalCount": "10"}}

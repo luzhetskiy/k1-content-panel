@@ -10,6 +10,7 @@ const KEYS = [
   { key: 'cover', label: 'Обложка', vars: { topic: 'Чем утеплить каркасный дом', cover_style: 'широкая обложка' } },
   { key: 'content_image', label: 'Картинка в тексте', vars: { topic: 'Чем утеплить каркасный дом', paragraph: 'иллюстрация 1 из 2', image_style: 'фото стройки' } },
   { key: 'category_seeds', label: 'Метатеги: фразы', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', categories: ['46: Листовые материалы / Фанера', '112: Металлопрокат / Уголок металлический'] } },
+  { key: 'category_variants', label: 'Метатеги: проверка названий', vars: { site_name: 'Стройбаза', category_name: 'Пенопласт', category_path: 'Теплоизоляция / Пенопласт', variants: ['пенопласт — 29949: пенопласт, пенопласт купить, пенопласт цена', 'псб — 274344: псб, псб банк, псб онлайн'] } },
   { key: 'category_meta', label: 'Метатеги: теги', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', category_name: 'Фанера', category_path: 'Листовые материалы / Фанера', form_nominative: 'фанера', form_buy: 'купить фанеру', form_price: 'цена фанеры', chosen_form: 'nominative', sell_word: 'купить', city_in: 'в Москве', brand: 'Стройбаза', total_count: 96275, phrases: ['фанера — 96275', 'фанера купить — 12238', 'фанера цена — 5300'], alternatives: ['фанерный лист — 198: фанерный лист'], violations: [] } },
 ]
 

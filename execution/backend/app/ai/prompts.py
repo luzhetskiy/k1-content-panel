@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.prompt_template import PromptTemplate
 
 PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text",
-               "category_seeds", "category_meta")
+               "category_seeds", "category_variants", "category_meta")
 
 # Набор переменных, который каждому промпту реально передаёт боевой код
 # (app/tasks.py и app/articles/builder.py). Объявлен здесь, а не разбросан по
@@ -30,6 +30,7 @@ PROMPT_VARIABLES: dict[str, frozenset[str]] = {
                                "tone_of_voice", "scraped_text"}),
     # Метатеги категорий: app/category_meta/seeds.py и app/category_meta/generator.py.
     "category_seeds": frozenset({"site_name", "site_description", "categories"}),
+    "category_variants": frozenset({"site_name", "category_name", "category_path", "variants"}),
     "category_meta": frozenset({"site_name", "site_description", "category_name",
                                 "category_path", "form_nominative", "form_buy", "form_price",
                                 "chosen_form", "sell_word", "city_in", "brand", "total_count",

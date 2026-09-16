@@ -75,6 +75,7 @@ class RegionOut(BaseModel):
 class CandidateOut(BaseModel):
     phrase: str
     count: int | None
+    same_product: bool | None     # None — проверка смысла не понадобилась
 
 
 class CategoryOut(BaseModel):
@@ -133,7 +134,8 @@ def _category_out(site: Site, row: CategoryMeta) -> CategoryOut:
         page_url=f"{site.base_url.rstrip('/')}{row.url}" if row.url else "",
         status=row.status, skip_reason=row.skip_reason, error_text=row.error_text,
         stuck=is_stuck(row), seed_phrase=row.seed_phrase,
-        candidates=[CandidateOut(phrase=v.get("phrase", ""), count=v.get("count"))
+        candidates=[CandidateOut(phrase=v.get("phrase", ""), count=v.get("count"),
+                                 same_product=v.get("same_product"))
                     for v in (row.candidates_json or []) if isinstance(v, dict)],
         form_nominative=row.form_nominative,
         form_buy=row.form_buy, chosen_form=row.chosen_form,

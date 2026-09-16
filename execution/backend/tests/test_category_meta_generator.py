@@ -228,18 +228,20 @@ def gkl(db_session, site):
 
 
 def test_most_searched_variant_wins(db_session, site, gkl):
-    wordstat, text = GklWordstat(), FakeText([GKL_VALID])
+    wordstat, text = GklWordstat(), FakeText([{"same_product": ["гкл", "гипсокартон", "гипсокартонный лист"]}, GKL_VALID])
     run(db_session, gkl, site, wordstat=wordstat, text=text)
     assert wordstat.calls == [("гкл", 213, 300), ("гипсокартон", 213, 300),
                               ("гипсокартонный лист", 213, 300)]
     assert (gkl.seed_phrase, gkl.form_buy, gkl.total_count) == \
         ("гипсокартон", "купить гипсокартон", 87575)
-    assert [(v["phrase"], v["count"]) for v in gkl.candidates_json] == \
-        [("гкл", 24437), ("гипсокартон", 87575), ("гипсокартонный лист", 769)]
+    assert [(v["phrase"], v["count"], v["same_product"]) for v in gkl.candidates_json] == \
+        [("гкл", 24437, True), ("гипсокартон", 87575, True), ("гипсокартонный лист", 769, True)]
     assert gkl.status == "done" and gkl.title == GKL_VALID["title"]
-    # фразы проигравших вариантов — в промпте отдельным списком и допустимы в keywords
-    assert "гкл — 24437: гкл, гкл купить" in text.prompts[0]
-    assert "гипсокартон купить — 3221" in text.prompts[0]
+    # лидер — не первый вариант, поэтому сначала проверка смысла по фразам Wordstat
+    assert "гипсокартон — 87575: гипсокартон, гипсокартон купить" in text.prompts[0]
+    # фразы проигравших вариантов — в промпте тегов отдельным списком и допустимы в keywords
+    assert "гкл — 24437: гкл, гкл купить" in text.prompts[1]
+    assert "гипсокартон купить — 3221" in text.prompts[1]
 
 
 def test_duplicate_variants_saved_before_dedup_are_queried_once(db_session, site, gkl):
@@ -247,8 +249,97 @@ def test_duplicate_variants_saved_before_dedup_are_queried_once(db_session, site
                            {"phrase": "лист гипсокартонный", "nominative": "лист гипсокартонный",
                             "buy": "купить лист гипсокартонный", "price": "цена"}]
     wordstat = GklWordstat()
-    run(db_session, gkl, site, wordstat=wordstat, text=FakeText([GKL_VALID]))
+    run(db_session, gkl, site, wordstat=wordstat, text=FakeText([{"same_product": ["гкл", "гипсокартон", "гипсокартонный лист"]}, GKL_VALID]))
     assert [call[0] for call in wordstat.calls] == ["гкл", "гипсокартон", "гипсокартонный лист"]
+
+
+PSB_TOPS = {
+    "пенопласт": {"totalCount": "29949", "results": [
+        {"phrase": "пенопласт", "count": "29949"}, {"phrase": "пенопласт купить", "count": "4100"},
+        {"phrase": "пенопласт цена", "count": "2500"}, {"phrase": "пенопласт москва", "count": "700"}]},
+    "пенополистирол": {"totalCount": "20244", "results": [
+        {"phrase": "пенополистирол", "count": "20244"},
+        {"phrase": "пенополистирол купить", "count": "1500"}]},
+    "псб": {"totalCount": "274344", "results": [
+        {"phrase": "псб", "count": "274344"}, {"phrase": "псб банк", "count": "90000"},
+        {"phrase": "псб онлайн", "count": "40000"}]},
+}
+
+PSB_VALID = {
+    "title": "Купить пенопласт в Москве по выгодной цене | Стройбаза",
+    "h1": "Пенопласт в Москве",
+    "meta_description": ("Пенопласт в Москве по выгодной цене: листы ПСБ-С 15, 25 и 35 для утепления "
+                         "стен, пола и фасада, пенополистирол разной толщины. Доставка по Москве."),
+    "meta_keywords": "пенопласт купить, пенопласт цена, пенопласт москва, пенополистирол купить",
+    "ai_keywords": ", ".join(f"вопрос про пенопласт номер {i}" for i in range(10)),
+}
+
+
+class PsbWordstat(FakeWordstat):
+    def top_requests(self, phrase, region_id, num_phrases=300):
+        self.calls.append((phrase, region_id, num_phrases))
+        return PSB_TOPS.get(phrase, {"totalCount": "0"})
+
+
+@pytest.fixture
+def penoplast(db_session, site):
+    variants = [{"phrase": p, "nominative": p, "buy": f"купить {p}", "price": f"цена {p}"}
+                for p in ("пенопласт", "пенополистирол", "псб")]
+    row = CategoryMeta(site_id=site.id, remote_id=90, name="Пенопласт",
+                       path="Теплоизоляция / Пенопласт", url="/catalog/category/teploizolyaciya/penoplast/",
+                       status="in_work", seed_phrase="пенопласт", seed_source_name="Пенопласт",
+                       form_nominative="пенопласт", form_buy="купить пенопласт",
+                       form_price="цена пенопласт", candidates_json=variants)
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def test_variant_about_other_thing_is_rejected(db_session, site, penoplast):
+    """«ПСБ» по запросам — банк: 274 тыс. запросов не должны отдать ей пенопласт
+    (живая проверка 2026-09-16, решение владельца — строго тот же товар)."""
+    text = FakeText([{"same_product": ["пенопласт", "пенополистирол"]}, PSB_VALID])
+    run(db_session, penoplast, site, wordstat=PsbWordstat(), text=text)
+    assert "псб — 274344: псб, псб банк, псб онлайн" in text.prompts[0]
+    assert "Пенопласт" in text.prompts[0] and "Теплоизоляция / Пенопласт" in text.prompts[0]
+    assert (penoplast.seed_phrase, penoplast.total_count) == ("пенопласт", 29949)
+    assert [(v["phrase"], v["same_product"]) for v in penoplast.candidates_json] == \
+        [("пенопласт", True), ("пенополистирол", True), ("псб", False)]
+    # отвергнутый вариант не подсказывает keywords
+    assert "пенополистирол — 20244" in text.prompts[1]
+    assert "псб банк" not in text.prompts[1]
+    assert penoplast.status == "done"
+
+
+def test_catalog_variant_is_kept_when_llm_approves_nothing(db_session, site, penoplast):
+    # пенополистирол отвергнут — его фразы в keywords уже недопустимы
+    tags = {**PSB_VALID, "meta_keywords": "пенопласт купить, пенопласт цена, пенопласт москва"}
+    text = FakeText([{"что-то": "не то"}, tags])
+    run(db_session, penoplast, site, wordstat=PsbWordstat(), text=text)
+    assert penoplast.seed_phrase == "пенопласт"
+    assert [v["same_product"] for v in penoplast.candidates_json] == [True, False, False]
+
+
+def test_saved_verdicts_are_reused(db_session, site, penoplast):
+    penoplast.candidates_json = [
+        {**v, "same_product": v["phrase"] != "псб"} for v in penoplast.candidates_json]
+    db_session.commit()
+    text = FakeText([PSB_VALID])
+    run(db_session, penoplast, site, wordstat=PsbWordstat(), text=text)
+    assert len(text.prompts) == 1          # только теги, проверка смысла не повторяется
+    assert penoplast.seed_phrase == "пенопласт"
+
+
+def test_no_check_when_first_variant_leads(db_session, site, fanera):
+    fanera.candidates_json = [{"phrase": "фанера", "nominative": "фанера", "buy": "купить фанеру",
+                               "price": "цена фанеры"},
+                              {"phrase": "фанерный лист", "nominative": "фанерный лист",
+                               "buy": "купить фанерный лист", "price": "цена фанерного листа"}]
+    db_session.commit()
+    text = FakeText([VALID])
+    run(db_session, fanera, site, text=text)
+    assert len(text.prompts) == 1
+    assert "same_product" not in fanera.candidates_json[0]
 
 
 def test_variant_tie_keeps_llm_order(db_session, site, gkl):

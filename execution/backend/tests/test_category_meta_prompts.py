@@ -41,6 +41,18 @@ def test_meta_prompt_lists_violations(db_session):
     assert "- в title нет «в Москве»" in text
 
 
+def test_variants_prompt_lists_variants(db_session):
+    seed_prompts(db_session)
+    text = render_prompt(resolve_prompt(db_session, "category_variants", None),
+                         {"site_name": "Стройбаза", "category_name": "Пенопласт",
+                          "category_path": "Теплоизоляция / Пенопласт",
+                          "variants": ["пенопласт — 29949: пенопласт, пенопласт купить",
+                                       "псб — 274344: псб, псб банк"]})
+    assert "Теплоизоляция / Пенопласт" in text
+    assert "псб — 274344: псб, псб банк" in text
+    assert '"same_product"' in text
+
+
 def test_seeds_prompt_lists_categories(db_session):
     seed_prompts(db_session)
     text = render_prompt(resolve_prompt(db_session, "category_seeds", None),

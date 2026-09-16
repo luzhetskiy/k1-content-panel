@@ -13,9 +13,9 @@ from app.clock import as_utc, utcnow
 from app.models.category_meta import CategoryMeta, MetaRun
 
 ACTIVE_STATUSES = ("queued", "in_work")
-# Мягкий лимит задачи категории — 1900 с ≈ 32 минуты (CATEGORY_SOFT_LIMIT в
+# Мягкий лимит задачи категории — 2300 с ≈ 38 минут (CATEGORY_SOFT_LIMIT в
 # app/tasks.py); раньше него «зависла» — ложная тревога.
-STUCK_AFTER = timedelta(minutes=35)
+STUCK_AFTER = timedelta(minutes=40)
 # Цепочка может честно стоять в очереди Celery за партией статей часами — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)

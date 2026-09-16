@@ -187,7 +187,7 @@ def test_categories_list(manager_client, project, db_session):
                      title="Фанера в Москве | Стройбаза", previous_json={"h1": "старый"},
                      candidates_json=[{"phrase": "фанера", "nominative": "фанера",
                                        "buy": "купить фанеру", "price": "цена фанеры",
-                                       "count": 96275}]),
+                                       "count": 96275, "same_product": True}]),
         CategoryMeta(site_id=project.id, remote_id=45, name="Листовые материалы",
                      path="Листовые материалы", url="/catalog/listovye-materialy/",
                      status="in_work", started_at=utcnow() - timedelta(hours=1)),
@@ -199,7 +199,7 @@ def test_categories_list(manager_client, project, db_session):
     assert body[1]["page_url"] == \
         "https://stroybaza-moscow.ru/catalog/category/listovye-materialy/fanera/"
     assert body[1]["previous_json"] == {"h1": "старый"}
-    assert body[1]["candidates"] == [{"phrase": "фанера", "count": 96275}]
+    assert body[1]["candidates"] == [{"phrase": "фанера", "count": 96275, "same_product": True}]
     assert body[0]["candidates"] == []
 
 

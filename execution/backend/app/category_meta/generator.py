@@ -4,7 +4,9 @@
 - клиент Wordstat создаётся лениво и ДО резервирования квоты — без ключа квота
   не тратится;
 - статистика берётся из кеша, в Wordstat уходят только промахи;
-- из вариантов названия («гкл», «гипсокартон») побеждает самый частотный;
+- из вариантов названия («гкл», «гипсокартон») побеждает самый частотный, но
+  только среди означающих тот же товар: если лидирует не первый вариант, смысл
+  проверяет LLM по частым запросам («псб» — это банк);
 - факты Wordstat сохраняются в категорию до вызова LLM — если теги не пройдут
   проверку, в карточке всё равно видно, что показал Wordstat.
 """
@@ -36,6 +38,7 @@ EXACT_KIND = "exact"
 TOP_PHRASES = 300        # сколько фраз просить у topRequests
 PROMPT_PHRASES = 100     # сколько из них показать модели
 ALTERNATIVE_PHRASES = 15 # сколько частых фраз показать у каждого проигравшего варианта
+VERIFY_PHRASES = 10      # сколько частых фраз показать при проверке смысла варианта
 LLM_ATTEMPTS = 2         # первая попытка + одна с перечнем нарушений
 
 
@@ -83,21 +86,68 @@ def _load(db: Session, queries: list[tuple[str, str]], region_id: int | None, wo
     return bodies
 
 
+def verify_variants_with_llm(db: Session, site, text_client, record_usage):
+    """Функция проверки смысла для collect_facts: какие варианты — тот же товар."""
+    template = resolve_prompt(db, "category_variants", site.id)
+
+    def verify(category: CategoryMeta, parsed) -> set[str]:
+        lines = [f"{variant['phrase']} — {result.total_count}: "
+                 + ", ".join(phrase for phrase, _ in result.phrases[:VERIFY_PHRASES])
+                 for variant, result in parsed]
+        result = text_client.complete_json(render_prompt(template, {
+            "site_name": site.name, "category_name": category.name,
+            "category_path": category.path or category.name, "variants": lines}))
+        record_usage(result.tokens_prompt, result.tokens_completion, result.cost)
+        approved = result.data.get("same_product") if isinstance(result.data, dict) else None
+        if not isinstance(approved, list):
+            return set()
+        return {" ".join(str(phrase).split()).casefold() for phrase in approved}
+
+    return verify
+
+
+def _saved_verdicts(category: CategoryMeta, variants: list[dict]) -> dict[str, bool] | None:
+    """Вердикты прошлой проверки, если они есть у КАЖДОГО текущего варианта:
+    задача, отложенная из-за квоты, не платит за проверку второй раз."""
+    saved = {v.get("phrase"): v.get("same_product") for v in (category.candidates_json or [])
+             if isinstance(v, dict)}
+    if all(isinstance(saved.get(v["phrase"]), bool) for v in variants):
+        return {v["phrase"]: saved[v["phrase"]] for v in variants}
+    return None
+
+
 def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
-                  wordstat_factory, limit: int, now: datetime | None = None) -> WordstatFacts:
-    """Сначала статистика по всем вариантам названия — побеждает самый частотный
-    (при равенстве — первый, как предложила LLM); его формы записываются в
-    категорию. Затем проверка склонения — уже для победителя. Два этапа — два
-    резерва квоты: если на второй не хватит, варианты уже лежат в кеше."""
+                  wordstat_factory, limit: int, now: datetime | None = None,
+                  verify=None) -> WordstatFacts:
+    """Сначала статистика по всем вариантам названия. Побеждает самый частотный
+    (при равенстве — первый, как предложила LLM), но если лидирует не первый
+    вариант, verify(category, parsed) отсеивает варианты про другой товар —
+    первый вариант остаётся всегда. Формы победителя записываются в категорию.
+    Затем проверка склонения — уже для победителя. Два этапа — два резерва
+    квоты: если на второй не хватит, варианты уже лежат в кеше."""
     variants = seed_variants(category)
     tops = _load(db, [(TOP_KIND, v["phrase"]) for v in variants], region_id,
                  wordstat_factory, limit, now)
     parsed = [(variant, parse_top(tops[(TOP_KIND, variant["phrase"])])) for variant in variants]
-    winner, top = max(parsed, key=lambda item: item[1].total_count)
+    first = parsed[0][0]
+    leader = max(parsed, key=lambda item: item[1].total_count)[0]
+    verdicts = None
+    if verify is not None and leader is not first:
+        verdicts = _saved_verdicts(category, variants)
+        if verdicts is None:
+            approved = verify(category, parsed)
+            verdicts = {variant["phrase"]: variant is first or variant["phrase"].casefold() in approved
+                        for variant, _ in parsed}
+        parsed_same = [item for item in parsed if verdicts[item[0]["phrase"]]]
+    else:
+        parsed_same = parsed
+    winner, top = max(parsed_same, key=lambda item: item[1].total_count)
     category.seed_phrase, category.form_nominative = winner["phrase"], winner["nominative"]
     category.form_buy, category.form_price = winner["buy"], winner["price"]
-    category.candidates_json = [{**variant, "count": result.total_count}
-                                for variant, result in parsed]
+    category.candidates_json = [
+        {**variant, "count": result.total_count,
+         **({"same_product": verdicts[variant["phrase"]]} if verdicts is not None else {})}
+        for variant, result in parsed]
 
     nominative_count = declined_count = None
     if forms_differ(category.form_nominative, category.form_buy):
@@ -111,7 +161,7 @@ def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
         chosen_form=choose_form(nominative_count, declined_count),
         nominative_count=nominative_count, declined_count=declined_count,
         alternatives=[(variant["phrase"], result.total_count, result.phrases)
-                      for variant, result in parsed if variant is not winner])
+                      for variant, result in parsed_same if variant is not winner])
 
 
 def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFacts,
@@ -159,7 +209,8 @@ def generate_category(db: Session, category: CategoryMeta, site, *, wordstat_fac
                       record_usage, now: datetime | None = None) -> None:
     if not category.seed_phrase:
         raise SeedsError("у категории нет поисковой фразы — обновите метатеги проекта целиком")
-    facts = collect_facts(db, category, site.wordstat_region_id, wordstat_factory, limit, now)
+    facts = collect_facts(db, category, site.wordstat_region_id, wordstat_factory, limit, now,
+                          verify=verify_variants_with_llm(db, site, text_client, record_usage))
     category.chosen_form = facts.chosen_form
     category.nominative_count = facts.nominative_count
     category.declined_count = facts.declined_count

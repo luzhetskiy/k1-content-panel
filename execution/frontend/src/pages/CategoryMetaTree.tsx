@@ -58,7 +58,8 @@ function formText(row: CategoryMetaRow): string {
 
 function candidatesText(row: CategoryMetaRow): string {
   if (row.candidates.length < 2) return ''
-  const counted = row.candidates.map(c => `«${c.phrase}» ${c.count ?? '—'}`)
+  const counted = row.candidates.map(c =>
+    `«${c.phrase}» ${c.count ?? '—'}${c.same_product === false ? ' (другой товар)' : ''}`)
   return `${counted.join(' · ')} → выбрано «${row.seed_phrase}»`
 }
 

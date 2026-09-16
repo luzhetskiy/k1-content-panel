@@ -248,6 +248,7 @@ export interface CategoryMetaRow {
   name: string; path: string; url: string; page_url: string
   status: string; skip_reason: string; error_text: string; stuck: boolean
   seed_phrase: string; form_nominative: string; form_buy: string; chosen_form: string
+  candidates: { phrase: string; count: number | null }[]
   nominative_count: number | null; declined_count: number | null
   total_count: number | null; low_demand: boolean
   title: string; h1: string; meta_description: string; meta_keywords: string; ai_keywords: string

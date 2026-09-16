@@ -15,6 +15,8 @@ from app.models.category_meta import CategoryMeta
 # вызова; ответ на 60 объектов укладывается в лимит вывода модели с запасом.
 SEEDS_CHUNK = 60
 SEED_FIELDS = ("phrase", "nominative", "buy", "price")
+# Каждый вариант — запрос к Wordstat из квоты 100/час, поэтому не больше четырёх.
+MAX_VARIANTS = 4
 
 
 class SeedsError(RuntimeError):
@@ -29,9 +31,26 @@ def seed_lines(rows: list[CategoryMeta]) -> list[str]:
     return [f"{row.remote_id}: {row.path or row.name}" for row in rows]
 
 
+def _variants(item: dict) -> list[dict]:
+    """Полные, без дублей, не больше MAX_VARIANTS. Элемент без "variants" —
+    старый формат ответа (одна фраза прямо в объекте): отредактированный в
+    админке промпт мог в нём остаться."""
+    raw = item.get("variants") if isinstance(item.get("variants"), list) else [item]
+    variants, seen = [], set()
+    for candidate in raw:
+        if not isinstance(candidate, dict):
+            continue
+        values = [" ".join(str(candidate.get(name) or "").split()) for name in SEED_FIELDS]
+        if not all(values) or values[0].casefold() in seen:
+            continue
+        seen.add(values[0].casefold())
+        variants.append(dict(zip(SEED_FIELDS, values)))
+    return variants[:MAX_VARIANTS]
+
+
 def apply_seeds(rows: list[CategoryMeta], data: object) -> list[CategoryMeta]:
     """Раскладывает ответ модели по категориям. Возвращает те, для которых
-    фраза не пришла или пришла неполной."""
+    не пришло ни одного полного варианта названия."""
     if not isinstance(data, list):
         raise SeedsError("модель вернула не JSON-массив поисковых фраз")
     by_id: dict[int, dict] = {}
@@ -44,12 +63,15 @@ def apply_seeds(rows: list[CategoryMeta], data: object) -> list[CategoryMeta]:
             continue
     missing = []
     for row in rows:
-        item = by_id.get(row.remote_id) or {}
-        values = [" ".join(str(item.get(name) or "").split()) for name in SEED_FIELDS]
-        if not all(values):
+        variants = _variants(by_id.get(row.remote_id) or {})
+        if not variants:
             missing.append(row)
             continue
-        row.seed_phrase, row.form_nominative, row.form_buy, row.form_price = values
+        # Первый вариант — до Wordstat; победителя выберет app/category_meta/generator.py.
+        first = variants[0]
+        row.seed_phrase, row.form_nominative = first["phrase"], first["nominative"]
+        row.form_buy, row.form_price = first["buy"], first["price"]
+        row.candidates_json = variants
         row.seed_source_name = row.name
     return missing
 

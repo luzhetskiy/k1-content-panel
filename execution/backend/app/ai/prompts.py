@@ -33,7 +33,7 @@ PROMPT_VARIABLES: dict[str, frozenset[str]] = {
     "category_meta": frozenset({"site_name", "site_description", "category_name",
                                 "category_path", "form_nominative", "form_buy", "form_price",
                                 "chosen_form", "sell_word", "city_in", "brand", "total_count",
-                                "phrases", "violations"}),
+                                "phrases", "alternatives", "violations"}),
 }
 
 # undefined=StrictUndefined: с дефолтным Undefined опечатка в имени переменной

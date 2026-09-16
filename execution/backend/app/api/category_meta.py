@@ -72,6 +72,11 @@ class RegionOut(BaseModel):
     path: str
 
 
+class CandidateOut(BaseModel):
+    phrase: str
+    count: int | None
+
+
 class CategoryOut(BaseModel):
     id: int
     remote_id: int
@@ -85,6 +90,7 @@ class CategoryOut(BaseModel):
     error_text: str
     stuck: bool
     seed_phrase: str
+    candidates: list[CandidateOut]
     form_nominative: str
     form_buy: str
     chosen_form: str
@@ -126,7 +132,10 @@ def _category_out(site: Site, row: CategoryMeta) -> CategoryOut:
         name=row.name, path=row.path, url=row.url,
         page_url=f"{site.base_url.rstrip('/')}{row.url}" if row.url else "",
         status=row.status, skip_reason=row.skip_reason, error_text=row.error_text,
-        stuck=is_stuck(row), seed_phrase=row.seed_phrase, form_nominative=row.form_nominative,
+        stuck=is_stuck(row), seed_phrase=row.seed_phrase,
+        candidates=[CandidateOut(phrase=v.get("phrase", ""), count=v.get("count"))
+                    for v in (row.candidates_json or []) if isinstance(v, dict)],
+        form_nominative=row.form_nominative,
         form_buy=row.form_buy, chosen_form=row.chosen_form,
         nominative_count=row.nominative_count, declined_count=row.declined_count,
         total_count=row.total_count, low_demand=row.low_demand, title=row.title, h1=row.h1,

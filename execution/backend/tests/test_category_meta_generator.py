@@ -148,7 +148,7 @@ def test_cache_hit_skips_wordstat_and_quota(db_session, site, fanera):
 
 
 def test_quota_exhausted_stops_before_llm(db_session, site, fanera):
-    db_session.add_all([WordstatCall() for _ in range(99)])
+    db_session.add_all([WordstatCall() for _ in range(100)])
     db_session.commit()
     wordstat, text = FakeWordstat(), FakeText([VALID])
     with pytest.raises(QuotaExceeded) as err:
@@ -181,6 +181,93 @@ def test_invalid_twice_raises_and_publishes_nothing(db_session, site, fanera):
     assert site_client.created == []
     # факты Wordstat сохранены до LLM — их видно в карточке
     assert fanera.chosen_form == "nominative" and fanera.total_count == 96275
+
+
+GKL_TOPS = {
+    "гипсокартон": {"totalCount": "87575", "results": [
+        {"phrase": "гипсокартон", "count": "87575"}, {"phrase": "гипсокартон купить", "count": "3221"},
+        {"phrase": "гипсокартон цена", "count": "2100"}, {"phrase": "влагостойкий гипсокартон", "count": "5000"},
+        {"phrase": "гипсокартон москва", "count": "900"}]},
+    "гкл": {"totalCount": "24437", "results": [
+        {"phrase": "гкл", "count": "24437"}, {"phrase": "гкл купить", "count": "492"}]},
+    "гипсокартонный лист": {"totalCount": "769", "results": [
+        {"phrase": "гипсокартонный лист", "count": "769"}]},
+}
+
+GKL_VALID = {
+    # формы совпадают («купить гипсокартон») → chosen_form=declined → title с «купить»
+    "title": "Купить гипсокартон в Москве по выгодной цене | Стройбаза",
+    "h1": "Гипсокартон в Москве",
+    "meta_description": ("Гипсокартон в Москве по выгодной цене: обычный и влагостойкий ГКЛ Кнауф и "
+                         "Волма, листы 12,5 мм для стен и потолков. Доставка по Москве, расчёт "
+                         "в калькуляторе."),
+    "meta_keywords": "гипсокартон купить, гипсокартон цена, влагостойкий гипсокартон, гкл купить, "
+                     "гипсокартон москва",
+    "ai_keywords": ", ".join(f"вопрос про гипсокартон номер {i}" for i in range(10)),
+}
+
+
+class GklWordstat(FakeWordstat):
+    def top_requests(self, phrase, region_id, num_phrases=300):
+        self.calls.append((phrase, region_id, num_phrases))
+        return GKL_TOPS.get(phrase, {"totalCount": "0"})
+
+
+@pytest.fixture
+def gkl(db_session, site):
+    variants = [{"phrase": p, "nominative": p, "buy": f"купить {p}", "price": f"цена {p}"}
+                for p in ("гкл", "гипсокартон", "гипсокартонный лист")]
+    row = CategoryMeta(site_id=site.id, remote_id=39, name="ГКЛ", path="Листовые материалы / ГКЛ",
+                       url="/catalog/category/listovye-materialy/gipsokartonnyj-list-gkl/",
+                       status="in_work", seed_phrase="гкл", seed_source_name="ГКЛ",
+                       form_nominative="гкл", form_buy="купить гкл", form_price="цена гкл",
+                       candidates_json=variants)
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def test_most_searched_variant_wins(db_session, site, gkl):
+    wordstat, text = GklWordstat(), FakeText([GKL_VALID])
+    run(db_session, gkl, site, wordstat=wordstat, text=text)
+    assert wordstat.calls == [("гкл", 213, 300), ("гипсокартон", 213, 300),
+                              ("гипсокартонный лист", 213, 300)]
+    assert (gkl.seed_phrase, gkl.form_buy, gkl.total_count) == \
+        ("гипсокартон", "купить гипсокартон", 87575)
+    assert [(v["phrase"], v["count"]) for v in gkl.candidates_json] == \
+        [("гкл", 24437), ("гипсокартон", 87575), ("гипсокартонный лист", 769)]
+    assert gkl.status == "done" and gkl.title == GKL_VALID["title"]
+    # фразы проигравших вариантов — в промпте отдельным списком и допустимы в keywords
+    assert "гкл — 24437: гкл, гкл купить" in text.prompts[0]
+    assert "гипсокартон купить — 3221" in text.prompts[0]
+
+
+def test_variant_tie_keeps_llm_order(db_session, site, gkl):
+    tops = {"гкл": {"totalCount": "10"}, "гипсокартон": {"totalCount": "10"},
+            "гипсокартонный лист": {"totalCount": "10"}}
+
+    class TieWordstat(FakeWordstat):
+        def top_requests(self, phrase, region_id, num_phrases=300):
+            self.calls.append((phrase, region_id, num_phrases))
+            return tops.get(phrase, {"totalCount": "0"})
+
+    with pytest.raises(MetaValidationError):
+        run(db_session, gkl, site, wordstat=TieWordstat(), text=FakeText([{}, {}]))
+    assert gkl.seed_phrase == "гкл"
+
+
+def test_quota_for_form_check_after_variants_are_cached(db_session, site, fanera):
+    fanera.candidates_json = [{"phrase": "фанера", "nominative": "фанера", "buy": "купить фанеру",
+                               "price": "цена фанеры"},
+                              {"phrase": "фанерный лист", "nominative": "фанерный лист",
+                               "buy": "купить фанерный лист", "price": "цена фанерного листа"}]
+    db_session.add_all([WordstatCall() for _ in range(98)])
+    db_session.commit()
+    wordstat = FakeWordstat()
+    with pytest.raises(QuotaExceeded):
+        run(db_session, fanera, site, wordstat=wordstat)
+    # два варианта уместились в квоту и легли в кеш; на проверку формы квоты не хватило
+    assert [call[0] for call in wordstat.calls] == ["фанера", "фанерный лист"]
 
 
 def test_category_without_seed(db_session, site, fanera):

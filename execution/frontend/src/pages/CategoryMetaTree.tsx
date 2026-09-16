@@ -56,6 +56,12 @@ function formText(row: CategoryMetaRow): string {
   return '—'
 }
 
+function candidatesText(row: CategoryMetaRow): string {
+  if (row.candidates.length < 2) return ''
+  const counted = row.candidates.map(c => `«${c.phrase}» ${c.count ?? '—'}`)
+  return `${counted.join(' · ')} → выбрано «${row.seed_phrase}»`
+}
+
 function CategoryDrawer({ row, onClose, onChanged }: {
   row: CategoryMetaRow | null
   onClose: () => void
@@ -110,6 +116,9 @@ function CategoryDrawer({ row, onClose, onChanged }: {
       </Descriptions>
       <Descriptions title="Wordstat" column={1} size="small" bordered style={{ marginTop: 16 }}>
         <Descriptions.Item label="Фраза">{row.seed_phrase || '—'}</Descriptions.Item>
+        {candidatesText(row) && (
+          <Descriptions.Item label="Варианты названия">{candidatesText(row)}</Descriptions.Item>
+        )}
         <Descriptions.Item label="Форма">{formText(row)}{counts}</Descriptions.Item>
         <Descriptions.Item label="Запросов за 30 дней">{row.total_count ?? '—'}</Descriptions.Item>
       </Descriptions>

@@ -42,6 +42,9 @@ class CategoryMeta(Base):
     form_nominative: Mapped[str] = mapped_column(String(300), default="")
     form_buy: Mapped[str] = mapped_column(String(300), default="")
     form_price: Mapped[str] = mapped_column(String(300), default="")
+    # Варианты названия от LLM ([{phrase, nominative, buy, price}], после Wordstat —
+    # ещё и count). Побеждает самый частотный: «ГКЛ» ищут как «гипсокартон».
+    candidates_json: Mapped[list | None] = mapped_column(JsonType, nullable=True)
 
     chosen_form: Mapped[str] = mapped_column(String(20), default="")  # nominative|declined
     nominative_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

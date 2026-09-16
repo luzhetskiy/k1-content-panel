@@ -104,6 +104,7 @@ def test_default_prompts_render_with_real_contexts(db_session):
                           "form_price": "цена фанеры", "chosen_form": "nominative",
                           "sell_word": "купить", "city_in": "в Москве", "brand": "Стройбаза",
                           "total_count": 96275, "phrases": ["фанера — 96275"],
+                          "alternatives": ["фанерный лист — 198: фанерный лист"],
                           "violations": ["h1 пустой"]},
     }
     for key in PROMPT_KEYS:

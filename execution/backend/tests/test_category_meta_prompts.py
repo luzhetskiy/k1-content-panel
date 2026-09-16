@@ -6,7 +6,8 @@ META_VARS = {"site_name": "Стройбаза", "site_description": "Магаз�
              "form_nominative": "фанера", "form_buy": "купить фанеру", "form_price": "цена фанеры",
              "chosen_form": "nominative", "sell_word": "купить", "city_in": "в Москве",
              "brand": "Стройбаза", "total_count": 96275,
-             "phrases": ["фанера — 96275", "фанера купить — 12238"], "violations": []}
+             "phrases": ["фанера — 96275", "фанера купить — 12238"], "alternatives": [],
+             "violations": []}
 
 
 def render(db, **overrides):
@@ -20,6 +21,13 @@ def test_meta_prompt_nominative_instruction(db_session):
     assert "начни title с «купить фанеру»" not in text
     assert "фанера купить — 12238" in text
     assert "не прошёл проверку" not in text
+
+
+def test_meta_prompt_lists_alternatives(db_session):
+    assert "Другие названия" not in render(db_session)
+    text = render(db_session, alternatives=["гкл — 24437: гкл, потолок гкл"])
+    assert "Другие названия этих товаров" in text
+    assert "гкл — 24437: гкл, потолок гкл" in text
 
 
 def test_meta_prompt_declined_instruction(db_session):

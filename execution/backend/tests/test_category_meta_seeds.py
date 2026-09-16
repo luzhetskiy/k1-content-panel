@@ -39,6 +39,39 @@ def test_apply_seeds_fills_forms_and_reports_missing():
     assert not broken.seed_phrase
 
 
+def variant(phrase, nominative=None, buy=None, price=None):
+    return {"phrase": phrase, "nominative": nominative or phrase,
+            "buy": buy or f"купить {phrase}", "price": price or f"цена {phrase}"}
+
+
+def test_apply_seeds_with_variants_keeps_all_and_seeds_first():
+    gkl = category(39, "ГКЛ")
+    missing = apply_seeds([gkl], [{"id": 39, "variants": [
+        variant("гипсокартон", price="цена гипсокартона"), variant("гкл"),
+        variant("Гипсокартон"), {"phrase": "неполный"}, variant("гипсокартонный лист"),
+        variant("лист гкл"), variant("пятый")]}])
+    assert missing == []
+    assert [v["phrase"] for v in gkl.candidates_json] == \
+        ["гипсокартон", "гкл", "гипсокартонный лист", "лист гкл"]   # дубль и неполный отброшены, не больше 4
+    assert (gkl.seed_phrase, gkl.form_price, gkl.seed_source_name) == \
+        ("гипсокартон", "цена гипсокартона", "ГКЛ")
+
+
+def test_apply_seeds_accepts_flat_item_as_single_variant():
+    """Отредактированный в админке промпт мог остаться в старом формате без variants."""
+    fanera = category(46, "Фанера")
+    apply_seeds([fanera], [{"id": 46, "phrase": "фанера", "nominative": "фанера",
+                            "buy": "купить фанеру", "price": "цена фанеры"}])
+    assert fanera.candidates_json == [{"phrase": "фанера", "nominative": "фанера",
+                                       "buy": "купить фанеру", "price": "цена фанеры"}]
+
+
+def test_apply_seeds_without_valid_variants_is_missing():
+    row = category(1, "А")
+    assert apply_seeds([row], [{"id": 1, "variants": [{"phrase": "а"}]}]) == [row]
+    assert row.candidates_json is None
+
+
 def test_apply_seeds_rejects_non_list():
     with pytest.raises(SeedsError):
         apply_seeds([category(1, "А")], {"id": 1})

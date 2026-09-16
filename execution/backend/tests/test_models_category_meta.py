@@ -45,6 +45,17 @@ def test_previous_json_roundtrip(db_session, site):
     assert db_session.get(CategoryMeta, row.id).previous_json == {"title": "Фанера", "h1": ""}
 
 
+def test_candidates_json_roundtrip(db_session, site):
+    variants = [{"phrase": "гипсокартон", "nominative": "гипсокартон", "buy": "купить гипсокартон",
+                 "price": "цена гипсокартона", "count": 87575}]
+    row = CategoryMeta(site_id=site.id, remote_id=2, name="ГКЛ", candidates_json=variants)
+    db_session.add(row)
+    db_session.commit()
+    db_session.expire_all()
+    assert db_session.get(CategoryMeta, row.id).candidates_json == variants
+    assert CategoryMeta(site_id=site.id, remote_id=3, name="Б").candidates_json is None
+
+
 def test_run_and_wordstat_rows(db_session, site):
     run = MetaRun(site_id=site.id)
     db_session.add_all([run, WordstatCache(kind="top", phrase="фанера", region_id=213,

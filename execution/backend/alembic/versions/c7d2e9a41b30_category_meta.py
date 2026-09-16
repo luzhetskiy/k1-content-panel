@@ -48,6 +48,7 @@ def upgrade() -> None:
     sa.Column('form_nominative', sa.String(length=300), nullable=False),
     sa.Column('form_buy', sa.String(length=300), nullable=False),
     sa.Column('form_price', sa.String(length=300), nullable=False),
+    sa.Column('candidates_json', JSON_TYPE, nullable=True),
     sa.Column('chosen_form', sa.String(length=20), nullable=False),
     sa.Column('nominative_count', sa.Integer(), nullable=True),
     sa.Column('declined_count', sa.Integer(), nullable=True),

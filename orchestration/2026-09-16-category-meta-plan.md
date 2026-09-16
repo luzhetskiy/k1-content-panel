@@ -10,7 +10,13 @@
 
 **Дизайн:** `directions/2026-09-16-category-meta-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии бэкенда (778 тестов зелёные, `alembic check` без расхождений на Postgres 16, `npm run build` проходит). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии бэкенда (сейчас 790 тестов зелёные, `alembic check` без расхождений на Postgres 16, `npm run build` проходит). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+
+**Доработки после первого исполнения (2026-09-16).** План уже исполнен на ветке `feature/category-meta`; блоки кода ниже обновлены до итогового состояния, отдельных задач на доработки нет. Что изменилось против первой редакции и почему:
+- `WordstatClient.regions_tree` зовёт `getRegionsTree` — `regionsTree` отвечает 404 (живая проверка);
+- `city_in_for` вытаскивает «в Москве» из конца многословного ответа — модель вернула «купить стройматериалы в Москве» (живая проверка);
+- `normalize_tags` ставит заглавную букву в title/h1/description — модель вернула «купить профнастил…» (живая проверка);
+- **варианты названия** (запрос владельца): `category_seeds` отдаёт 1–4 варианта, `collect_facts` выбирает самый частотный по `totalCount` («ГКЛ» → «гипсокартон»), склонение проверяется у победителя; `CategoryMeta.candidates_json`, переменная промпта `alternatives`, поле `candidates` в API и карточке; лимит задачи категории 1600 → 1900 с, «зависла» 30 → 35 мин.
 
 ---
 
@@ -150,6 +156,17 @@ def test_previous_json_roundtrip(db_session, site):
     assert db_session.get(CategoryMeta, row.id).previous_json == {"title": "Фанера", "h1": ""}
 
 
+def test_candidates_json_roundtrip(db_session, site):
+    variants = [{"phrase": "гипсокартон", "nominative": "гипсокартон", "buy": "купить гипсокартон",
+                 "price": "цена гипсокартона", "count": 87575}]
+    row = CategoryMeta(site_id=site.id, remote_id=2, name="ГКЛ", candidates_json=variants)
+    db_session.add(row)
+    db_session.commit()
+    db_session.expire_all()
+    assert db_session.get(CategoryMeta, row.id).candidates_json == variants
+    assert CategoryMeta(site_id=site.id, remote_id=3, name="Б").candidates_json is None
+
+
 def test_run_and_wordstat_rows(db_session, site):
     run = MetaRun(site_id=site.id)
     db_session.add_all([run, WordstatCache(kind="top", phrase="фанера", region_id=213,
@@ -246,6 +263,9 @@ class CategoryMeta(Base):
     form_nominative: Mapped[str] = mapped_column(String(300), default="")
     form_buy: Mapped[str] = mapped_column(String(300), default="")
     form_price: Mapped[str] = mapped_column(String(300), default="")
+    # Варианты названия от LLM ([{phrase, nominative, buy, price}], после Wordstat —
+    # ещё и count). Побеждает самый частотный: «ГКЛ» ищут как «гипсокартон».
+    candidates_json: Mapped[list | None] = mapped_column(JsonType, nullable=True)
 
     chosen_form: Mapped[str] = mapped_column(String(20), default="")  # nominative|declined
     nominative_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -331,7 +351,7 @@ from app.models.category_meta import CategoryMeta, MetaRun, WordstatCache, Words
 - [ ] **Step 7: Тесты зелёные**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_clock_as_utc.py tests/test_models_category_meta.py tests/test_models_site.py`
-Expected: PASS (18 passed).
+Expected: PASS (19 passed).
 
 - [ ] **Step 8: Миграция**
 
@@ -388,6 +408,7 @@ def upgrade() -> None:
     sa.Column('form_nominative', sa.String(length=300), nullable=False),
     sa.Column('form_buy', sa.String(length=300), nullable=False),
     sa.Column('form_price', sa.String(length=300), nullable=False),
+    sa.Column('candidates_json', JSON_TYPE, nullable=True),
     sa.Column('chosen_form', sa.String(length=20), nullable=False),
     sa.Column('nominative_count', sa.Integer(), nullable=True),
     sa.Column('declined_count', sa.Integer(), nullable=True),
@@ -2351,7 +2372,8 @@ META_VARS = {"site_name": "Стройбаза", "site_description": "Магаз�
              "form_nominative": "фанера", "form_buy": "купить фанеру", "form_price": "цена фанеры",
              "chosen_form": "nominative", "sell_word": "купить", "city_in": "в Москве",
              "brand": "Стройбаза", "total_count": 96275,
-             "phrases": ["фанера — 96275", "фанера купить — 12238"], "violations": []}
+             "phrases": ["фанера — 96275", "фанера купить — 12238"], "alternatives": [],
+             "violations": []}
 
 
 def render(db, **overrides):
@@ -2365,6 +2387,13 @@ def test_meta_prompt_nominative_instruction(db_session):
     assert "начни title с «купить фанеру»" not in text
     assert "фанера купить — 12238" in text
     assert "не прошёл проверку" not in text
+
+
+def test_meta_prompt_lists_alternatives(db_session):
+    assert "Другие названия" not in render(db_session)
+    text = render(db_session, alternatives=["гкл — 24437: гкл, потолок гкл"])
+    assert "Другие названия этих товаров" in text
+    assert "гкл — 24437: гкл, потолок гкл" in text
 
 
 def test_meta_prompt_declined_instruction(db_session):
@@ -2428,6 +2457,39 @@ def test_apply_seeds_fills_forms_and_reports_missing():
     assert (fanera.seed_phrase, fanera.form_buy, fanera.seed_source_name) == \
         ("фанера", "купить фанеру", "Фанера")
     assert not broken.seed_phrase
+
+
+def variant(phrase, nominative=None, buy=None, price=None):
+    return {"phrase": phrase, "nominative": nominative or phrase,
+            "buy": buy or f"купить {phrase}", "price": price or f"цена {phrase}"}
+
+
+def test_apply_seeds_with_variants_keeps_all_and_seeds_first():
+    gkl = category(39, "ГКЛ")
+    missing = apply_seeds([gkl], [{"id": 39, "variants": [
+        variant("гипсокартон", price="цена гипсокартона"), variant("гкл"),
+        variant("Гипсокартон"), {"phrase": "неполный"}, variant("гипсокартонный лист"),
+        variant("лист гкл"), variant("пятый")]}])
+    assert missing == []
+    assert [v["phrase"] for v in gkl.candidates_json] == \
+        ["гипсокартон", "гкл", "гипсокартонный лист", "лист гкл"]   # дубль и неполный отброшены, не больше 4
+    assert (gkl.seed_phrase, gkl.form_price, gkl.seed_source_name) == \
+        ("гипсокартон", "цена гипсокартона", "ГКЛ")
+
+
+def test_apply_seeds_accepts_flat_item_as_single_variant():
+    """Отредактированный в админке промпт мог остаться в старом формате без variants."""
+    fanera = category(46, "Фанера")
+    apply_seeds([fanera], [{"id": 46, "phrase": "фанера", "nominative": "фанера",
+                            "buy": "купить фанеру", "price": "цена фанеры"}])
+    assert fanera.candidates_json == [{"phrase": "фанера", "nominative": "фанера",
+                                       "buy": "купить фанеру", "price": "цена фанеры"}]
+
+
+def test_apply_seeds_without_valid_variants_is_missing():
+    row = category(1, "А")
+    assert apply_seeds([row], [{"id": 1, "variants": [{"phrase": "а"}]}]) == [row]
+    assert row.candidates_json is None
 
 
 def test_apply_seeds_rejects_non_list():
@@ -2515,6 +2577,7 @@ def test_city_in_rejects_answer_without_preposition():
                           "form_price": "цена фанеры", "chosen_form": "nominative",
                           "sell_word": "купить", "city_in": "в Москве", "brand": "Стройбаза",
                           "total_count": 96275, "phrases": ["фанера — 96275"],
+                          "alternatives": ["фанерный лист — 198: фанерный лист"],
                           "violations": ["h1 пустой"]},
 ```
 
@@ -2554,7 +2617,7 @@ PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text
     "category_meta": frozenset({"site_name", "site_description", "category_name",
                                 "category_path", "form_nominative", "form_buy", "form_price",
                                 "chosen_form", "sell_word", "city_in", "brand", "total_count",
-                                "phrases", "violations"}),
+                                "phrases", "alternatives", "violations"}),
 ```
 
 - [ ] **Step 5: Дефолтные промпты в `app/seed.py`**
@@ -2570,9 +2633,17 @@ PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text
 {{ site_description }}
 
 Ниже категории каталога: id и путь в дереве. Для каждой категории определи,
-как её товары ищут в Яндексе, и верни поисковую фразу и её формы.
+как её товары называют и ищут в Яндексе, и верни варианты названия с формами.
+Какой вариант ищут чаще, проверит Wordstat — твоя задача не пропустить
+настоящие варианты.
 
 Правила:
+- variants — от 1 до 4 вариантов названия ОДНОГО И ТОГО ЖЕ товара: название из
+  каталога в поисковом виде, общеупотребительное название, аббревиатура или
+  расшифровка. Пример: «ГКЛ» → «гипсокартон», «гкл», «гипсокартонный лист».
+  Если другого названия у товара нет — один вариант;
+- не подменяй товар смежным или более широким: для «Профиль для гипсокартона»
+  нельзя давать «гипсокартон»;
 - phrase — короткая фраза в том виде, в каком её вводят в поиск: обычный
   порядок слов («металлический уголок», а не «уголок металлический»), без
   перечислений из названия раздела (для «Кирпич Блоки Тротуар» выбери главный
@@ -2587,7 +2658,11 @@ PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text
 {% for line in categories %}{{ line }}
 {% endfor %}
 Верни СТРОГО JSON-массив объектов, по одному на каждую категорию, без пояснений:
-[{"id": 46, "phrase": "фанера", "nominative": "фанера", "buy": "купить фанеру", "price": "цена фанеры"}]""",
+[{"id": 39, "variants": [
+  {"phrase": "гипсокартон", "nominative": "гипсокартон", "buy": "купить гипсокартон", "price": "цена гипсокартона"},
+  {"phrase": "гкл", "nominative": "гкл", "buy": "купить гкл", "price": "цена гкл"}]},
+ {"id": 46, "variants": [
+  {"phrase": "фанера", "nominative": "фанера", "buy": "купить фанеру", "price": "цена фанеры"}]}]""",
 
     # Форму названия выбирает код по Wordstat (chosen_form) — модель её не меняет.
     # Правила полей дублируют проверку app/category_meta/validate.py: нарушение
@@ -2605,7 +2680,10 @@ PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text
 
 Как ищут (Wordstat, фраза — частота в месяц):
 {% for line in phrases %}{{ line }}
-{% endfor %}
+{% endfor %}{% if alternatives %}
+Другие названия этих товаров (ищут реже, чем «{{ form_nominative }}») — всего запросов и частые фразы:
+{% for line in alternatives %}{{ line }}
+{% endfor %}{% endif %}
 Форма названия выбрана по статистике — используй её, не меняй:
 {% if chosen_form == "nominative" %}- чаще ищут без склонения: начни title с «{{ form_nominative }}» (с заглавной буквы) и построй фразу так, чтобы она читалась корректно, например «{{ form_nominative }} {{ city_in }} — купить по выгодной цене | {{ brand }}».
 {% else %}- чаще ищут со склонением: начни title с «{{ form_buy }}» (с заглавной буквы), например «{{ form_buy }} {{ city_in }} по выгодной цене | {{ brand }}».
@@ -2615,7 +2693,7 @@ PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text
 - title: до 70 символов, оканчивается на « | {{ brand }}», содержит «{{ city_in }}» и слово «купить» или «цена»;
 - h1: до 60 символов, фраза и город («{{ form_nominative }} {{ city_in }}», с заглавной буквы), без бренда, не повторяет title;
 - meta_description: 140–170 символов, содержит «{{ city_in }}» и фразу; продающие слова из статистики и виды товара из запросов; не пиши «в наличии», «скидки», «оптом» и другие факты о магазине, которых нет в описании сайта;
-- meta_keywords: до 10 фраз через запятую в нижнем регистре, ТОЛЬКО дословно из списка запросов выше или «{{ form_nominative }} {{ city_in }}»; сначала коммерческие (купить, цена), затем виды товара;
+- meta_keywords: до 10 фраз через запятую в нижнем регистре, ТОЛЬКО дословно из запросов выше (включая фразы других названий) или «{{ form_nominative }} {{ city_in }}»; сначала коммерческие (купить, цена), затем виды товара;
 - ai_keywords: 10–15 фраз через запятую — как человек спросил бы нейросеть о выборе и покупке этого товара: «где купить … {{ city_in }}», «какая … подходит для …», виды и назначения из запросов.
 {% if violations %}
 Предыдущий вариант не прошёл проверку. Исправь:
@@ -2645,6 +2723,8 @@ from app.models.category_meta import CategoryMeta
 # вызова; ответ на 60 объектов укладывается в лимит вывода модели с запасом.
 SEEDS_CHUNK = 60
 SEED_FIELDS = ("phrase", "nominative", "buy", "price")
+# Каждый вариант — запрос к Wordstat из квоты 100/час, поэтому не больше четырёх.
+MAX_VARIANTS = 4
 
 
 class SeedsError(RuntimeError):
@@ -2659,9 +2739,26 @@ def seed_lines(rows: list[CategoryMeta]) -> list[str]:
     return [f"{row.remote_id}: {row.path or row.name}" for row in rows]
 
 
+def _variants(item: dict) -> list[dict]:
+    """Полные, без дублей, не больше MAX_VARIANTS. Элемент без "variants" —
+    старый формат ответа (одна фраза прямо в объекте): отредактированный в
+    админке промпт мог в нём остаться."""
+    raw = item.get("variants") if isinstance(item.get("variants"), list) else [item]
+    variants, seen = [], set()
+    for candidate in raw:
+        if not isinstance(candidate, dict):
+            continue
+        values = [" ".join(str(candidate.get(name) or "").split()) for name in SEED_FIELDS]
+        if not all(values) or values[0].casefold() in seen:
+            continue
+        seen.add(values[0].casefold())
+        variants.append(dict(zip(SEED_FIELDS, values)))
+    return variants[:MAX_VARIANTS]
+
+
 def apply_seeds(rows: list[CategoryMeta], data: object) -> list[CategoryMeta]:
     """Раскладывает ответ модели по категориям. Возвращает те, для которых
-    фраза не пришла или пришла неполной."""
+    не пришло ни одного полного варианта названия."""
     if not isinstance(data, list):
         raise SeedsError("модель вернула не JSON-массив поисковых фраз")
     by_id: dict[int, dict] = {}
@@ -2674,12 +2771,15 @@ def apply_seeds(rows: list[CategoryMeta], data: object) -> list[CategoryMeta]:
             continue
     missing = []
     for row in rows:
-        item = by_id.get(row.remote_id) or {}
-        values = [" ".join(str(item.get(name) or "").split()) for name in SEED_FIELDS]
-        if not all(values):
+        variants = _variants(by_id.get(row.remote_id) or {})
+        if not variants:
             missing.append(row)
             continue
-        row.seed_phrase, row.form_nominative, row.form_buy, row.form_price = values
+        # Первый вариант — до Wordstat; победителя выберет app/category_meta/generator.py.
+        first = variants[0]
+        row.seed_phrase, row.form_nominative = first["phrase"], first["nominative"]
+        row.form_buy, row.form_price = first["buy"], first["price"]
+        row.candidates_json = variants
         row.seed_source_name = row.name
     return missing
 
@@ -2746,7 +2846,7 @@ def city_in_for(text_client, city: str) -> str:
 - [ ] **Step 8: Тесты зелёные**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_category_meta_prompts.py tests/test_category_meta_seeds.py tests/test_category_meta_city.py tests/test_ai_prompts.py tests/test_api_admin_prompts.py`
-Expected: PASS (60 passed).
+Expected: PASS (65 passed).
 
 - [ ] **Step 9: Commit**
 
@@ -3105,7 +3205,7 @@ def test_cache_hit_skips_wordstat_and_quota(db_session, site, fanera):
 
 
 def test_quota_exhausted_stops_before_llm(db_session, site, fanera):
-    db_session.add_all([WordstatCall() for _ in range(99)])
+    db_session.add_all([WordstatCall() for _ in range(100)])
     db_session.commit()
     wordstat, text = FakeWordstat(), FakeText([VALID])
     with pytest.raises(QuotaExceeded) as err:
@@ -3140,6 +3240,93 @@ def test_invalid_twice_raises_and_publishes_nothing(db_session, site, fanera):
     assert fanera.chosen_form == "nominative" and fanera.total_count == 96275
 
 
+GKL_TOPS = {
+    "гипсокартон": {"totalCount": "87575", "results": [
+        {"phrase": "гипсокартон", "count": "87575"}, {"phrase": "гипсокартон купить", "count": "3221"},
+        {"phrase": "гипсокартон цена", "count": "2100"}, {"phrase": "влагостойкий гипсокартон", "count": "5000"},
+        {"phrase": "гипсокартон москва", "count": "900"}]},
+    "гкл": {"totalCount": "24437", "results": [
+        {"phrase": "гкл", "count": "24437"}, {"phrase": "гкл купить", "count": "492"}]},
+    "гипсокартонный лист": {"totalCount": "769", "results": [
+        {"phrase": "гипсокартонный лист", "count": "769"}]},
+}
+
+GKL_VALID = {
+    # формы совпадают («купить гипсокартон») → chosen_form=declined → title с «купить»
+    "title": "Купить гипсокартон в Москве по выгодной цене | Стройбаза",
+    "h1": "Гипсокартон в Москве",
+    "meta_description": ("Гипсокартон в Москве по выгодной цене: обычный и влагостойкий ГКЛ Кнауф и "
+                         "Волма, листы 12,5 мм для стен и потолков. Доставка по Москве, расчёт "
+                         "в калькуляторе."),
+    "meta_keywords": "гипсокартон купить, гипсокартон цена, влагостойкий гипсокартон, гкл купить, "
+                     "гипсокартон москва",
+    "ai_keywords": ", ".join(f"вопрос про гипсокартон номер {i}" for i in range(10)),
+}
+
+
+class GklWordstat(FakeWordstat):
+    def top_requests(self, phrase, region_id, num_phrases=300):
+        self.calls.append((phrase, region_id, num_phrases))
+        return GKL_TOPS.get(phrase, {"totalCount": "0"})
+
+
+@pytest.fixture
+def gkl(db_session, site):
+    variants = [{"phrase": p, "nominative": p, "buy": f"купить {p}", "price": f"цена {p}"}
+                for p in ("гкл", "гипсокартон", "гипсокартонный лист")]
+    row = CategoryMeta(site_id=site.id, remote_id=39, name="ГКЛ", path="Листовые материалы / ГКЛ",
+                       url="/catalog/category/listovye-materialy/gipsokartonnyj-list-gkl/",
+                       status="in_work", seed_phrase="гкл", seed_source_name="ГКЛ",
+                       form_nominative="гкл", form_buy="купить гкл", form_price="цена гкл",
+                       candidates_json=variants)
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def test_most_searched_variant_wins(db_session, site, gkl):
+    wordstat, text = GklWordstat(), FakeText([GKL_VALID])
+    run(db_session, gkl, site, wordstat=wordstat, text=text)
+    assert wordstat.calls == [("гкл", 213, 300), ("гипсокартон", 213, 300),
+                              ("гипсокартонный лист", 213, 300)]
+    assert (gkl.seed_phrase, gkl.form_buy, gkl.total_count) == \
+        ("гипсокартон", "купить гипсокартон", 87575)
+    assert [(v["phrase"], v["count"]) for v in gkl.candidates_json] == \
+        [("гкл", 24437), ("гипсокартон", 87575), ("гипсокартонный лист", 769)]
+    assert gkl.status == "done" and gkl.title == GKL_VALID["title"]
+    # фразы проигравших вариантов — в промпте отдельным списком и допустимы в keywords
+    assert "гкл — 24437: гкл, гкл купить" in text.prompts[0]
+    assert "гипсокартон купить — 3221" in text.prompts[0]
+
+
+def test_variant_tie_keeps_llm_order(db_session, site, gkl):
+    tops = {"гкл": {"totalCount": "10"}, "гипсокартон": {"totalCount": "10"},
+            "гипсокартонный лист": {"totalCount": "10"}}
+
+    class TieWordstat(FakeWordstat):
+        def top_requests(self, phrase, region_id, num_phrases=300):
+            self.calls.append((phrase, region_id, num_phrases))
+            return tops.get(phrase, {"totalCount": "0"})
+
+    with pytest.raises(MetaValidationError):
+        run(db_session, gkl, site, wordstat=TieWordstat(), text=FakeText([{}, {}]))
+    assert gkl.seed_phrase == "гкл"
+
+
+def test_quota_for_form_check_after_variants_are_cached(db_session, site, fanera):
+    fanera.candidates_json = [{"phrase": "фанера", "nominative": "фанера", "buy": "купить фанеру",
+                               "price": "цена фанеры"},
+                              {"phrase": "фанерный лист", "nominative": "фанерный лист",
+                               "buy": "купить фанерный лист", "price": "цена фанерного листа"}]
+    db_session.add_all([WordstatCall() for _ in range(98)])
+    db_session.commit()
+    wordstat = FakeWordstat()
+    with pytest.raises(QuotaExceeded):
+        run(db_session, fanera, site, wordstat=wordstat)
+    # два варианта уместились в квоту и легли в кеш; на проверку формы квоты не хватило
+    assert [call[0] for call in wordstat.calls] == ["фанера", "фанерный лист"]
+
+
 def test_category_without_seed(db_session, site, fanera):
     fanera.seed_phrase = ""
     with pytest.raises(SeedsError):
@@ -3160,13 +3347,14 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.category_meta.gene
 - клиент Wordstat создаётся лениво и ДО резервирования квоты — без ключа квота
   не тратится;
 - статистика берётся из кеша, в Wordstat уходят только промахи;
+- из вариантов названия («гкл», «гипсокартон») побеждает самый частотный;
 - факты Wordstat сохраняются в категорию до вызова LLM — если теги не пройдут
   проверку, в карточке всё равно видно, что показал Wordstat.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -3190,6 +3378,7 @@ TOP_KIND = "top"
 EXACT_KIND = "exact"
 TOP_PHRASES = 300        # сколько фраз просить у topRequests
 PROMPT_PHRASES = 100     # сколько из них показать модели
+ALTERNATIVE_PHRASES = 15 # сколько частых фраз показать у каждого проигравшего варианта
 LLM_ATTEMPTS = 2         # первая попытка + одна с перечнем нарушений
 
 
@@ -3204,19 +3393,22 @@ class WordstatFacts:
     chosen_form: str
     nominative_count: int | None
     declined_count: int | None
+    # Проигравшие варианты названия: (фраза, всего запросов, её частые фразы).
+    alternatives: list[tuple[str, int, list[tuple[str, int]]]] = field(default_factory=list)
 
 
-def wordstat_queries(category: CategoryMeta) -> list[tuple[str, str]]:
-    queries = [(TOP_KIND, category.seed_phrase)]
-    if forms_differ(category.form_nominative, category.form_buy):
-        nominative, declined = buy_queries(category.form_nominative, category.form_buy)
-        queries += [(EXACT_KIND, nominative), (EXACT_KIND, declined)]
-    return queries
+def seed_variants(category: CategoryMeta) -> list[dict]:
+    """Варианты названия от LLM; без них — единственный вариант из seed-полей."""
+    variants = [{name: v.get(name, "") for name in ("phrase", "nominative", "buy", "price")}
+                for v in (category.candidates_json or [])
+                if isinstance(v, dict) and v.get("phrase")]
+    return variants or [{"phrase": category.seed_phrase, "nominative": category.form_nominative,
+                         "buy": category.form_buy, "price": category.form_price}]
 
 
-def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
-                  wordstat_factory, limit: int, now: datetime | None = None) -> WordstatFacts:
-    queries = wordstat_queries(category)
+def _load(db: Session, queries: list[tuple[str, str]], region_id: int | None, wordstat_factory,
+          limit: int, now: datetime | None) -> dict[tuple[str, str], dict]:
+    """Ответы Wordstat по запросам: из кеша, промахи — одним резервом квоты."""
     bodies = {query: cache_get(db, query[0], query[1], region_id, now) for query in queries}
     missing = [query for query, body in bodies.items() if body is None]
     if missing:
@@ -3229,23 +3421,50 @@ def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
             body = client.top_requests(phrase, region_id, TOP_PHRASES if kind == TOP_KIND else 1)
             cache_put(db, kind, phrase, region_id, body, now)
             bodies[(kind, phrase)] = body
-    top = parse_top(bodies[queries[0]])
-    if len(queries) == 3:
-        nominative_count = parse_top(bodies[queries[1]]).total_count
-        declined_count = parse_top(bodies[queries[2]]).total_count
-        chosen = choose_form(nominative_count, declined_count)
-    else:
-        nominative_count = declined_count = None
-        chosen = choose_form(None, None)
-    return WordstatFacts(top.total_count, top.phrases, chosen, nominative_count, declined_count)
+    return bodies
+
+
+def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
+                  wordstat_factory, limit: int, now: datetime | None = None) -> WordstatFacts:
+    """Сначала статистика по всем вариантам названия — побеждает самый частотный
+    (при равенстве — первый, как предложила LLM); его формы записываются в
+    категорию. Затем проверка склонения — уже для победителя. Два этапа — два
+    резерва квоты: если на второй не хватит, варианты уже лежат в кеше."""
+    variants = seed_variants(category)
+    tops = _load(db, [(TOP_KIND, v["phrase"]) for v in variants], region_id,
+                 wordstat_factory, limit, now)
+    parsed = [(variant, parse_top(tops[(TOP_KIND, variant["phrase"])])) for variant in variants]
+    winner, top = max(parsed, key=lambda item: item[1].total_count)
+    category.seed_phrase, category.form_nominative = winner["phrase"], winner["nominative"]
+    category.form_buy, category.form_price = winner["buy"], winner["price"]
+    category.candidates_json = [{**variant, "count": result.total_count}
+                                for variant, result in parsed]
+
+    nominative_count = declined_count = None
+    if forms_differ(category.form_nominative, category.form_buy):
+        queries = [(EXACT_KIND, query)
+                   for query in buy_queries(category.form_nominative, category.form_buy)]
+        exact = _load(db, queries, region_id, wordstat_factory, limit, now)
+        nominative_count = parse_top(exact[queries[0]]).total_count
+        declined_count = parse_top(exact[queries[1]]).total_count
+    return WordstatFacts(
+        total_count=top.total_count, phrases=top.phrases,
+        chosen_form=choose_form(nominative_count, declined_count),
+        nominative_count=nominative_count, declined_count=declined_count,
+        alternatives=[(variant["phrase"], result.total_count, result.phrases)
+                      for variant, result in parsed if variant is not winner])
 
 
 def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFacts,
                   text_client, stoplist: list[str], record_usage) -> dict:
     phrases = filter_stoplist(facts.phrases, stoplist)
+    alternatives = [(phrase, count, filter_stoplist(alt_phrases, stoplist))
+                    for phrase, count, alt_phrases in facts.alternatives]
     ctx = MetaContext(form_nominative=category.form_nominative, form_buy=category.form_buy,
                       chosen_form=facts.chosen_form, city=site.city, city_in=site.city_in,
-                      brand=site.brand, wordstat_phrases=[phrase for phrase, _ in phrases],
+                      brand=site.brand,
+                      wordstat_phrases=[phrase for phrase, _ in phrases]
+                      + [phrase for _, _, alt in alternatives for phrase, _ in alt],
                       stoplist=stoplist, site_description=site.site_description)
     template = resolve_prompt(db, "category_meta", site.id)
     violations: list[str] = []
@@ -3258,6 +3477,9 @@ def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFact
             "sell_word": sell_word(phrases), "city_in": site.city_in, "brand": site.brand,
             "total_count": facts.total_count,
             "phrases": [f"{phrase} — {count}" for phrase, count in phrases[:PROMPT_PHRASES]],
+            "alternatives": [
+                f"{phrase} — {count}: " + ", ".join(p for p, _ in alt[:ALTERNATIVE_PHRASES])
+                for phrase, count, alt in alternatives],
             "violations": violations,
         })
         result = text_client.complete_json(prompt)
@@ -3300,7 +3522,7 @@ def generate_category(db: Session, category: CategoryMeta, site, *, wordstat_fac
 - [ ] **Step 4: Тесты зелёные**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_category_meta_generator.py`
-Expected: PASS (8 passed).
+Expected: PASS (11 passed).
 
 - [ ] **Step 5: Commit**
 
@@ -3364,9 +3586,10 @@ def add_run(db, site, minutes_ago=0, **kwargs):
     return run
 
 
-def test_is_stuck_after_30_minutes(db_session, site):
-    assert not is_stuck(add_category(db_session, site, 1, "in_work", started_minutes_ago=29), NOW)
-    assert is_stuck(add_category(db_session, site, 2, "in_work", started_minutes_ago=31), NOW)
+def test_is_stuck_after_35_minutes(db_session, site):
+    # мягкий лимит задачи категории — 1900 с ≈ 32 мин; раньше него «зависла» не показываем
+    assert not is_stuck(add_category(db_session, site, 1, "in_work", started_minutes_ago=34), NOW)
+    assert is_stuck(add_category(db_session, site, 2, "in_work", started_minutes_ago=36), NOW)
     assert not is_stuck(add_category(db_session, site, 3, "done", started_minutes_ago=90), NOW)
 
 
@@ -3455,8 +3678,9 @@ from app.clock import as_utc, utcnow
 from app.models.category_meta import CategoryMeta, MetaRun
 
 ACTIVE_STATUSES = ("queued", "in_work")
-# Худший случай одной категории — ~27 минут (CATEGORY_SOFT_LIMIT в app/tasks.py).
-STUCK_AFTER = timedelta(minutes=30)
+# Мягкий лимит задачи категории — 1900 с ≈ 32 минуты (CATEGORY_SOFT_LIMIT в
+# app/tasks.py); раньше него «зависла» — ложная тревога.
+STUCK_AFTER = timedelta(minutes=35)
 # Цепочка может честно стоять в очереди Celery за партией статей часами — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)
@@ -3888,11 +4112,12 @@ logger = logging.getLogger(__name__)
 # Цепочка: запуск ставит в Celery только первую категорию, каждая задача по
 # завершении — следующую. Проект занимает не больше одного слота воркера из двух.
 
-# Худший случай категории: Wordstat 3 запроса × (30 с × 3 попытки + паузы 2+4)
-# = 288 с; LLM 2 попытки × 366 с = 732 с; запись на сайт 3 попытки ×
-# (список метатегов 120 с + запись 60 с) + паузы 1+2 = 543 с. Итого ≈ 1563 с.
-CATEGORY_SOFT_LIMIT = 1600
-CATEGORY_HARD_LIMIT = 1780
+# Худший случай категории: Wordstat до 6 запросов (4 варианта названия + 2 формы)
+# × (30 с × 3 попытки + паузы 2+4) = 576 с; LLM 2 попытки × 366 с = 732 с; запись
+# на сайт 3 попытки × (список метатегов 120 с + запись 60 с) + паузы 1+2 = 543 с.
+# Итого ≈ 1851 с.
+CATEGORY_SOFT_LIMIT = 1900
+CATEGORY_HARD_LIMIT = 2080
 # Подготовка запуска: страницы категорий и sitemap (~360 с) + фразы LLM пачками
 # по 60 категорий (366 с на пачку). 2400 с хватает на ~250 категорий.
 RUN_START_SOFT_LIMIT = 2400
@@ -4330,7 +4555,10 @@ def test_categories_list(manager_client, project, db_session):
         CategoryMeta(site_id=project.id, remote_id=46, remote_parent_id=45, name="Фанера",
                      path="Листовые материалы / Фанера",
                      url="/catalog/category/listovye-materialy/fanera/", status="done",
-                     title="Фанера в Москве | Стройбаза", previous_json={"h1": "старый"}),
+                     title="Фанера в Москве | Стройбаза", previous_json={"h1": "старый"},
+                     candidates_json=[{"phrase": "фанера", "nominative": "фанера",
+                                       "buy": "купить фанеру", "price": "цена фанеры",
+                                       "count": 96275}]),
         CategoryMeta(site_id=project.id, remote_id=45, name="Листовые материалы",
                      path="Листовые материалы", url="/catalog/listovye-materialy/",
                      status="in_work", started_at=utcnow() - timedelta(hours=1)),
@@ -4342,6 +4570,8 @@ def test_categories_list(manager_client, project, db_session):
     assert body[1]["page_url"] == \
         "https://stroybaza-moscow.ru/catalog/category/listovye-materialy/fanera/"
     assert body[1]["previous_json"] == {"h1": "старый"}
+    assert body[1]["candidates"] == [{"phrase": "фанера", "count": 96275}]
+    assert body[0]["candidates"] == []
 
 
 def category(db, project, **kwargs):
@@ -4461,6 +4691,11 @@ class RegionOut(BaseModel):
     path: str
 
 
+class CandidateOut(BaseModel):
+    phrase: str
+    count: int | None
+
+
 class CategoryOut(BaseModel):
     id: int
     remote_id: int
@@ -4474,6 +4709,7 @@ class CategoryOut(BaseModel):
     error_text: str
     stuck: bool
     seed_phrase: str
+    candidates: list[CandidateOut]
     form_nominative: str
     form_buy: str
     chosen_form: str
@@ -4515,7 +4751,10 @@ def _category_out(site: Site, row: CategoryMeta) -> CategoryOut:
         name=row.name, path=row.path, url=row.url,
         page_url=f"{site.base_url.rstrip('/')}{row.url}" if row.url else "",
         status=row.status, skip_reason=row.skip_reason, error_text=row.error_text,
-        stuck=is_stuck(row), seed_phrase=row.seed_phrase, form_nominative=row.form_nominative,
+        stuck=is_stuck(row), seed_phrase=row.seed_phrase,
+        candidates=[CandidateOut(phrase=v.get("phrase", ""), count=v.get("count"))
+                    for v in (row.candidates_json or []) if isinstance(v, dict)],
+        form_nominative=row.form_nominative,
         form_buy=row.form_buy, chosen_form=row.chosen_form,
         nominative_count=row.nominative_count, declined_count=row.declined_count,
         total_count=row.total_count, low_demand=row.low_demand, title=row.title, h1=row.h1,
@@ -4676,7 +4915,7 @@ Expected: PASS (23 passed).
 - [ ] **Step 6: Полный регресс бэкенда**
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: PASS (778 passed).
+Expected: PASS (790 passed).
 
 - [ ] **Step 7: Commit**
 
@@ -4719,6 +4958,7 @@ export interface CategoryMetaRow {
   name: string; path: string; url: string; page_url: string
   status: string; skip_reason: string; error_text: string; stuck: boolean
   seed_phrase: string; form_nominative: string; form_buy: string; chosen_form: string
+  candidates: { phrase: string; count: number | null }[]
   nominative_count: number | null; declined_count: number | null
   total_count: number | null; low_demand: boolean
   title: string; h1: string; meta_description: string; meta_keywords: string; ai_keywords: string
@@ -4820,6 +5060,12 @@ function formText(row: CategoryMetaRow): string {
   return '—'
 }
 
+function candidatesText(row: CategoryMetaRow): string {
+  if (row.candidates.length < 2) return ''
+  const counted = row.candidates.map(c => `«${c.phrase}» ${c.count ?? '—'}`)
+  return `${counted.join(' · ')} → выбрано «${row.seed_phrase}»`
+}
+
 function CategoryDrawer({ row, onClose, onChanged }: {
   row: CategoryMetaRow | null
   onClose: () => void
@@ -4874,6 +5120,9 @@ function CategoryDrawer({ row, onClose, onChanged }: {
       </Descriptions>
       <Descriptions title="Wordstat" column={1} size="small" bordered style={{ marginTop: 16 }}>
         <Descriptions.Item label="Фраза">{row.seed_phrase || '—'}</Descriptions.Item>
+        {candidatesText(row) && (
+          <Descriptions.Item label="Варианты названия">{candidatesText(row)}</Descriptions.Item>
+        )}
         <Descriptions.Item label="Форма">{formText(row)}{counts}</Descriptions.Item>
         <Descriptions.Item label="Запросов за 30 дней">{row.total_count ?? '—'}</Descriptions.Item>
       </Descriptions>
@@ -5245,7 +5494,7 @@ git commit -m "feat: экран «Метатеги категорий» — пр
 
 ```ts
   { key: 'category_seeds', label: 'Метатеги: фразы', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', categories: ['46: Листовые материалы / Фанера', '112: Металлопрокат / Уголок металлический'] } },
-  { key: 'category_meta', label: 'Метатеги: теги', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', category_name: 'Фанера', category_path: 'Листовые материалы / Фанера', form_nominative: 'фанера', form_buy: 'купить фанеру', form_price: 'цена фанеры', chosen_form: 'nominative', sell_word: 'купить', city_in: 'в Москве', brand: 'Стройбаза', total_count: 96275, phrases: ['фанера — 96275', 'фанера купить — 12238', 'фанера цена — 5300'], violations: [] } },
+  { key: 'category_meta', label: 'Метатеги: теги', vars: { site_name: 'Стройбаза', site_description: 'Интернет-магазин стройматериалов в Москве, доставка по городу', category_name: 'Фанера', category_path: 'Листовые материалы / Фанера', form_nominative: 'фанера', form_buy: 'купить фанеру', form_price: 'цена фанеры', chosen_form: 'nominative', sell_word: 'купить', city_in: 'в Москве', brand: 'Стройбаза', total_count: 96275, phrases: ['фанера — 96275', 'фанера купить — 12238', 'фанера цена — 5300'], alternatives: ['фанерный лист — 198: фанерный лист'], violations: [] } },
 ```
 
 - [ ] **Step 3: `changelog.ts`**
@@ -5260,10 +5509,11 @@ git commit -m "feat: экран «Метатеги категорий» — пр
     text: 'Новый раздел «Метатеги категорий». Добавляете сайт, указываете город и бренд — ' +
           'панель собирает дерево категорий каталога, смотрит в Яндекс Wordstat, как товары ' +
           'ищут в этом городе, и записывает на сайт title, h1, description, keywords и ' +
-          'ai_keywords. Форма названия («фанера» или «фанеру») выбирается по тому, как ' +
-          'чаще ищут. Wordstat отвечает не больше 100 раз в час, поэтому сайт на 70–80 ' +
-          'категорий обновляется около 2,5 часа — прогресс виден в строке проекта. Теги ' +
-          'любой категории можно посмотреть и перегенерировать.',
+          'ai_keywords. Название берётся то, под которым товар ищут чаще: категория «ГКЛ» ' +
+          'получит теги про «гипсокартон». Форма названия («фанера» или «фанеру») тоже ' +
+          'выбирается по тому, как чаще ищут. Wordstat отвечает не больше 100 раз в час, ' +
+          'поэтому сайт на 70–80 категорий обновляется около 4 часов — прогресс виден в ' +
+          'строке проекта. Теги любой категории можно посмотреть и перегенерировать.',
   },
 ```
 
@@ -5288,7 +5538,7 @@ git commit -m "feat: настройки Wordstat, промпты метатег�
 - [ ] **Step 1: Регресс бэкенда**
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: PASS (778 passed, 0 failed).
+Expected: PASS (790 passed, 0 failed).
 
 - [ ] **Step 2: Миграция с нуля на Postgres**
 

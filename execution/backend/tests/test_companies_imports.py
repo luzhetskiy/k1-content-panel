@@ -182,3 +182,23 @@ def test_reimport_updates_working_hours_and_logo(db_session):
     candidate = db_session.query(CompanyCandidate).one()
     assert candidate.working_hours == "пн-пт 10:00–19:00"
     assert candidate.logo_url == "https://logo/1"
+
+
+def test_value_longer_than_column_fails_with_company_and_field(db_session):
+    """Тесты идут на SQLite, который не проверяет длину VARCHAR, а на проде
+    Postgres откатывал весь файл с безликим «проверьте данные файла».
+    Проверяем длины до записи: сообщение называет компанию и поле, в пул
+    ничего не попадает."""
+    long_city = "Самара" * 40
+    assert len(long_city) > 200
+    data = _wb_bytes([
+        ["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5],
+        ["ООО Баня", "Бани", "Самара", long_city, "https://banya.ru", 5, 3, 4.5],
+    ])
+    imp = import_file(db_session, data, "builders.xlsx", uploaded_by_id=None)
+
+    assert imp.status == "failed"
+    assert "ООО Баня" in imp.error_message
+    assert "Город" in imp.error_message
+    assert "240" in imp.error_message and "200" in imp.error_message
+    assert db_session.query(CompanyCandidate).count() == 0

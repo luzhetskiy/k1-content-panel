@@ -108,6 +108,12 @@ def _logo_url(value) -> str:
     return url if url.startswith(("http://", "https://")) else ""
 
 
+def _first_email(value) -> str:
+    """Выгрузка склеивает все адреса с сайта через «,» или «;» (до 34 штук на
+    боевом файле), а на странице email — одна ссылка mailto:. Берём первый."""
+    return re.split(r"[,;]", str(value or ""))[0].strip()
+
+
 def _first_nonempty(row: tuple, header: dict, *keys: str) -> str:
     """Первое непустое значение после strip. Сырая проверка на истинность
     не годится: ячейка из одних пробелов оборвала бы цепочку запасных
@@ -205,7 +211,7 @@ def parse_workbook(data: bytes) -> list[ParsedRow]:
                 city=str(_get(row, header, "city") or "").strip(),
                 address=str(_get(row, header, "address") or "").strip(),
                 phone=phone,
-                email=str(_get(row, header, "email") or "").split(",")[0].strip(),
+                email=_first_email(_get(row, header, "email")),
                 working_hours=str(_get(row, header, "working_hours") or "").strip(),
                 logo_url=_logo_url(_get(row, header, "logo_url")),
                 rating=_to_float(_get(row, header, "rating")),

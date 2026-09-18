@@ -166,3 +166,21 @@ def test_logo_url_rejects_non_url_value():
     ])
     row = parse_workbook(data)[0]
     assert row.logo_url == ""
+
+
+def test_email_takes_first_address_before_semicolon_or_comma():
+    """Новый формат выгрузки (сентябрь 2026) склеивает в ячейку все адреса с
+    сайта через «;» — до 34 штук, 796 символов: на боевом файле это роняло
+    импорт на email String(200). На странице email — одна ссылка mailto:,
+    поэтому берём первый адрес."""
+    data = _make_workbook([
+        ["", "ООО Дом", "Стройка", "Самарская область", "Самара", "", "", "",
+         "https://dom.ru", "info@dom.ru;sale@dom.ru;hr@dom.ru",
+         "", None, None, 0, 0, None, "", ""],
+        ["", "ООО Баня", "Стройка", "Самарская область", "Самара", "", "", "",
+         "https://banya.ru", "info@banya.ru, sale@banya.ru",
+         "", None, None, 0, 0, None, "", ""],
+    ])
+    by_key = {r.site_key: r for r in parse_workbook(data)}
+    assert by_key["dom.ru"].email == "info@dom.ru"
+    assert by_key["banya.ru"].email == "info@banya.ru"

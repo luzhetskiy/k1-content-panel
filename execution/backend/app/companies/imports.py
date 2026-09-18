@@ -10,11 +10,55 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.clock import utcnow
-from app.companies.import_xlsx import XlsxParseError, parse_workbook
+from app.companies.import_xlsx import COLUMNS, XlsxParseError, parse_workbook
 from app.companies.selection import taken_site_keys
 from app.models.company import CompanyCandidate, CompanyImport
 
 logger = logging.getLogger(__name__)
+
+
+# Поля ParsedRow → колонка файла, как её видит пользователь в сообщении об ошибке.
+_FIELD_LABELS = {
+    "site_key": COLUMNS["site"],
+    "website_raw": COLUMNS["site"],
+    "name": COLUMNS["name"],
+    "region_raw": COLUMNS["region"],
+    "category_raw": COLUMNS["category"],
+    "city": COLUMNS["city"],
+    "address": COLUMNS["address"],
+    "phone": "Телефон",
+    "email": COLUMNS["email"],
+    "yandex_url": COLUMNS["yandex_card"],
+}
+
+_MAX_REPORTED = 3
+
+
+def _too_long_values(rows) -> list[tuple[str, str, int, int]]:
+    """(компания, колонка, длина, лимит) для значений длиннее String(n) колонки.
+    Проверяем заранее: Postgres откатывает весь файл без указания строки, а
+    SQLite в тестах длину не проверяет вовсе."""
+    limits = {
+        name: col.type.length
+        for name, col in CompanyCandidate.__table__.columns.items()
+        if name in _FIELD_LABELS and getattr(col.type, "length", None)
+    }
+    found = []
+    for row in rows:
+        for field_name, limit in limits.items():
+            length = len(getattr(row, field_name) or "")
+            if length > limit:
+                found.append((row.name, _FIELD_LABELS[field_name], length, limit))
+    return found
+
+
+def _too_long_message(found: list[tuple[str, str, int, int]]) -> str:
+    parts = [f"«{name}» — «{label}»: {length} симв. при лимите {limit}"
+             for name, label, length, limit in found[:_MAX_REPORTED]]
+    message = "слишком длинные значения, файл не загружен: " + "; ".join(parts)
+    if len(found) > _MAX_REPORTED:
+        message += f" и ещё {len(found) - _MAX_REPORTED}"
+    return message
 
 
 def import_file(db: Session, data: bytes, filename: str,
@@ -33,6 +77,15 @@ def import_file(db: Session, data: bytes, filename: str,
         imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
                             status="failed",
                             error_message="не удалось прочитать файл — проверьте, что это корректный xlsx")
+        db.add(imp)
+        db.commit()
+        return imp
+
+    too_long = _too_long_values(rows)
+    if too_long:
+        imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
+                            row_count=len(rows), status="failed",
+                            error_message=_too_long_message(too_long))
         db.add(imp)
         db.commit()
         return imp

@@ -12,6 +12,7 @@ export const BATCH_STATUS: Record<string, { color: string; label: string }> = {
   running: { color: 'processing', label: 'Генерируется' },
   done: { color: 'success', label: 'Готово' },
   failed: { color: 'error', label: 'Ошибка' },
+  paused: { color: 'warning', label: 'Приостановлена' },
 }
 
 /**
@@ -22,6 +23,7 @@ export const BATCH_STATUS: Record<string, { color: string; label: string }> = {
 export const RUNTIME_STATE: Record<string, { color: string; label: string }> = {
   queued: { color: 'default', label: 'Ждёт очереди' },
   working: { color: 'processing', label: 'Генерируется' },
+  pausing: { color: 'warning', label: 'Останавливается' },
   stuck: { color: 'error', label: 'Похоже, зависла' },
 }
 

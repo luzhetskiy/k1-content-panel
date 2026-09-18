@@ -202,3 +202,21 @@ def test_value_longer_than_column_fails_with_company_and_field(db_session):
     assert "Город" in imp.error_message
     assert "240" in imp.error_message and "200" in imp.error_message
     assert db_session.query(CompanyCandidate).count() == 0
+
+
+def test_import_counts_new_candidates_separately_from_updated(db_session):
+    first = _wb_bytes([["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5]])
+    imp1 = import_file(db_session, first, "builders.xlsx", uploaded_by_id=None)
+    assert imp1.new_count == 1
+
+    second = _wb_bytes([
+        ["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 20, 15, 4.9],
+        ["ООО Баня", "Бани", "Самара", "Самара", "https://banya.ru", 2, 1, 4.0],
+    ])
+    imp2 = import_file(db_session, second, "builders2.xlsx", uploaded_by_id=None)
+    assert (imp2.matched_count, imp2.new_count) == (2, 1)
+
+
+def test_failed_import_adds_no_new_candidates(db_session):
+    imp = import_file(db_session, b"not an xlsx", "bad.xlsx", uploaded_by_id=None)
+    assert imp.new_count == 0

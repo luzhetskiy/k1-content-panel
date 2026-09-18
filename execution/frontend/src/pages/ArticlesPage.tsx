@@ -8,6 +8,7 @@ import dayjs from 'dayjs'
 import {
   Batch, RegenerateParts, SiteBrief, createBatch, getBatches, getSites, regenerateArticle,
 } from '../api'
+import HelpButton from '../help'
 import { BATCH_STATUS } from '../statuses'
 
 // Находка Task 22, п.1: «по {N} картинки» верно только для 2-4 — для 1 нужно
@@ -81,6 +82,7 @@ export default function ArticlesPage() {
       <Space style={{ marginBottom: 16, justifyContent: 'space-between', width: '100%' }}>
         <Typography.Title level={4} style={{ margin: 0 }}>Партии статей</Typography.Title>
         <Space>
+          <HelpButton section="articles" />
           <Button icon={<ReloadOutlined />} onClick={() => setRegenOpen(true)}>
             Перегенерировать по ID
           </Button>

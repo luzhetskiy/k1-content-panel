@@ -918,3 +918,56 @@ def test_run_company_batch_clears_stale_error_text_on_success(db_session, compan
     db_session.refresh(batch)
     assert batch.status == "done"
     assert batch.error_text == ""
+
+
+# --- пауза партии (2026-09-18): кнопка «Приостановить генерацию» ---
+
+def test_run_batch_pauses_between_articles(db_session, batch, site, monkeypatch):
+    from app.clock import utcnow
+
+    db_session.add_all([
+        Article(batch_id=batch.id, site_id=site.id, topic="Тема А"),
+        Article(batch_id=batch.id, site_id=site.id, topic="Тема Б"),
+        Article(batch_id=batch.id, site_id=site.id, topic="Тема В"),
+    ])
+    batch.status = "running"
+    db_session.commit()
+
+    built = []
+
+    def build(db, article, site, site_client, job_run_id):
+        built.append(article.topic)
+        article.status = "published"
+        # Менеджер нажал паузу, пока собиралась первая статья: она доделывается.
+        batch.pause_requested_at = utcnow()
+
+    monkeypatch.setattr("app.tasks.build_for", build)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    assert built == ["Тема А"]
+    assert batch.status == "paused"
+    assert batch.pause_requested_at is None
+    assert [a.status for a in batch.articles] == ["published", "draft", "draft"]
+    job = db_session.query(JobRun).filter_by(kind="run_batch").one()
+    assert job.status == "ok" and job.finished_at is not None
+    assert "приостановлено" in job.log_text and "1/3" in job.log_text
+
+
+def test_run_batch_paused_while_queued_builds_nothing(db_session, batch, site, monkeypatch):
+    from app.clock import utcnow
+
+    db_session.add(Article(batch_id=batch.id, site_id=site.id, topic="Тема А"))
+    batch.status = "running"
+    batch.pause_requested_at = utcnow()
+    db_session.commit()
+
+    build = Mock()
+    monkeypatch.setattr("app.tasks.build_for", build)
+    monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: SimpleNamespace())
+
+    run_batch_sync(db_session, batch.id)
+    db_session.refresh(batch)
+    build.assert_not_called()
+    assert batch.status == "paused"

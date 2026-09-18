@@ -4,20 +4,76 @@ import {
   Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag,
   Typography, Upload, message,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
+import { DownloadOutlined, PlusOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { UploadProps } from 'antd'
 import {
   CompanyBatchRow, CompanyImportResult, Facets, SiteBrief, UnbatchedCompanyRow,
-  createCompanyBatch, getCompanyBatches, getCompanyFacets, getCompanyImports,
-  getSites, getUnbatchedCompanies, retryCompany, uploadCompanyImport,
+  companyImportFileUrl, createCompanyBatch, getCompanyBatches, getCompanyFacets,
+  getCompanyImportSummary, getCompanyImports, getSites, getUnbatchedCompanies, retryCompany,
+  uploadCompanyImport,
 } from '../api'
+import HelpButton from '../help'
 
 const STATUS: Record<string, { color: string; label: string }> = {
   selection_review: { color: 'warning', label: 'Список на согласовании' },
   running: { color: 'processing', label: 'Генерируется' },
   done: { color: 'success', label: 'Готово' },
   failed: { color: 'error', label: 'Ошибка' },
+}
+
+const num = (n: number) => n.toLocaleString('ru-RU')
+
+// «новых 312, обновлено 4 771 (5 083 строки)»; у загрузок до 2026-09-18
+// новых не считали — там только общее число компаний.
+function importCounts(imp: CompanyImportResult) {
+  if (imp.new_count === null) {
+    return `компаний: ${num(imp.matched_count)} из ${num(imp.row_count)} строк`
+  }
+  return `новых ${num(imp.new_count)}, обновлено ${num(imp.matched_count - imp.new_count)} ` +
+         `(строк в файле: ${num(imp.row_count)})`
+}
+
+function ImportHistory({ imports, onClose }: {
+  imports: CompanyImportResult[]; onClose: () => void
+}) {
+  return (
+    <Modal open title="История загрузок" footer={null} width={900} onCancel={onClose}>
+      <Table
+        rowKey="id"
+        size="small"
+        dataSource={imports}
+        pagination={{ pageSize: 10 }}
+        columns={[
+          {
+            title: 'Дата', dataIndex: 'uploaded_at', width: 130,
+            render: (v: string) => dayjs(v).format('DD.MM.YYYY HH:mm'),
+          },
+          { title: 'Файл', dataIndex: 'filename' },
+          { title: 'Кто', dataIndex: 'uploaded_by', width: 140, render: (v: string) => v || '—' },
+          {
+            title: 'Результат', width: 260,
+            render: (_, r: CompanyImportResult) => r.status === 'failed'
+              ? <Typography.Text type="danger">Ошибка: {r.error_message}</Typography.Text>
+              : importCounts(r),
+          },
+          {
+            title: '', width: 50,
+            render: (_, r: CompanyImportResult) => r.has_file
+              ? (
+                <a href={companyImportFileUrl(r.id)} title="Скачать файл">
+                  <DownloadOutlined />
+                </a>
+              )
+              : null,
+          },
+        ]}
+      />
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        Файлы сохраняются с 18.09.2026 — более ранние загрузки скачать нельзя.
+      </Typography.Text>
+    </Modal>
+  )
 }
 
 const COMPANY_STATUS: Record<string, { color: string; label: string }> = {
@@ -33,18 +89,24 @@ export default function BuildersPage() {
   const [sites, setSites] = useState<SiteBrief[]>([])
   const [open, setOpen] = useState(false)
   const [facets, setFacets] = useState<Facets>({ regions: [], categories: [] })
-  const [lastImport, setLastImport] = useState<CompanyImportResult | null>(null)
+  const [imports, setImports] = useState<CompanyImportResult[]>([])
+  const [totalCandidates, setTotalCandidates] = useState<number | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const lastImport = imports[0] ?? null
   const [unbatched, setUnbatched] = useState<UnbatchedCompanyRow[]>([])
   const [form] = Form.useForm()
 
   const load = () => getCompanyBatches().then(setBatches)
-  const loadLastImport = () => getCompanyImports().then(imports => setLastImport(imports[0] ?? null))
+  const loadImports = () => {
+    getCompanyImports().then(setImports)
+    getCompanyImportSummary().then(s => setTotalCandidates(s.total_candidates))
+  }
   const loadUnbatched = () => getUnbatchedCompanies().then(setUnbatched)
 
   useEffect(() => {
     load()
     getSites().then(setSites)
-    loadLastImport()
+    loadImports()
     loadUnbatched()
   }, [])
 
@@ -105,9 +167,9 @@ export default function BuildersPage() {
           message.error(result.error_message || 'Не удалось разобрать файл')
         } else {
           message.success(
-            `Загружено: ${result.matched_count} компаний из ${result.row_count} строк`)
+            `Загружено: ${importCounts(result)}`)
         }
-        loadLastImport()
+        loadImports()
         onSuccess?.(result)
       } catch (e) {
         onError?.(e as Error)
@@ -120,6 +182,7 @@ export default function BuildersPage() {
       <Space style={{ marginBottom: 16, justifyContent: 'space-between', width: '100%' }}>
         <Typography.Title level={4} style={{ margin: 0 }}>Партии строителей</Typography.Title>
         <Space>
+          <HelpButton section="builders" />
           <Upload {...uploadProps}>
             <Button icon={<UploadOutlined />}>Загрузить выгрузку Яндекс.Карт</Button>
           </Upload>
@@ -129,16 +192,24 @@ export default function BuildersPage() {
         </Space>
       </Space>
 
-      {lastImport && (
+      {(lastImport || totalCandidates !== null) && (
         <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-          Последняя загрузка: «{lastImport.filename}» —{' '}
-          {dayjs(lastImport.uploaded_at).format('DD.MM.YYYY HH:mm')},
-          компаний: {lastImport.matched_count} из {lastImport.row_count} строк
-          {lastImport.status === 'failed' && (
-            <Typography.Text type="danger"> — ошибка: {lastImport.error_message}</Typography.Text>
+          {totalCandidates !== null && <>Всего строителей в базе: {num(totalCandidates)}. </>}
+          {lastImport && (
+            <>
+              Последняя загрузка: «{lastImport.filename}» —{' '}
+              {dayjs(lastImport.uploaded_at).format('DD.MM.YYYY HH:mm')}
+              {lastImport.status === 'failed'
+                ? <Typography.Text type="danger"> — ошибка: {lastImport.error_message}</Typography.Text>
+                : <>, {importCounts(lastImport)}</>}
+              .{' '}
+              <Typography.Link onClick={() => setHistoryOpen(true)}>История загрузок</Typography.Link>
+            </>
           )}
         </Typography.Paragraph>
       )}
+
+      {historyOpen && <ImportHistory imports={imports} onClose={() => setHistoryOpen(false)} />}
 
       <Card styles={{ body: { padding: 0 } }}>
         <Table

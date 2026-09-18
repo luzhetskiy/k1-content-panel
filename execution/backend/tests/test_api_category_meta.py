@@ -236,3 +236,26 @@ def test_regenerate_without_seed(manager_client, project, enqueued, db_session):
     db_session.add(row)
     db_session.commit()
     assert manager_client.post(f"/api/category-meta/categories/{row.id}/regenerate").status_code == 400
+
+
+def test_project_counts_failed_and_stuck_categories(manager_client, db_session, project):
+    long_ago = utcnow() - timedelta(hours=2)
+    db_session.add_all([
+        CategoryMeta(site_id=project.id, remote_id=1, name="А", status="failed"),
+        CategoryMeta(site_id=project.id, remote_id=2, name="Б", status="in_work",
+                     started_at=long_ago),
+        CategoryMeta(site_id=project.id, remote_id=3, name="В", status="in_work",
+                     started_at=utcnow()),
+        CategoryMeta(site_id=project.id, remote_id=4, name="Г", status="done"),
+        CategoryMeta(site_id=project.id, remote_id=5, name="Д", status="skipped"),
+    ])
+    db_session.commit()
+    [body] = manager_client.get("/api/category-meta/projects").json()
+    assert body["error_count"] == 2
+
+
+def test_project_without_errors_has_zero_error_count(manager_client, db_session, project):
+    db_session.add(CategoryMeta(site_id=project.id, remote_id=1, name="А", status="done"))
+    db_session.commit()
+    [body] = manager_client.get("/api/category-meta/projects").json()
+    assert body["error_count"] == 0

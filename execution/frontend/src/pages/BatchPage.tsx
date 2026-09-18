@@ -3,14 +3,15 @@ import { useParams } from 'react-router-dom'
 import {
   Alert, Button, Card, Input, Popconfirm, Space, Table, Tag, Typography, message,
 } from 'antd'
-import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, PauseCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import {
-  ArticleRow, Batch, getBatch, regenerateArticle, retryArticle, runBatch, saveTopics,
+  ArticleRow, Batch, getBatch, pauseBatch, regenerateArticle, retryArticle, runBatch, saveTopics,
 } from '../api'
 import { BATCH_STATUS, RUNTIME_STATE } from '../statuses'
 
-const EDITABLE = ['topics_pending', 'topics_review', 'failed']
+// paused — если до паузы ни одна статья не опубликовалась, темы ещё можно поправить.
+const EDITABLE = ['topics_pending', 'topics_review', 'failed', 'paused']
 
 const ARTICLE_STATUS: Record<string, { color: string; label: string }> = {
   draft: { color: 'default', label: 'Ожидает' },
@@ -40,6 +41,7 @@ export default function BatchPage() {
   // поэтому отдельное `saving` для одного лишь persist() было бы избыточным
   // состоянием, которое никто не читает: persist() вызывается только отсюда.
   const [starting, setStarting] = useState(false)
+  const [pausing, setPausing] = useState(false)
 
   const load = () => getBatch(batchId).then(b => {
     setBatch(b)
@@ -96,10 +98,14 @@ export default function BatchPage() {
   // каждой неопубликованной статьи, а параллельный запуск собрал бы её второй
   // раз и второй раз за неё заплатил.
   const busy = batch.runtime_state === 'working' || batch.runtime_state === 'queued'
+    || batch.runtime_state === 'pausing'
+  // Пауза — между статьями: текущая доделывается (текст и картинки уже
+  // оплачены), следующие не начинаются. Продолжение — «Дособрать партию».
+  const canPause = batch.runtime_state === 'working' || batch.runtime_state === 'queued'
   // Зависшую партию перезапускает тот же эндпоинт run(): он сам приводит в
   // порядок её состояние, а сборка пропускает уже опубликованные статьи.
   const canContinue = unfinished > 0 && !busy
-    && (isStuck || batch.status === 'done' || batch.status === 'failed')
+    && (isStuck || ['done', 'failed', 'paused'].includes(batch.status))
   const stateTag = batch.runtime_state
     ? RUNTIME_STATE[batch.runtime_state]
     : BATCH_STATUS[batch.status]
@@ -113,6 +119,16 @@ export default function BatchPage() {
     } finally {
       setStarting(false)
     }
+  }
+
+  const pause = async () => {
+    setPausing(true)
+    try {
+      await pauseBatch(batchId)
+      message.success('Останавливаем — текущая статья доделается, следующие не начнутся')
+      await load()
+    } catch { /* сообщение уже показал интерцептор */ }
+    finally { setPausing(false) }
   }
 
   const persist = async (next: string[]) => {
@@ -206,6 +222,22 @@ export default function BatchPage() {
                             в очереди и начнётся, как только освободится место." />
       )}
 
+      {batch.runtime_state === 'pausing' && (
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }}
+               message="Останавливаем генерацию"
+               description="Статья, которая уже собирается, будет доделана — за неё уже
+                            заплачено. Следующие статьи не начнутся." />
+      )}
+
+      {batch.status === 'paused' && (
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+               message="Генерация приостановлена"
+               description={hasPublished
+                 ? 'Проверьте готовые черновики. Чтобы продолжить, нажмите «Дособрать партию» — ' +
+                   'готовые статьи пропустятся. Отдельную статью можно собрать кнопкой в её строке.'
+                 : 'Ни одна статья ещё не готова — можно поправить темы и запустить заново.'} />
+      )}
+
       {batch.status === 'topics_pending' && (
         <Alert type="info" showIcon style={{ marginBottom: 16 }}
                message="Подбираем темы — обычно занимает до минуты" />
@@ -270,7 +302,17 @@ export default function BatchPage() {
         <Card
           styles={{ body: { padding: 0 } }}
           title="Статьи"
-          extra={canContinue && !isStuck && (
+          extra={canPause ? (
+            <Popconfirm
+              title="Приостановить генерацию?"
+              description="Текущая статья доделается, следующие не начнутся. Продолжить можно
+                           кнопкой «Дособрать партию»."
+              onConfirm={pause}>
+              <Button icon={<PauseCircleOutlined />} loading={pausing}>
+                Приостановить генерацию
+              </Button>
+            </Popconfirm>
+          ) : canContinue && !isStuck && (
             // При isStuck кнопка уже стоит в предупреждении выше — второй раз
             // рядом с таблицей она была бы шумом.
             <Popconfirm

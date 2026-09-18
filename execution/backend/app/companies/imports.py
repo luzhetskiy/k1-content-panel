@@ -67,7 +67,7 @@ def import_file(db: Session, data: bytes, filename: str,
         rows = parse_workbook(data)
     except XlsxParseError as exc:
         imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
-                            status="failed", error_message=str(exc))
+                            new_count=0, status="failed", error_message=str(exc))
         db.add(imp)
         db.commit()
         return imp
@@ -75,7 +75,7 @@ def import_file(db: Session, data: bytes, filename: str,
         # Файл не распознан даже как валидный xlsx (битый zip и т.п.) —
         # openpyxl падает раньше, чем успевает сработать XlsxParseError.
         imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
-                            status="failed",
+                            new_count=0, status="failed",
                             error_message="не удалось прочитать файл — проверьте, что это корректный xlsx")
         db.add(imp)
         db.commit()
@@ -84,7 +84,7 @@ def import_file(db: Session, data: bytes, filename: str,
     too_long = _too_long_values(rows)
     if too_long:
         imp = CompanyImport(filename=filename, uploaded_by_id=uploaded_by_id,
-                            row_count=len(rows), status="failed",
+                            row_count=len(rows), new_count=0, status="failed",
                             error_message=_too_long_message(too_long))
         db.add(imp)
         db.commit()
@@ -101,6 +101,7 @@ def import_file(db: Session, data: bytes, filename: str,
             CompanyCandidate.site_key.in_({row.site_key for row in rows})
         )).all()
     }
+    imp.new_count = len({row.site_key for row in rows} - existing_by_key.keys())
 
     for row in rows:
         existing = existing_by_key.get(row.site_key)
@@ -134,6 +135,7 @@ def import_file(db: Session, data: bytes, filename: str,
         logger.exception("import_file: не удалось сохранить импорт %r (%d кандидатов)",
                          filename, len(existing_by_key))
         imp.status = "failed"
+        imp.new_count = 0
         imp.error_message = "не удалось сохранить компании — проверьте данные файла"
         db.add(imp)
         db.commit()

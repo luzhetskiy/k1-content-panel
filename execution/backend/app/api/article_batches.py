@@ -15,7 +15,7 @@ from app.tasks import generate_topics, regenerate_article, retry_article, run_ba
 
 router = APIRouter(prefix="/api", tags=["articles"])
 
-EDITABLE_STATUSES = {"topics_pending", "topics_review", "failed"}
+EDITABLE_STATUSES = {"topics_pending", "topics_review", "failed", "paused"}
 
 
 class BatchIn(BaseModel):
@@ -42,8 +42,8 @@ class BatchOut(BaseModel):
     status: str
     error_text: str
     created_at: datetime
-    # Вычисляется на чтении, в БД не хранится: queued | working | stuck для
-    # партии в running, иначе None. См. batch_runtime_state ниже.
+    # Вычисляется на чтении, в БД не хранится: queued | working | pausing |
+    # stuck для партии в running, иначе None. См. batch_runtime_state ниже.
     runtime_state: str | None = None
     run_requested_at: datetime | None = None
     articles: list[ArticleOut] = []
@@ -191,6 +191,16 @@ def _latest_run_job(db: Session, batch_id: int) -> JobRun | None:
 
 
 def batch_runtime_state(db: Session, batch: ArticleBatch) -> str | None:
+    """queued | working | stuck (см. _task_state) либо pausing — задача жива, но
+    менеджер попросил остановиться: она доделает текущую статью и сама
+    переведёт партию в paused. Зависшую партию пауза не спасает — там stuck."""
+    state = _task_state(db, batch)
+    if state in ("queued", "working") and batch.pause_requested_at is not None:
+        return "pausing"
+    return state
+
+
+def _task_state(db: Session, batch: ArticleBatch) -> str | None:
     """Идёт ли сборка на самом деле: queued | working | stuck, либо None, если
     партия не в running и вопрос не стоит.
 
@@ -389,9 +399,10 @@ def run(batch_id: int, db: Session = Depends(get_db),
         # предварительно приведя её состояние в порядок.
         state = batch_runtime_state(db, batch)
         if state != "stuck":
-            raise HTTPException(
-                400, "партия ждёт свободный воркер" if state == "queued"
-                else "партия уже выполняется")
+            raise HTTPException(400, {
+                "queued": "партия ждёт свободный воркер",
+                "pausing": "партия останавливается — дождитесь, пока доделается текущая статья",
+            }.get(state, "партия уже выполняется"))
         _reset_stuck_batch(db, batch)
     # Находка №2 ревью Task 18: раньше в "running" партию переводила только
     # run_batch_sync (app/tasks.py) — АСИНХРОННО, когда Celery реально начнёт
@@ -428,6 +439,7 @@ def run(batch_id: int, db: Session = Depends(get_db),
     # согласованной, иначе batch_runtime_state увидит running без момента
     # запуска и сочтёт партию сломанной.
     batch.run_requested_at = utcnow()
+    batch.pause_requested_at = None
     db.commit()
     # Лимит времени вычисляется здесь, а не берётся из глобальной настройки
     # Celery: партия идёт последовательно, и её длительность пропорциональна
@@ -435,6 +447,29 @@ def run(batch_id: int, db: Session = Depends(get_db),
     # часть статей опубликована, часть нет.
     soft, hard = _batch_time_limits(len(batch.articles))
     run_batch.apply_async(args=[batch.id], soft_time_limit=soft, time_limit=hard)
+    return _to_out(db, batch)
+
+
+@router.post("/article-batches/{batch_id}/pause", response_model=BatchOut)
+def pause(batch_id: int, db: Session = Depends(get_db),
+          _user: User = Depends(get_current_user)):
+    """«Приостановить генерацию». Статью посреди сборки не обрываем — её текст
+    и картинки уже оплачены; задача остановится перед следующей. Продолжение —
+    тот же run() («Дособрать партию»): опубликованные статьи пропускаются."""
+    batch = _get_or_404(db, batch_id)
+    if batch.status != "running":
+        raise HTTPException(400, "партия сейчас не собирается")
+    state = batch_runtime_state(db, batch)
+    if state == "pausing":
+        raise HTTPException(400, "остановка уже запрошена — доделываем текущую статью")
+    if state == "stuck":
+        # Задачи нет — ждать некого, останавливаем сразу.
+        _reset_stuck_batch(db, batch)
+        batch.status = "paused"
+        batch.pause_requested_at = None
+    else:
+        batch.pause_requested_at = utcnow()
+    db.commit()
     return _to_out(db, batch)
 
 

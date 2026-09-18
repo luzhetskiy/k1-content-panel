@@ -19,7 +19,7 @@ from app.db import Base
 class ArticleBatch(Base):
     """Партия статей: в её рамках согласуется список тем.
 
-    Статусы: topics_pending → topics_review → running → done | failed
+    Статусы: topics_pending → topics_review → running → done | failed | paused
     """
 
     __tablename__ = "article_batches"
@@ -65,6 +65,11 @@ class ArticleBatch(Base):
     # (app/api/article_batches.py) при каждом запуске, включая повторный.
     # Читается batch_runtime_state там же.
     run_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # Кнопка «Приостановить генерацию». Статус сразу не меняется: задача
+    # доделывает текущую статью (текст и картинки уже оплачены) и сама
+    # переводит партию в paused перед следующей. Сбрасывается в run().
+    pause_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
 
     articles: Mapped[list["Article"]] = relationship(

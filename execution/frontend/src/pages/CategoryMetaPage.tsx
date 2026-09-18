@@ -8,6 +8,7 @@ import {
   MetaProject, MetaProjectIn, SiteBrief, WordstatRegion, createMetaProject, deleteMetaProject,
   getMetaProjects, getSites, runMetaProject, searchWordstatRegions, updateMetaProject,
 } from '../api'
+import HelpButton from '../help'
 import CategoryMetaTree from './CategoryMetaTree'
 
 const isRunning = (p: MetaProject) => Boolean(p.run && !p.run.stale)
@@ -173,9 +174,12 @@ export default function CategoryMetaPage() {
     <>
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
         <Typography.Title level={4} style={{ margin: 0 }}>Метатеги категорий</Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setEditing('new')}>
-          Добавить проект
-        </Button>
+        <Space>
+          <HelpButton section="categoryMeta" />
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setEditing('new')}>
+            Добавить проект
+          </Button>
+        </Space>
       </Space>
 
       <Card styles={{ body: { padding: 0 } }}>
@@ -192,6 +196,11 @@ export default function CategoryMetaPage() {
                 <Space direction="vertical" size={0}>
                   <Typography.Text strong>{p.name}</Typography.Text>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.domain}</Typography.Text>
+                  {p.error_count > 0 && (
+                    <Tag color="error" style={{ marginTop: 4 }}>
+                      Категорий с ошибками: {p.error_count}
+                    </Tag>
+                  )}
                 </Space>
               ),
             },

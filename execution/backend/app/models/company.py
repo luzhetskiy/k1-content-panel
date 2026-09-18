@@ -32,6 +32,12 @@ class CompanyImport(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     matched_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Сколько кандидатов этот файл добавил в пул впервые (остальные matched —
+    # обновлены). None — загрузка сделана до того, как это начали считать.
+    new_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Исходный файл в MEDIA_DIR/company-imports/ — чтобы его можно было скачать.
+    # "" — файл не сохранялся (загрузки до 2026-09-18).
+    stored_path: Mapped[str] = mapped_column(String(500), default="")
     status: Mapped[str] = mapped_column(String(20), default="parsed")  # parsed|failed
     error_message: Mapped[str] = mapped_column(Text, default="")
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -680,3 +680,92 @@ def test_runtime_state_stuck_when_old_job_and_no_restart(db_session, site_id):
     batch = _batch(db_session, site_id, run_ago_minutes=180)
     _job(db_session, batch, status="failed", started_ago_seconds=9000)
     assert batch_runtime_state(db_session, batch) == "stuck"
+
+
+# --- пауза партии (2026-09-18) ---
+
+def test_pause_requests_stop_of_working_batch(manager_client, db_session, site_id, no_celery):
+    from app.models.article import ArticleBatch
+
+    batch = _batch(db_session, site_id, articles=3)
+    _job(db_session, batch, started_ago_seconds=120)
+    response = manager_client.post(f"/api/article-batches/{batch.id}/pause")
+    assert response.status_code == 200
+    body = response.json()
+    # Статус остаётся running: задача ещё доделывает текущую статью.
+    assert (body["status"], body["runtime_state"]) == ("running", "pausing")
+    db_session.expire_all()
+    assert db_session.get(ArticleBatch, batch.id).pause_requested_at is not None
+
+
+def test_pause_queued_batch_also_waits_for_task(manager_client, db_session, site_id, no_celery):
+    """Сразу в paused нельзя: задача уже в очереди, и после «Дособрать» их
+    стало бы две на одну партию."""
+    batch = _batch(db_session, site_id, run_ago_minutes=2)
+    body = manager_client.post(f"/api/article-batches/{batch.id}/pause").json()
+    assert (body["status"], body["runtime_state"]) == ("running", "pausing")
+
+
+def test_pause_twice_is_rejected(manager_client, db_session, site_id, no_celery):
+    batch = _batch(db_session, site_id, articles=2)
+    _job(db_session, batch, started_ago_seconds=120)
+    assert manager_client.post(f"/api/article-batches/{batch.id}/pause").status_code == 200
+    response = manager_client.post(f"/api/article-batches/{batch.id}/pause")
+    assert response.status_code == 400
+    assert "уже" in response.json()["detail"]
+
+
+def test_pause_rejects_batch_that_is_not_running(manager_client, db_session, site_id, no_celery):
+    batch = _batch(db_session, site_id, status="done")
+    response = manager_client.post(f"/api/article-batches/{batch.id}/pause")
+    assert response.status_code == 400
+
+
+def test_pause_stuck_batch_pauses_at_once(manager_client, db_session, site_id, no_celery):
+    from app.models.article import Article
+
+    batch = _batch(db_session, site_id, articles=2)
+    _job(db_session, batch, status="running", started_ago_seconds=_batch_hard_limit(2) + 600)
+    article = sorted(batch.articles, key=lambda a: a.id)[1]
+    article.status = "generating"
+    db_session.commit()
+
+    body = manager_client.post(f"/api/article-batches/{batch.id}/pause").json()
+    assert (body["status"], body["runtime_state"]) == ("paused", None)
+    db_session.expire_all()
+    assert db_session.get(Article, article.id).status == "failed"
+
+
+def test_run_rejects_pausing_batch(manager_client, db_session, site_id, no_celery):
+    batch = _batch(db_session, site_id, articles=2)
+    _job(db_session, batch, started_ago_seconds=120)
+    manager_client.post(f"/api/article-batches/{batch.id}/pause")
+    response = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert response.status_code == 400
+    assert "останавливается" in response.json()["detail"]
+    assert not [s for s in no_celery if s[0] == "run"]
+
+
+def test_paused_batch_resumes_via_run(manager_client, db_session, site_id, no_celery):
+    from app.clock import utcnow
+    from app.models.article import ArticleBatch
+
+    batch = _batch(db_session, site_id, status="paused", articles=2)
+    batch.pause_requested_at = utcnow()
+    db_session.commit()
+    response = manager_client.post(f"/api/article-batches/{batch.id}/run")
+    assert response.status_code == 200
+    assert len([s for s in no_celery if s[0] == "run"]) == 1
+    db_session.expire_all()
+    resumed = db_session.get(ArticleBatch, batch.id)
+    assert resumed.status == "running"
+    assert resumed.pause_requested_at is None
+
+
+def test_topics_of_paused_batch_without_published_can_be_edited(
+        manager_client, db_session, site_id, no_celery):
+    batch = _batch(db_session, site_id, status="paused", articles=2)
+    response = manager_client.put(f"/api/article-batches/{batch.id}/topics",
+                                  json={"topics": ["Новая тема"]})
+    assert response.status_code == 200
+    assert response.json()["status"] == "topics_review"

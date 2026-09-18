@@ -63,6 +63,7 @@ class ProjectOut(BaseModel):
     wordstat_region_id: int | None
     updated_at: datetime | None      # finished_at последнего успешного запуска
     last_error: str                  # ошибка последнего завершённого запуска, если была
+    error_count: int                 # категории с ошибкой или зависшие — видно без раскрытия
     run: RunOut | None
 
 
@@ -119,12 +120,17 @@ def _project_out(db: Session, site: Site) -> ProjectOut:
                          wait_until=progress.wait_until, stale=progress.stale)
     finished = last_run(db, site.id)
     successful = last_successful_run(db, site.id)
+    unhealthy = db.scalars(select(CategoryMeta).where(
+        CategoryMeta.site_id == site.id,
+        CategoryMeta.status.in_(("failed", "in_work")))).all()
     return ProjectOut(
         site_id=site.id, name=site.name, domain=site.domain, base_url=site.base_url,
         city=site.city, city_in=site.city_in, brand=site.brand,
         wordstat_region_id=site.wordstat_region_id,
         updated_at=successful.finished_at if successful else None,
-        last_error=finished.error_text if finished else "", run=run_out)
+        last_error=finished.error_text if finished else "",
+        error_count=sum(1 for row in unhealthy if row.status == "failed" or is_stuck(row)),
+        run=run_out)
 
 
 def _category_out(site: Site, row: CategoryMeta) -> CategoryOut:

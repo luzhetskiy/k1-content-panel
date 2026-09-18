@@ -1,6 +1,14 @@
 import io
 
 import openpyxl
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _media_dir(monkeypatch, tmp_path):
+    # Загруженные файлы сохраняются на диск — в тестах не в общий /app/media.
+    monkeypatch.setattr("app.api.company_imports.config.media_dir", str(tmp_path))
+    return tmp_path
 
 
 def _wb_bytes(rows: list[list]) -> bytes:
@@ -108,3 +116,66 @@ def test_list_imports_empty_when_none_uploaded(manager_client):
     resp = manager_client.get("/api/company-imports")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+def _upload(client, name: str, data: bytes):
+    return client.post("/api/company-imports",
+                       files={"file": (name, data, "application/octet-stream")})
+
+
+def test_uploaded_file_can_be_downloaded(manager_client):
+    data = _wb_bytes([["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5]])
+    body = _upload(manager_client, "Яндекс Самара.xlsx", data).json()
+    assert body["has_file"] is True
+
+    resp = manager_client.get(f"/api/company-imports/{body['id']}/file")
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert "filename*=utf-8''" in resp.headers["content-disposition"]
+
+
+def test_failed_upload_file_is_kept_too(manager_client):
+    body = _upload(manager_client, "bad.xlsx", b"not an xlsx").json()
+    assert body["status"] == "failed"
+    resp = manager_client.get(f"/api/company-imports/{body['id']}/file")
+    assert resp.content == b"not an xlsx"
+
+
+def test_import_without_stored_file_gives_404(manager_client, db_session):
+    from app.models.company import CompanyImport
+
+    old = CompanyImport(filename="old.xlsx", status="parsed")
+    db_session.add(old)
+    db_session.commit()
+    assert manager_client.get(f"/api/company-imports/{old.id}/file").status_code == 404
+    assert manager_client.get("/api/company-imports/999/file").status_code == 404
+    [row] = manager_client.get("/api/company-imports").json()
+    assert (row["has_file"], row["new_count"]) == (False, None)
+
+
+def test_download_requires_auth(client):
+    assert client.get("/api/company-imports/1/file").status_code == 401
+
+
+def test_list_shows_new_count_and_uploader(manager_client, manager):
+    first = _wb_bytes([["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5]])
+    _upload(manager_client, "a.xlsx", first)
+    second = _wb_bytes([
+        ["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5],
+        ["ООО Баня", "Бани", "Самара", "Самара", "https://banya.ru", 2, 1, 4.0],
+    ])
+    _upload(manager_client, "b.xlsx", second)
+    latest = manager_client.get("/api/company-imports").json()[0]
+    assert (latest["matched_count"], latest["new_count"]) == (2, 1)
+    assert latest["uploaded_by"] == manager.full_name
+
+
+def test_summary_counts_all_candidates_in_pool(manager_client):
+    assert manager_client.get("/api/company-imports/summary").json() == {"total_candidates": 0}
+    data = _wb_bytes([
+        ["ООО Дом", "Дома", "Самара", "Самара", "https://dom.ru", 5, 3, 4.5],
+        ["ООО Баня", "Бани", "Самара", "Самара", "https://banya.ru", 2, 1, 4.0],
+    ])
+    _upload(manager_client, "a.xlsx", data)
+    _upload(manager_client, "a.xlsx", data)
+    assert manager_client.get("/api/company-imports/summary").json() == {"total_candidates": 2}

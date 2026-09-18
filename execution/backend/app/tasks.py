@@ -238,6 +238,7 @@ def run_batch_sync(db, batch_id: int) -> None:
     job = _start_job(db, "run_batch", site.id, batch.created_by_id,
                      {"batch_id": batch_id, "articles": len(batch.articles)})
 
+    paused = False
     try:
         # Находка №1 ревью Task 17: раньше `site_client = open_site_client(...)`
         # стоял ДО try — необработанный SecretDecryptionError (токен сайта
@@ -247,6 +248,12 @@ def run_batch_sync(db, batch_id: int) -> None:
         for article in batch.articles:
             if article.status == "published":
                 continue
+            # «Приостановить генерацию»: флаг ставит эндпоинт pause из другого
+            # процесса, поэтому перечитываем его из БД перед каждой статьёй.
+            db.refresh(batch, attribute_names=["pause_requested_at"])
+            if batch.pause_requested_at is not None:
+                paused = True
+                break
             # Падение одной статьи не должно отменять остальные: билдер сам
             # пишет причину в error_text и оставляет статью в failed.
             try:
@@ -329,6 +336,16 @@ def run_batch_sync(db, batch_id: int) -> None:
         # и задача в Celery должна быть FAILURE, а не SUCCESS. В БД к этому
         # моменту уже всё согласовано.
         raise
+
+    if paused:
+        done = len([a for a in batch.articles if a.status == "published"])
+        batch.status = "paused"
+        batch.pause_requested_at = None
+        batch.error_text = ""
+        db.commit()
+        _finish_job(db, job, "ok",
+                    f"приостановлено вручную, готово {done}/{len(batch.articles)}")
+        return
 
     batch.status = "done"
     failed = [a for a in batch.articles if a.status == "failed"]

@@ -99,7 +99,7 @@ export interface Batch {
   // Вычисляется бэкендом на чтении, в БД не хранится (batch_runtime_state,
   // app/api/article_batches.py): идёт ли сборка на самом деле. Заполнено
   // только для партии в статусе running, иначе null.
-  runtime_state: 'queued' | 'working' | 'stuck' | null
+  runtime_state: 'queued' | 'working' | 'pausing' | 'stuck' | null
   run_requested_at: string | null
 }
 export interface Prompt { id: number; key: string; site_id: number | null; text: string }
@@ -123,7 +123,9 @@ export type SettingsMap = Record<string, string> & { _errors?: Record<string, st
 export interface Facets { regions: string[]; categories: string[] }
 export interface CompanyImportResult {
   id: number; filename: string; row_count: number; matched_count: number
+  new_count: number | null   // null — загрузка до 2026-09-18, новых тогда не считали
   error_count: number; status: string; error_message: string; uploaded_at: string
+  uploaded_by: string; has_file: boolean
 }
 export interface CompanyRow {
   id: number; name: string; website: string; region: string
@@ -167,6 +169,8 @@ export const createBatch = (site_id: number, count: number) =>
   api.post<Batch>('/article-batches', { site_id, count }).then(r => r.data)
 export const saveTopics = (id: number, topics: string[]) =>
   api.put<Batch>(`/article-batches/${id}/topics`, { topics }).then(r => r.data)
+export const pauseBatch = (id: number) =>
+  api.post<Batch>(`/article-batches/${id}/pause`).then(r => r.data)
 export const runBatch = (id: number) =>
   api.post<Batch>(`/article-batches/${id}/run`).then(r => r.data)
 export const retryArticle = (id: number) => api.post(`/articles/${id}/retry`)
@@ -181,6 +185,11 @@ export const uploadCompanyImport = (file: File) => {
 }
 export const getCompanyImports = () =>
   api.get<CompanyImportResult[]>('/company-imports').then(r => r.data)
+export const getCompanyImportSummary = () =>
+  api.get<{ total_candidates: number }>('/company-imports/summary').then(r => r.data)
+// Обычная ссылка, не запрос через axios: сессия в httpOnly-cookie, браузер
+// приложит её сам, а скачивание с именем файла сделает Content-Disposition.
+export const companyImportFileUrl = (id: number) => `/api/company-imports/${id}/file`
 export const getCompanyFacets = (siteId: number) =>
   api.get<Facets>(`/company-imports/facets?site_id=${siteId}`).then(r => r.data)
 
@@ -237,7 +246,8 @@ export interface MetaRunState {
 export interface MetaProject {
   site_id: number; name: string; domain: string; base_url: string
   city: string; city_in: string; brand: string; wordstat_region_id: number | null
-  updated_at: string | null; last_error: string; run: MetaRunState | null
+  updated_at: string | null; last_error: string; error_count: number
+  run: MetaRunState | null
 }
 export interface MetaProjectIn {
   site_id: number; city: string; city_in: string; brand: string; wordstat_region_id: number

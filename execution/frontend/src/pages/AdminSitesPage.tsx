@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
   Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag,
-  Typography, Upload, message,
+  Tooltip, Typography, Upload, message,
 } from 'antd'
-import { PlusOutlined, UploadOutlined } from '@ant-design/icons'
+import {
+  DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined, UploadOutlined,
+} from '@ant-design/icons'
 import dayjs from 'dayjs'
 import {
   SiteFull, createSite, deleteSite, getAdminSites, syncSite, updateSite, uploadWatermark,
@@ -13,6 +15,10 @@ export default function AdminSitesPage() {
   const [sites, setSites] = useState<SiteFull[]>([])
   const [editing, setEditing] = useState<SiteFull | null>(null)
   const [open, setOpen] = useState(false)
+  // Кнопка синхронизации теперь без подписи, поэтому единственный признак того,
+  // что нажатие сработало — спиннер на самой иконке: запрос ходит на сайт и
+  // может думать секунды.
+  const [syncing, setSyncing] = useState<number | null>(null)
   const [form] = Form.useForm()
 
   const load = () => getAdminSites().then(setSites)
@@ -60,7 +66,14 @@ export default function AdminSitesPage() {
   }
 
   const sync = async (site: SiteFull) => {
-    const result = await syncSite(site.id)
+    setSyncing(site.id)
+    // catch, а не голый await: без него отказ syncSite (сайт недоступен, токен
+    // протух) стал бы unhandled rejection в консоли — тот же класс проблемы,
+    // что и в submit() ниже. Текст ошибки уже показывает интерцептор api.ts,
+    // здесь остаётся только снять спиннер и выйти.
+    const result = await syncSite(site.id).catch(() => null)
+    setSyncing(null)
+    if (!result) return
     // Шаги статей и строителя независимы (app/api/admin_sites.py::sync_site) —
     // у сайта может быть настроен только один из них. Собираем сообщение из
     // того, что реально сконфигурировано, а не из фиксированного набора полей.
@@ -102,7 +115,7 @@ export default function AdminSitesPage() {
             { title: 'Домен', dataIndex: 'domain' },
             { title: 'Токен', dataIndex: 'api_token', width: 140 },
             {
-              title: 'Раздел', width: 180,
+              title: 'Раздел статей', width: 180,
               render: (_, r: SiteFull) => r.articles_url_prefix
                 ? `${r.articles_url_prefix} (parent ${r.articles_parent_id ?? '—'})`
                 : <Tag color="warning">не синхронизирован</Tag>,
@@ -125,12 +138,16 @@ export default function AdminSitesPage() {
                 ? <Tag color="success">есть</Tag> : <Tag>нет</Tag>,
             },
             {
-              title: '', width: 320,
+              // Иконки вместо подписей: четыре кнопки с текстом не помещались
+              // в колонку и вылезали за правый край карточки. Что делает
+              // каждая — говорит подсказка при наведении.
+              title: '', width: 150,
               render: (_, r: SiteFull) => (
-                <Space>
-                  <Button size="small" onClick={() => sync(r)}>
-                    Проверить и синхронизировать
-                  </Button>
+                <Space size={4}>
+                  <Tooltip title="Проверить и синхронизировать">
+                    <Button type="text" icon={<SyncOutlined />}
+                            loading={syncing === r.id} onClick={() => sync(r)} />
+                  </Tooltip>
                   <Upload
                     showUploadList={false}
                     beforeUpload={async file => {
@@ -149,9 +166,13 @@ export default function AdminSitesPage() {
                       return false
                     }}
                   >
-                    <Button size="small" icon={<UploadOutlined />}>Знак</Button>
+                    <Tooltip title="Загрузить водяной знак">
+                      <Button type="text" icon={<UploadOutlined />} />
+                    </Tooltip>
                   </Upload>
-                  <Button size="small" type="link" onClick={() => openForm(r)}>Правка</Button>
+                  <Tooltip title="Правка">
+                    <Button type="text" icon={<EditOutlined />} onClick={() => openForm(r)} />
+                  </Tooltip>
                   {/* Обязательная находка: было мгновенное необратимое удаление
                       по одному клику на маленькой ссылке в плотной строке
                       таблицы — delete_site (app/api/admin_sites.py) это
@@ -173,7 +194,9 @@ export default function AdminSitesPage() {
                     okText="Удалить" okType="danger" cancelText="Отмена"
                     onConfirm={async () => { await deleteSite(r.id); load() }}
                   >
-                    <Button size="small" type="link" danger>Удалить</Button>
+                    <Tooltip title="Удалить">
+                      <Button type="text" danger icon={<DeleteOutlined />} />
+                    </Tooltip>
                   </Popconfirm>
                 </Space>
               ),

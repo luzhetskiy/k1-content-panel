@@ -34,6 +34,7 @@ class MetaContext:
     city: str                      # «Москва»
     city_in: str                   # «в Москве»
     brand: str
+    form_price: str = ""           # «цена фанеры»
     wordstat_phrases: list[str] = field(default_factory=list)
     stoplist: list[str] = field(default_factory=list)
     site_description: str = ""
@@ -66,11 +67,27 @@ def normalize_tags(raw: object) -> dict:
 
 
 def allowed_keywords(ctx: MetaContext) -> set[str]:
-    nominative, city_in = _norm(ctx.form_nominative), _norm(ctx.city_in)
+    """Фразы из выдачи Wordstat и формы названия категории — сами по себе и с
+    городом. Формы нужны редким товарам: у «аксессуаров для химического анкера»
+    выдача пустая, и без них модели нечего было бы написать."""
+    city, city_in = _norm(ctx.city), _norm(ctx.city_in)
     allowed = {_norm(phrase) for phrase in ctx.wordstat_phrases}
-    allowed |= {f"{nominative} {_norm(ctx.city)}", f"{nominative} {city_in}",
-                f"{_norm(ctx.form_buy)} {city_in}"}
+    for form in (ctx.form_nominative, ctx.form_buy, ctx.form_price):
+        form = _norm(form)
+        if form:
+            allowed |= {form, f"{form} {city}", f"{form} {city_in}"}
     return allowed
+
+
+def clean_keywords(tags: dict, ctx: MetaContext) -> dict:
+    """Фразы не из статистики выкидываются молча: из-за keywords — тега, который
+    поисковики почти не учитывают, — категория не должна падать вместе с
+    хорошими title и description. Не осталось ничего — название с городом."""
+    allowed = allowed_keywords(ctx)
+    kept = [phrase for phrase in split_phrases(tags["meta_keywords"]) if _norm(phrase) in allowed]
+    if not kept:
+        kept = [_norm(f"{ctx.form_nominative} {ctx.city_in}")]
+    return {**tags, "meta_keywords": ", ".join(kept)}
 
 
 def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
@@ -117,10 +134,6 @@ def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
         errors.append("keywords пустые")
     if len(keywords) > KEYWORDS_MAX:
         errors.append(f"keywords: больше {KEYWORDS_MAX} фраз ({len(keywords)})")
-    allowed = allowed_keywords(ctx)
-    unknown = [phrase for phrase in keywords if _norm(phrase) not in allowed]
-    if unknown:
-        errors.append("keywords не из статистики Wordstat: " + ", ".join(unknown))
 
     ai_keywords = split_phrases(tags["ai_keywords"])
     if not AI_KEYWORDS_MIN <= len(ai_keywords) <= AI_KEYWORDS_MAX:

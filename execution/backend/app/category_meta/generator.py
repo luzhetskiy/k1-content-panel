@@ -25,7 +25,7 @@ from app.category_meta.forms import (
 from app.category_meta.publish import publish_metatag
 from app.category_meta.seeds import SeedsError, dedupe_variants
 from app.category_meta.validate import (
-    TAG_FIELDS, MetaContext, normalize_tags, validate_tags,
+    TAG_FIELDS, MetaContext, clean_keywords, normalize_tags, validate_tags,
 )
 from app.clock import utcnow
 from app.models.category_meta import CategoryMeta
@@ -170,6 +170,7 @@ def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFact
     alternatives = [(phrase, count, filter_stoplist(alt_phrases, stoplist))
                     for phrase, count, alt_phrases in facts.alternatives]
     ctx = MetaContext(form_nominative=category.form_nominative, form_buy=category.form_buy,
+                      form_price=category.form_price,
                       chosen_form=facts.chosen_form, city=site.city, city_in=site.city_in,
                       brand=site.brand,
                       wordstat_phrases=[phrase for phrase, _ in phrases]
@@ -194,7 +195,7 @@ def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFact
         result = text_client.complete_json(prompt)
         record_usage(result.tokens_prompt, result.tokens_completion, result.cost)
         try:
-            tags = normalize_tags(result.data)
+            tags = clean_keywords(normalize_tags(result.data), ctx)
         except ValueError as exc:
             violations = [str(exc)]
             continue

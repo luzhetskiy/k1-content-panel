@@ -1,7 +1,7 @@
 import pytest
 
 from app.category_meta.validate import (
-    MetaContext, allowed_keywords, normalize_tags, split_phrases, validate_tags,
+    MetaContext, allowed_keywords, clean_keywords, normalize_tags, split_phrases, validate_tags,
 )
 
 PHRASES = ["фанера", "фанера купить", "фанера цена", "фанера москва",
@@ -93,17 +93,36 @@ def test_opt_matches_whole_word_only():
     assert not any("оптом" in e for e in validate_tags(valid_tags(meta_description=text), ctx()))
 
 
-def test_keywords_limit_and_source():
+def test_keywords_limit():
     eleven = valid_tags()["meta_keywords"] + ", фанера москва"
     assert "keywords: больше 10 фраз (11)" in validate_tags(valid_tags(meta_keywords=eleven), ctx())
-    errors = validate_tags(valid_tags(meta_keywords="фанера, фанера оптом дешево"), ctx())
-    assert "keywords не из статистики Wordstat: фанера оптом дешево" in errors
     assert "keywords пустые" in validate_tags(valid_tags(meta_keywords=""), ctx())
 
 
-def test_city_variants_are_allowed_keywords():
-    allowed = allowed_keywords(ctx(wordstat_phrases=[]))
-    assert {"фанера москва", "фанера в москве", "купить фанеру в москве"} <= allowed
+def test_keywords_not_from_wordstat_are_dropped_not_failed():
+    tags = clean_keywords(valid_tags(meta_keywords="фанера, фанера оптом дешево, фанера фк"), ctx())
+    assert tags["meta_keywords"] == "фанера, фанера фк"
+    assert validate_tags(tags, ctx()) == []
+
+
+def test_keywords_fall_back_to_name_with_city():
+    tags = clean_keywords(valid_tags(meta_keywords="фанера оптом дешево"), ctx(wordstat_phrases=[]))
+    assert tags["meta_keywords"] == "фанера в москве"
+
+
+def test_name_forms_are_allowed_keywords():
+    """У редкого товара выдача Wordstat пустая — остаются формы названия
+    (живая ошибка «аксессуары для химического анкера», 2026-09-22)."""
+    allowed = allowed_keywords(ctx(form_nominative="аксессуары для химического анкера",
+                                   form_buy="купить аксессуары для химического анкера",
+                                   form_price="цена аксессуаров для химического анкера",
+                                   city="Брянск", city_in="в Брянске", wordstat_phrases=[]))
+    assert {"аксессуары для химического анкера", "купить аксессуары для химического анкера",
+            "цена аксессуаров для химического анкера",
+            "аксессуары для химического анкера брянск",
+            "аксессуары для химического анкера в брянске",
+            "купить аксессуары для химического анкера в брянске",
+            "цена аксессуаров для химического анкера в брянске"} <= allowed
 
 
 def test_ai_keywords_count():

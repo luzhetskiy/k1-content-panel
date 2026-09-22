@@ -312,12 +312,12 @@ def test_variant_about_other_thing_is_rejected(db_session, site, penoplast):
 
 
 def test_catalog_variant_is_kept_when_llm_approves_nothing(db_session, site, penoplast):
-    # пенополистирол отвергнут — его фразы в keywords уже недопустимы
-    tags = {**PSB_VALID, "meta_keywords": "пенопласт купить, пенопласт цена, пенопласт москва"}
-    text = FakeText([{"что-то": "не то"}, tags])
+    # пенополистирол отвергнут — его фразы из keywords выкидываются
+    text = FakeText([{"что-то": "не то"}, PSB_VALID])
     run(db_session, penoplast, site, wordstat=PsbWordstat(), text=text)
     assert penoplast.seed_phrase == "пенопласт"
     assert [v["same_product"] for v in penoplast.candidates_json] == [True, False, False]
+    assert penoplast.meta_keywords == "пенопласт купить, пенопласт цена, пенопласт москва"
 
 
 def test_saved_verdicts_are_reused(db_session, site, penoplast):

@@ -3,10 +3,13 @@ import dayjs from 'dayjs'
 import {
   Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message,
 } from 'antd'
-import { DeleteOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons'
+import {
+  DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SyncOutlined,
+} from '@ant-design/icons'
 import {
   MetaProject, MetaProjectIn, SiteBrief, WordstatRegion, createMetaProject, deleteMetaProject,
-  getMetaProjects, getSites, runMetaProject, searchWordstatRegions, updateMetaProject,
+  getMetaProjects, getSites, retryAllMetaErrors, retryMetaProjectErrors, runMetaProject,
+  searchWordstatRegions, updateMetaProject,
 } from '../api'
 import HelpButton from '../help'
 import CategoryMetaTree from './CategoryMetaTree'
@@ -144,6 +147,8 @@ export default function CategoryMetaPage() {
   const [sites, setSites] = useState<SiteBrief[]>([])
   const [editing, setEditing] = useState<MetaProject | 'new' | null>(null)
   const [busySite, setBusySite] = useState<number | null>(null)
+  const [retryingSite, setRetryingSite] = useState<number | null>(null)
+  const [retryingAll, setRetryingAll] = useState(false)
 
   const load = () => getMetaProjects().then(setProjects)
 
@@ -165,6 +170,36 @@ export default function CategoryMetaPage() {
     finally { setBusySite(null) }
   }
 
+  const retry = async (siteId: number) => {
+    setRetryingSite(siteId)
+    try {
+      await retryMetaProjectErrors(siteId)
+      message.success('Категории с ошибками поставлены в очередь')
+      await load()
+    } catch { /* сообщение уже показал интерцептор */ }
+    finally { setRetryingSite(null) }
+  }
+
+  const retryAll = async () => {
+    setRetryingAll(true)
+    try {
+      const result = await retryAllMetaErrors()
+      if (result.sites) {
+        message.success(`Перегенерация запущена: сайтов ${result.sites}, категорий ${result.categories}`)
+      } else {
+        message.info('Перегенерировать нечего')
+      }
+      if (result.busy.length) {
+        message.warning(`Идёт обновление, пропущены: ${result.busy.join(', ')}`)
+      }
+      await load()
+    } catch { /* сообщение уже показал интерцептор */ }
+    finally { setRetryingAll(false) }
+  }
+
+  const retryableSites = projects.filter(p => p.retry_count > 0 && !isRunning(p))
+  const retryableCount = retryableSites.reduce((sum, p) => sum + p.retry_count, 0)
+
   const remove = async (siteId: number) => {
     try { await deleteMetaProject(siteId); await load() }
     catch { /* сообщение уже показал интерцептор */ }
@@ -175,6 +210,16 @@ export default function CategoryMetaPage() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
         <Typography.Title level={4} style={{ margin: 0 }}>Метатеги категорий</Typography.Title>
         <Space>
+          {retryableSites.length > 0 && (
+            <Popconfirm
+              title="Перегенерировать ошибки на всех сайтах?"
+              description={`Категорий с ошибками: ${retryableCount}. Новые теги сразу запишутся на сайты.`}
+              onConfirm={retryAll}>
+              <Button icon={<ReloadOutlined />} loading={retryingAll}>
+                Перегенерировать все ошибки
+              </Button>
+            </Popconfirm>
+          )}
           <HelpButton section="categoryMeta" />
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setEditing('new')}>
             Добавить проект
@@ -197,9 +242,21 @@ export default function CategoryMetaPage() {
                   <Typography.Text strong>{p.name}</Typography.Text>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.domain}</Typography.Text>
                   {p.error_count > 0 && (
-                    <Tag color="error" style={{ marginTop: 4 }}>
-                      Категорий с ошибками: {p.error_count}
-                    </Tag>
+                    <Space size={4} style={{ marginTop: 4 }}>
+                      <Tag color="error" style={{ margin: 0 }}>
+                        Категорий с ошибками: {p.error_count}
+                      </Tag>
+                      {p.retry_count > 0 && !isRunning(p) && (
+                        <Popconfirm title="Перегенерировать категории с ошибками?"
+                                    description={`Категорий: ${p.retry_count}. Новые теги сразу запишутся на сайт.`}
+                                    onConfirm={() => retry(p.site_id)}>
+                          <Button size="small" icon={<ReloadOutlined />}
+                                  loading={retryingSite === p.site_id}>
+                            Перегенерировать
+                          </Button>
+                        </Popconfirm>
+                      )}
+                    </Space>
                   )}
                 </Space>
               ),

@@ -18,7 +18,7 @@ from app.ai.text import LLMError
 from app.api.deps import get_current_user, get_db
 from app.category_meta.city import CityFormError, city_in_for
 from app.category_meta.runs import (
-    active_run, is_stale, is_stuck, last_run, last_successful_run, run_progress,
+    active_run, is_stale, is_stuck, last_run, last_successful_run, retryable_errors, run_progress,
 )
 from app.clock import utcnow
 from app.models.category_meta import CategoryMeta, MetaRun
@@ -64,6 +64,7 @@ class ProjectOut(BaseModel):
     updated_at: datetime | None      # finished_at последнего успешного запуска
     last_error: str                  # ошибка последнего завершённого запуска, если была
     error_count: int                 # категории с ошибкой или зависшие — видно без раскрытия
+    retry_count: int                 # из них есть фраза — «Перегенерировать» их возьмёт
     run: RunOut | None
 
 
@@ -130,6 +131,7 @@ def _project_out(db: Session, site: Site) -> ProjectOut:
         updated_at=successful.finished_at if successful else None,
         last_error=finished.error_text if finished else "",
         error_count=sum(1 for row in unhealthy if row.status == "failed" or is_stuck(row)),
+        retry_count=len(retryable_errors(db, site.id)),
         run=run_out)
 
 
@@ -234,26 +236,98 @@ def regions(q: str, db: Session = Depends(get_db), _user: User = Depends(get_cur
     return [RegionOut(id=r.id, label=r.label, path=r.path) for r in search_regions(found, q)]
 
 
+def _project_ready(site: Site) -> bool:
+    return bool(site.city_in and site.brand and site.wordstat_region_id)
+
+
+def _is_busy(db: Session, site: Site) -> bool:
+    current = active_run(db, site.id)
+    return current is not None and not is_stale(db, current)
+
+
+def _close_stale_run(db: Session, site: Site) -> None:
+    """Закрывает оборвавшийся запуск, чтобы начать новый. Живой запуск — 409."""
+    current = active_run(db, site.id)
+    if current is None:
+        return
+    if not is_stale(db, current):
+        raise HTTPException(409, "обновление метатегов уже идёт")
+    current.error_text = "прерван: цепочка задач оборвалась, обновление запущено заново"
+    current.finished_at = utcnow()
+    job = db.get(JobRun, current.job_run_id) if current.job_run_id else None
+    if job is not None and job.finished_at is None:
+        job.status, job.log_text, job.finished_at = "failed", current.error_text, utcnow()
+
+
+def _start_errors_run(db: Session, site: Site, rows: list[CategoryMeta], user: User) -> None:
+    """Запуск «Перегенерировать ошибки»: без чтения дерева и новых фраз — в
+    очередь встают только упавшие и зависшие категории, дальше та же цепочка,
+    что у полного обновления (прогресс, ожидание квоты, один слот воркера)."""
+    _close_stale_run(db, site)
+    now = utcnow()
+    run = MetaRun(site_id=site.id, created_by_id=user.id, total=len(rows), started_at=now)
+    db.add(run)
+    db.flush()
+    job = JobRun(kind="category_meta_run", site_id=site.id, created_by_id=user.id,
+                 params_json={"run_id": run.id, "errors_only": True}, status="running")
+    db.add(job)
+    db.flush()
+    run.job_run_id = job.id
+    for row in rows:
+        row.status, row.error_text, row.wait_until, row.started_at = "queued", "", None, None
+        row.updated_at = now
+    db.commit()
+    enqueue_category_meta(rows[0].id)
+
+
 @router.post("/projects/{site_id}/run", response_model=ProjectOut)
 def run_project(site_id: int, db: Session = Depends(get_db),
                 user: User = Depends(get_current_user)):
     site = _project_or_404(db, site_id)
-    if not (site.city_in and site.brand and site.wordstat_region_id):
+    if not _project_ready(site):
         raise HTTPException(400, "заполните у проекта город, бренд и регион Wordstat")
-    current = active_run(db, site.id)
-    if current is not None:
-        if not is_stale(db, current):
-            raise HTTPException(409, "обновление метатегов уже идёт")
-        current.error_text = "прерван: цепочка задач оборвалась, обновление запущено заново"
-        current.finished_at = utcnow()
-        job = db.get(JobRun, current.job_run_id) if current.job_run_id else None
-        if job is not None and job.finished_at is None:
-            job.status, job.log_text, job.finished_at = "failed", current.error_text, utcnow()
+    _close_stale_run(db, site)
     run = MetaRun(site_id=site.id, created_by_id=user.id)
     db.add(run)
     db.commit()
     enqueue_meta_run(run.id)
     return _project_out(db, site)
+
+
+@router.post("/projects/{site_id}/retry-errors", response_model=ProjectOut)
+def retry_project_errors(site_id: int, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    site = _project_or_404(db, site_id)
+    if not _project_ready(site):
+        raise HTTPException(400, "заполните у проекта город, бренд и регион Wordstat")
+    rows = retryable_errors(db, site.id)
+    if not rows:
+        raise HTTPException(400, "перегенерировать нечего: у категорий с ошибкой нет "
+                                 "поисковой фразы — запустите «Обновить метатеги»")
+    _start_errors_run(db, site, rows, user)
+    return _project_out(db, site)
+
+
+class RetryAllOut(BaseModel):
+    sites: int            # на скольких сайтах запущено
+    categories: int       # сколько категорий встало в очередь
+    busy: list[str]       # сайты, где уже идёт обновление, — их не трогали
+
+
+@router.post("/retry-errors", response_model=RetryAllOut)
+def retry_all_errors(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    started, queued, busy = 0, 0, []
+    sites = db.scalars(select(Site).where(Site.meta_enabled.is_(True)).order_by(Site.name)).all()
+    for site in sites:
+        rows = retryable_errors(db, site.id)
+        if not rows or not _project_ready(site):
+            continue
+        if _is_busy(db, site):
+            busy.append(site.name)
+            continue
+        _start_errors_run(db, site, rows, user)
+        started, queued = started + 1, queued + len(rows)
+    return RetryAllOut(sites=started, categories=queued, busy=busy)
 
 
 @router.get("/projects/{site_id}/categories", response_model=list[CategoryOut])

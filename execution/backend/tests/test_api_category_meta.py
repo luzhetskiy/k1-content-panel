@@ -166,7 +166,7 @@ def test_project_progress_and_last_update(manager_client, project, db_session):
     db_session.add_all([
         MetaRun(site_id=project.id, total=2, started_at=finished - timedelta(hours=2),
                 finished_at=finished),
-        MetaRun(site_id=project.id, total=3),
+        MetaRun(site_id=project.id, total=3, started_at=utcnow() - timedelta(minutes=5)),
         CategoryMeta(site_id=project.id, remote_id=1, name="А", status="done"),
         CategoryMeta(site_id=project.id, remote_id=2, name="Б", status="queued",
                      wait_until=utcnow() + timedelta(minutes=20)),
@@ -259,3 +259,89 @@ def test_project_without_errors_has_zero_error_count(manager_client, db_session,
     db_session.commit()
     [body] = manager_client.get("/api/category-meta/projects").json()
     assert body["error_count"] == 0
+
+
+def retry_rows(db, project):
+    long_ago = utcnow() - timedelta(hours=2)
+    rows = [
+        CategoryMeta(site_id=project.id, remote_id=1, name="А", seed_phrase="а", status="failed",
+                     error_text="не ответил", updated_at=long_ago),
+        CategoryMeta(site_id=project.id, remote_id=2, name="Б", seed_phrase="б", status="in_work",
+                     started_at=long_ago, updated_at=long_ago),
+        CategoryMeta(site_id=project.id, remote_id=3, name="В", status="failed",
+                     error_text="нет фразы", updated_at=long_ago),
+        CategoryMeta(site_id=project.id, remote_id=4, name="Г", seed_phrase="г", status="done",
+                     updated_at=long_ago),
+    ]
+    db.add_all(rows)
+    db.commit()
+    return rows
+
+
+def test_retry_errors_queues_only_failed_and_stuck(manager_client, project, enqueued, db_session):
+    failed, stuck, seedless, done = retry_rows(db_session, project)
+    before = manager_client.get("/api/category-meta/projects").json()[0]
+    assert (before["error_count"], before["retry_count"]) == (3, 2)
+    resp = manager_client.post(f"/api/category-meta/projects/{project.id}/retry-errors")
+    assert resp.status_code == 200
+    for row in (failed, stuck, seedless, done):
+        db_session.refresh(row)
+    assert (failed.status, stuck.status) == ("queued", "queued")
+    assert failed.error_text == "" and stuck.started_at is None
+    assert (seedless.status, done.status) == ("failed", "done")
+    run = db_session.query(MetaRun).one()
+    assert run.total == 2 and run.job_run_id is not None
+    assert enqueued["categories"] == [(failed.id, {})]
+    assert enqueued["runs"] == []
+    body = resp.json()
+    assert (body["run"]["total"], body["run"]["done"], body["run"]["failed"]) == (2, 0, 0)
+
+
+def test_retry_errors_progress_ignores_old_errors(manager_client, project, enqueued, db_session):
+    failed, stuck, _seedless, _done = retry_rows(db_session, project)
+    manager_client.post(f"/api/category-meta/projects/{project.id}/retry-errors")
+    failed.status = "done"
+    stuck.status, stuck.error_text, stuck.updated_at = "failed", "снова", utcnow()
+    db_session.commit()
+    body = manager_client.get("/api/category-meta/projects").json()[0]
+    assert (body["run"]["done"], body["run"]["failed"]) == (1, 1)
+
+
+def test_retry_errors_nothing_to_retry(manager_client, project, enqueued, db_session):
+    db_session.add(CategoryMeta(site_id=project.id, remote_id=3, name="В", status="failed"))
+    db_session.commit()
+    resp = manager_client.post(f"/api/category-meta/projects/{project.id}/retry-errors")
+    assert resp.status_code == 400
+    assert db_session.query(MetaRun).count() == 0
+
+
+def test_retry_errors_while_running_is_conflict(manager_client, project, enqueued, db_session):
+    retry_rows(db_session, project)
+    db_session.add(MetaRun(site_id=project.id, total=5))
+    db_session.commit()
+    resp = manager_client.post(f"/api/category-meta/projects/{project.id}/retry-errors")
+    assert resp.status_code == 409
+    assert enqueued["categories"] == []
+
+
+def test_retry_all_errors(manager_client, project, enqueued, db_session):
+    failed, *_ = retry_rows(db_session, project)
+    busy = Site(name="Стройбаза Калуга", domain="k.ru", base_url="https://k.ru",
+                api_token_enc="e", meta_enabled=True, city="Калуга", city_in="в Калуге",
+                brand="Стройбаза", wordstat_region_id=6)
+    clean = Site(name="Стройбаза Брянск", domain="b.ru", base_url="https://b.ru",
+                 api_token_enc="e", meta_enabled=True, city="Брянск", city_in="в Брянске",
+                 brand="Стройбаза", wordstat_region_id=191)
+    db_session.add_all([busy, clean])
+    db_session.commit()
+    db_session.add_all([
+        CategoryMeta(site_id=busy.id, remote_id=1, name="А", seed_phrase="а", status="failed"),
+        MetaRun(site_id=busy.id, total=3),
+        CategoryMeta(site_id=clean.id, remote_id=1, name="А", seed_phrase="а", status="done"),
+    ])
+    db_session.commit()
+    resp = manager_client.post("/api/category-meta/retry-errors")
+    assert resp.status_code == 200
+    assert resp.json() == {"sites": 1, "categories": 2, "busy": ["Стройбаза Калуга"]}
+    assert enqueued["categories"] == [(failed.id, {})]
+    assert db_session.query(MetaRun).filter(MetaRun.site_id == clean.id).count() == 0

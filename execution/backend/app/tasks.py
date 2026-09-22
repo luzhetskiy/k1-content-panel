@@ -17,7 +17,9 @@ from app.api.admin_sites import open_client as open_site_client
 from app.articles.builder import build_for, regenerate_article_for
 from app.articles.topics import filter_duplicates
 from app.category_meta.generator import MetaValidationError, generate_category
-from app.category_meta.runs import active_run, finish_run_if_complete, next_queued
+from app.category_meta.runs import (
+    active_run, finish_run_if_complete, next_queued, run_counts,
+)
 from app.category_meta.seeds import SeedsError, generate_seeds, needs_seed
 from app.category_meta.tree import sync_categories
 from app.celery_app import celery_app
@@ -680,10 +682,7 @@ def _close_run_job(db, run: MetaRun) -> None:
     if run.error_text:
         _finish_job(db, job, "failed", run.error_text)
         return
-    failed = db.query(CategoryMeta).filter(CategoryMeta.site_id == run.site_id,
-                                           CategoryMeta.status == "failed").count()
-    done = db.query(CategoryMeta).filter(CategoryMeta.site_id == run.site_id,
-                                         CategoryMeta.status == "done").count()
+    done, failed = run_counts(db, run)
     _finish_job(db, job, "ok" if not failed else "failed",
                 f"готово {done}/{run.total}, ошибок {failed}")
 

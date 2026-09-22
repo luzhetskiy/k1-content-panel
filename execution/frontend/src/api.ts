@@ -246,7 +246,7 @@ export interface MetaRunState {
 export interface MetaProject {
   site_id: number; name: string; domain: string; base_url: string
   city: string; city_in: string; brand: string; wordstat_region_id: number | null
-  updated_at: string | null; last_error: string; error_count: number
+  updated_at: string | null; last_error: string; error_count: number; retry_count: number
   run: MetaRunState | null
 }
 export interface MetaProjectIn {
@@ -277,6 +277,11 @@ export const searchWordstatRegions = (q: string) =>
   api.get<WordstatRegion[]>('/category-meta/regions', { params: { q } }).then(r => r.data)
 export const runMetaProject = (siteId: number) =>
   api.post<MetaProject>(`/category-meta/projects/${siteId}/run`).then(r => r.data)
+export const retryMetaProjectErrors = (siteId: number) =>
+  api.post<MetaProject>(`/category-meta/projects/${siteId}/retry-errors`).then(r => r.data)
+export interface MetaRetryAll { sites: number; categories: number; busy: string[] }
+export const retryAllMetaErrors = () =>
+  api.post<MetaRetryAll>('/category-meta/retry-errors').then(r => r.data)
 export const getMetaCategories = (siteId: number) =>
   api.get<CategoryMetaRow[]>(`/category-meta/projects/${siteId}/categories`).then(r => r.data)
 export const regenerateMetaCategory = (id: number) =>

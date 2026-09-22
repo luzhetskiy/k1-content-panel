@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.clock import as_utc, utcnow
@@ -81,17 +81,35 @@ def is_stale(db: Session, run: MetaRun, now: datetime | None = None) -> bool:
     return max(moments) < now - STALE_AFTER
 
 
+def run_counts(db: Session, run: MetaRun) -> tuple[int, int]:
+    """(готово, ошибок) в пределах запуска. Ошибкой запуска считается только
+    категория, упавшая после его старта: «Перегенерировать ошибки» берёт не все
+    упавшие (без фразы — нельзя), и прежние ошибки в его счёт не входят. По той
+    же причине «готово» — это остаток, а не все done сайта."""
+    started = as_utc(run.started_at)
+    failed = sum(1 for row in db.scalars(select(CategoryMeta).where(
+                     CategoryMeta.site_id == run.site_id, CategoryMeta.status == "failed"))
+                 if row.updated_at is not None and as_utc(row.updated_at) >= started)
+    active = len(_active_categories(db, run.site_id))
+    return max(run.total - active - failed, 0), failed
+
+
 def run_progress(db: Session, run: MetaRun, now: datetime | None = None) -> RunProgress:
     now = now or utcnow()
-
-    def count(status: str) -> int:
-        return db.scalar(select(func.count()).select_from(CategoryMeta).where(
-            CategoryMeta.site_id == run.site_id, CategoryMeta.status == status)) or 0
-
+    done, failed = run_counts(db, run)
     waits = [as_utc(c.wait_until) for c in _active_categories(db, run.site_id)
              if c.status == "queued" and c.wait_until is not None and as_utc(c.wait_until) > now]
-    return RunProgress(total=run.total, done=count("done"), failed=count("failed"),
+    return RunProgress(total=run.total, done=done, failed=failed,
                        wait_until=min(waits) if waits else None, stale=is_stale(db, run, now))
+
+
+def retryable_errors(db: Session, site_id: int, now: datetime | None = None) -> list[CategoryMeta]:
+    """Категории с ошибкой или зависшие, которые можно перегенерировать без
+    полного обновления: у них уже есть поисковая фраза."""
+    rows = db.scalars(select(CategoryMeta).where(
+        CategoryMeta.site_id == site_id, CategoryMeta.status.in_(("failed", "in_work")),
+        CategoryMeta.seed_phrase != "").order_by(CategoryMeta.id)).all()
+    return [row for row in rows if row.status == "failed" or is_stuck(row, now)]
 
 
 def finish_run_if_complete(db: Session, site_id: int, now: datetime | None = None) -> MetaRun | None:

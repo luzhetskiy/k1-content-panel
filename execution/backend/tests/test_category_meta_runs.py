@@ -4,7 +4,7 @@ import pytest
 
 from app.category_meta.runs import (
     active_run, finish_run_if_complete, is_stale, is_stuck, last_successful_run, next_queued,
-    run_progress,
+    retryable_errors, run_progress,
 )
 from app.models.category_meta import CategoryMeta, MetaRun
 from app.models.site import Site
@@ -90,6 +90,29 @@ def test_progress_counts_and_nearest_wait(db_session, site):
     assert (progress.total, progress.done, progress.failed) == (4, 1, 1)
     assert progress.wait_until.replace(tzinfo=timezone.utc) == NOW + timedelta(minutes=10)
     assert progress.stale is False
+
+
+def test_progress_counts_only_errors_of_this_run(db_session, site):
+    add_category(db_session, site, 1, "failed", minutes_ago=90)
+    add_category(db_session, site, 2, "done", minutes_ago=90)
+    run = add_run(db_session, site, minutes_ago=30, total=3)
+    add_category(db_session, site, 3, "done", minutes_ago=10)
+    add_category(db_session, site, 4, "failed", minutes_ago=5)
+    add_category(db_session, site, 5, "queued")
+    progress = run_progress(db_session, run, NOW)
+    assert (progress.done, progress.failed) == (1, 1)
+
+
+def test_retryable_errors_need_seed_phrase(db_session, site):
+    failed = add_category(db_session, site, 1, "failed")
+    failed.seed_phrase = "фанера"
+    stuck = add_category(db_session, site, 2, "in_work", started_minutes_ago=60)
+    stuck.seed_phrase = "osb"
+    working = add_category(db_session, site, 3, "in_work", started_minutes_ago=5)
+    working.seed_phrase = "брус"
+    add_category(db_session, site, 4, "failed")
+    db_session.commit()
+    assert [r.id for r in retryable_errors(db_session, site.id, NOW)] == [failed.id, stuck.id]
 
 
 def test_finish_run_only_when_nothing_active(db_session, site):

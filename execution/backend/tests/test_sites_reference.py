@@ -215,3 +215,79 @@ def test_sync_stores_empty_ratios_when_images_use_bare_img_tags(db_session, site
     просто не измеряется, синхронизация не падает."""
     sync_site_reference(db_session, site, FakeClient(reference_html="<p>t</p><img><img>"))
     assert site.reference_image_ratios == ","
+
+
+# --- синхронизация сайта, публикующего в раздел /api/v1/articles/ ---
+
+
+class FakeArticlesClient(FakeClient):
+    """Раздел articles: эталон — запись этого ресурса, разметка лежит в body,
+    родительской страницы у раздела нет вовсе."""
+
+    def get_page(self, page_id):
+        raise AssertionError("ветка articles не должна ходить в staticpages")
+
+    def get_article(self, article_id):
+        self.requested.append(article_id)
+        return {"id": article_id, "body": self.reference_html, "label": "Полезное"}
+
+    def list_articles(self):
+        return [{"id": 9, "title": "Старая", "slug": "staraya", "label": "Полезное"}]
+
+
+def test_articles_sync_does_not_require_parent(db_session, site):
+    """Родителя у записи раздела articles нет: адрес собирает движок из
+    слага. Требовать его значило бы просить администратора выдумать
+    несуществующую настройку."""
+    site.publish_target = "articles"
+    site.articles_parent_id = None
+    db_session.commit()
+
+    sync_site_reference(db_session, site, FakeArticlesClient())
+
+    assert site.reference_html == "<img><img>"
+    assert site.reference_images == 2
+    assert site.reference_synced_at is not None
+
+
+def test_articles_sync_reads_reference_from_articles_resource(db_session, site):
+    site.publish_target = "articles"
+    site.articles_parent_id = None
+    db_session.commit()
+    client = FakeArticlesClient()
+
+    sync_site_reference(db_session, site, client)
+
+    assert client.requested == [312]
+
+
+def test_articles_sync_leaves_url_prefix_empty(db_session, site):
+    """Префикс этой ветки — константа в коде (ARTICLES_URL_PREFIX). Копия
+    неизменяемого значения в карточке — лишний источник расхождения."""
+    site.publish_target = "articles"
+    site.articles_parent_id = None
+    db_session.commit()
+
+    sync_site_reference(db_session, site, FakeArticlesClient())
+
+    assert site.articles_url_prefix == ""
+
+
+def test_articles_sync_still_requires_reference_article(db_session, site):
+    site.publish_target = "articles"
+    site.articles_parent_id = None
+    site.reference_article_id = None
+    db_session.commit()
+
+    with pytest.raises(ReferenceError) as exc:
+        sync_site_reference(db_session, site, FakeArticlesClient())
+    assert "Эталонная статья" in str(exc.value)
+
+
+def test_pages_sync_still_requires_parent(db_session, site):
+    site.articles_parent_id = None
+    db_session.commit()
+
+    with pytest.raises(ReferenceError) as exc:
+        sync_site_reference(db_session, site, FakeClient())
+    assert "родительской" in str(exc.value)

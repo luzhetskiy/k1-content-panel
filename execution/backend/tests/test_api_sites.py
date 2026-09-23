@@ -425,3 +425,76 @@ def test_sync_reports_builder_failure_independently_of_articles(admin_client, si
     assert body["articles_ok"] is True
     assert body["builder_ok"] is False
     assert "builder-main-title" in body["builder_detail"]
+
+
+# --- сайт, публикующий в раздел /api/v1/articles/ ---
+
+
+def patch_articles_api(monkeypatch, reference_html="<img><img>"):
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.get_article",
+        lambda self, article_id: {"id": article_id, "body": reference_html,
+                                  "label": "Полезное"})
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.list_articles",
+        lambda self: [{"id": 9, "title": "A", "slug": "a", "label": "Полезное"}])
+    monkeypatch.setattr(
+        "app.api.admin_sites.SiteClient.get_page",
+        lambda self, page_id: pytest.fail("ветка articles не ходит в staticpages"))
+
+
+def articles_payload(site_payload):
+    return {**site_payload, "publish_target": "articles", "articles_parent_id": None}
+
+
+def test_articles_site_saves_without_parent(admin_client, site_payload):
+    resp = admin_client.post("/api/admin/sites", json=articles_payload(site_payload))
+    assert resp.status_code == 200
+    assert resp.json()["articles_parent_id"] is None
+
+
+def test_switching_to_articles_clears_stale_parent(admin_client, db_session, site_payload):
+    """Родитель, оставшийся от прежней настройки, ни на что не влияет, но
+    следующий читатель карточки будет гадать, куда уходят статьи."""
+    from app.models.site import Site
+
+    site_id = admin_client.post("/api/admin/sites", json=site_payload).json()["id"]
+    admin_client.put(f"/api/admin/sites/{site_id}",
+                     json={**site_payload, "publish_target": "articles"})
+
+    db_session.expire_all()
+    assert db_session.get(Site, site_id).articles_parent_id is None
+
+
+def test_unknown_publish_target_is_rejected(admin_client, site_payload):
+    """Незнакомое значение молча трактовалось бы как pages — статьи уехали бы
+    не туда, куда просили, без единого признака ошибки."""
+    resp = admin_client.post("/api/admin/sites",
+                             json={**site_payload, "publish_target": "выдуманное"})
+    assert resp.status_code == 422
+
+
+def test_articles_sync_reports_engine_prefix(admin_client, site_payload, monkeypatch):
+    patch_articles_api(monkeypatch)
+    site_id = admin_client.post("/api/admin/sites",
+                                json=articles_payload(site_payload)).json()["id"]
+    body = admin_client.post(f"/api/admin/sites/{site_id}/sync").json()
+    assert body["articles_ok"] is True
+    assert body["url_prefix"] == "/articles/"
+    assert body["pages"] == 1
+    assert body["reference_images"] == 2
+
+
+def test_articles_site_becomes_ready_after_sync(admin_client, manager_client,
+                                                site_payload, monkeypatch):
+    """articles_url_prefix у такого сайта пустой по устройству — проверка
+    готовности, завязанная на него, не дала бы завести партию никогда."""
+    patch_articles_api(monkeypatch)
+    site_id = admin_client.post("/api/admin/sites",
+                                json=articles_payload(site_payload)).json()["id"]
+    assert manager_client.get("/api/sites").json()[0]["is_ready"] is False
+
+    admin_client.post(f"/api/admin/sites/{site_id}/sync")
+    ready = manager_client.get("/api/sites").json()[0]
+    assert ready["is_ready"] is True
+    assert ready["url_prefix"] == "/articles/"

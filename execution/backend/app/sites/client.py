@@ -270,6 +270,84 @@ class SiteClient:
             timeout=self.upload_timeout)
         return self._json(response, "загрузка обложки").get("teaser_image", "")
 
+    # --- статьи раздела /api/v1/articles/ ---
+    #
+    # Отдельный от staticpages ресурс со своей схемой: поля url у него нет
+    # вообще (адрес движок собирает сам как /articles/<slug>/), обложка лежит
+    # в поле image (а не teaser_image), а label и teaser обязательны.
+    # Подробности схемы и живая проверка — в
+    # directions/2026-09-23-articles-target-design.md.
+
+    def list_articles(self) -> list[dict]:
+        """Все статьи раздела. Фильтра по разделу нет и не нужно: раздел у
+        этого ресурса один, в отличие от staticpages, где статьи приходится
+        отбирать по префиксу url (см. list_section_pages выше) — поэтому
+        здесь хватает общей пагинации _list_all, а не своего цикла."""
+        return self._list_all(ARTICLES_PATH, "список статей")
+
+    def get_article(self, article_id: int) -> dict:
+        response = self._send(
+            requests.get, f"{self.base_url}{ARTICLES_PATH}{article_id}/",
+            f"статья {article_id}", headers=self._headers, timeout=self.timeout)
+        return self._json(response, f"статья {article_id}")
+
+    def create_article(self, title: str, slug: str, html: str, teaser: str, label: str,
+                       meta_description: str = "", meta_keywords: str = "") -> dict:
+        payload = {
+            "title": title,
+            "slug": slug,
+            "body": strip_html_comments(html).strip(),
+            "teaser": teaser,
+            "label": label,
+            "published": False,       # черновик: публикует менеджер вручную
+            "wide_view": True,
+            "meta_description": meta_description,
+            "meta_keywords": meta_keywords,
+        }
+        response = self._send(
+            requests.post, f"{self.base_url}{ARTICLES_PATH}", "создание статьи",
+            json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
+        return self._json(response, "создание статьи")
+
+    def update_article_text(self, article_id: int, html: str, *, title: str | None = None,
+                            teaser: str | None = None,
+                            meta_description: str | None = None,
+                            meta_keywords: str | None = None) -> dict:
+        """PATCH тела уже существующей статьи — аналог update_page_text для
+        этого ресурса, с той же семантикой необязательных полей (None =
+        «не менять»). Тизер здесь не трогается: он собран из
+        meta_description при создании, а перегенерация текста меняет и его
+        источник — значит, при переданном meta_description тизер тоже
+        пересобирается вызывающим (ArticlesTarget.update_text)."""
+        payload = {"body": strip_html_comments(html).strip()}
+        if title is not None:
+            payload["title"] = title
+        if teaser is not None:
+            payload["teaser"] = teaser
+        if meta_description is not None:
+            payload["meta_description"] = meta_description
+        if meta_keywords is not None:
+            payload["meta_keywords"] = meta_keywords
+        response = self._send(
+            requests.patch, f"{self.base_url}{ARTICLES_PATH}{article_id}/",
+            f"обновление статьи {article_id}", json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self.timeout)
+        return self._json(response, f"обновление статьи {article_id}")
+
+    def set_article_cover(self, article_id: int, image_bytes: bytes, filename: str) -> str:
+        """Обложка статьи — поле image, ImageField: как и teaser_image у
+        страницы, строкой-путём не задаётся, только multipart прямо в поле."""
+        ctype = mimetypes.guess_type(filename)[0] or "image/webp"
+        response = self._send(
+            requests.patch, f"{self.base_url}{ARTICLES_PATH}{article_id}/",
+            "загрузка обложки статьи", headers=self._headers,
+            files={"image": (filename, io.BytesIO(image_bytes), ctype)},
+            timeout=self.upload_timeout)
+        return self._json(response, "загрузка обложки статьи").get("image", "")
+
     def create_teaser(self, name: str, slug: str, address: str, phone: str, email: str,
                       website: str, page_url: str, *, category: int, city: int,
                       location: int, coordinates: str = "", description: str = "") -> int:

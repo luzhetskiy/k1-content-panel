@@ -1,10 +1,10 @@
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.models.user import User
 from app.settings.crypto import SecretDecryptionError, decrypt, encrypt, mask
 from app.sites.client import SiteAPIError, SiteClient
 from app.sites.reference import ReferenceError, sync_site_reference
+from app.sites.target import make_target
 
 router = APIRouter(prefix="/api/admin/sites", tags=["admin-sites"])
 
@@ -44,7 +45,7 @@ class SiteIn(BaseModel):
     is_active: bool = True
     site_description: str = ""
     tone_of_voice: str = ""
-    publish_target: str = "pages"
+    publish_target: Literal["pages", "articles"] = "pages"
     articles_parent_id: int | None = None
     reference_article_id: int | None = None
     image_style_prompt: str = ""
@@ -52,6 +53,18 @@ class SiteIn(BaseModel):
     cover_style_prompt: str = ""
     builder_parent_id: int | None = None
     builder_reference_id: int | None = None
+
+    @model_validator(mode="after")
+    def _drop_parent_for_articles(self):
+        """У раздела articles родителя не бывает: адрес статьи движок
+        собирает сам из слага. Форма такой сайт про родителя и не спрашивает,
+        но при переключении сайта с pages на articles в карточке остался бы
+        висеть id страницы, который ни на что не влияет, — и следующий
+        читатель карточки гадал бы, почему статьи уходят не туда.
+        Обнуляем на входе, а не прячем на фронте."""
+        if self.publish_target == "articles":
+            self.articles_parent_id = None
+        return self
 
 
 class SiteOut(SiteIn):
@@ -234,15 +247,20 @@ def sync_site(site_id: int, db: Session = Depends(get_db),
     if articles_wanted:
         def articles_step():
             sync_site_reference(db, site, client, commit=False)
-            pages = client.list_section_pages(site.articles_url_prefix)
+            # Счёт уже существующих статей и префикс для показа берутся у
+            # цели публикации: у раздела articles свой ресурс и свой
+            # постоянный префикс, страницами его не перечислить.
+            target = make_target(site, client)
+            pages = target.list_existing()
             db.commit()
-            return len(pages)
+            return len(pages), target.url_prefix
 
-        ok, detail, pages_count = _sync_with_retries(db, articles_step)
+        ok, detail, articles_state = _sync_with_retries(db, articles_step)
         result.articles_ok = ok
         result.articles_detail = detail
         if ok:
-            result.url_prefix = site.articles_url_prefix
+            pages_count, url_prefix = articles_state
+            result.url_prefix = url_prefix
             result.pages = pages_count
             result.reference_images = site.reference_images
 

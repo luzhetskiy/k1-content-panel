@@ -90,6 +90,8 @@ def test_default_prompts_render_with_real_contexts(db_session):
         "article_body": {"topic": "тема", "site_name": "X", "site_description": "описание",
                          "tone_of_voice": "тон", "reference_html": "<p>x</p>",
                          "image_count": 2, "image_paths": ["/a.webp", "/b.webp"]},
+        "article_label": {"topic": "тема", "title": "Заголовок",
+                          "labels": ["Полезное", "О материалах"]},
         "cover": {"topic": "тема", "cover_style": "стиль"},
         "content_image": {"topic": "тема", "paragraph": "иллюстрация 1 из 2",
                           "image_style": "стиль"},

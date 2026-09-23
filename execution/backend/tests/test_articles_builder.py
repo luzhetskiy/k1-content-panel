@@ -683,7 +683,7 @@ def test_regenerate_content_images_site_push_failure_keeps_progress_and_clears_f
     from app.sites.client import SiteAPIError
 
     class BrokenPushClient(FakeSiteClient):
-        def update_page_text(self, page_id, html):
+        def update_page_text(self, page_id, html, **kwargs):
             raise SiteAPIError("обновление текста страницы: HTTP 500: Internal Server Error")
 
     site_client = BrokenPushClient()
@@ -721,9 +721,9 @@ def test_regenerate_content_images_prompt_failure_keeps_llmusage_for_earlier_pos
         db_session, prepared):
     """Находка ревью Task 4 (round 2), воспроизведена эмпирически: промпты
     для позиций строились через dict comprehension без commit() между
-    позициями. _image_prompt() пишет LlmUsage через self.db.add(...), но
+    позициями. _short_text_prompt() пишет LlmUsage через self.db.add(...), но
     сам ничего не коммитит — если промпт позиции 1 уже посчитался (и
-    LlmUsage добавлен в сессию), а на позиции 2 _image_prompt() бросил
+    LlmUsage добавлен в сессию), а на позиции 2 _short_text_prompt() бросил
     LLMError, self.db.rollback() во внешнем except стирал вместе с
     неудачной попыткой ещё и уже оплаченную запись LlmUsage за позицию 1.
     Явный цикл с commit() после каждой позиции (см. builder.py) должен
@@ -1099,3 +1099,153 @@ def test_regenerate_with_no_parts_selected_records_error(db_session, prepared):
 
     assert "не выбрана" in prepared.article.error_text
     assert prepared.article.regenerating is False
+
+
+# --- сборка в раздел /api/v1/articles/ (publish_target="articles") ---
+#
+# У этой ветки другой ресурс сайта, другие обязательные поля (slug, teaser,
+# label) и адрес, который собирает сам движок. Дизайн и живая проверка схемы —
+# directions/2026-09-23-articles-target-design.md.
+
+
+class FakeArticlesClient(FakeSiteClient):
+    """Раздел articles: без url в списке, обложка в поле image, тело в body."""
+
+    def __init__(self, articles=None):
+        super().__init__()
+        self._articles = articles if articles is not None else [
+            {"id": 312, "title": "Масла для дерева", "slug": "zashita-drevesiny",
+             "label": "Полезное"},
+            {"id": 12, "title": "Клей Baumit", "slug": "klej-baumit",
+             "label": "Рекомендации"},
+        ]
+
+    def list_articles(self):
+        return self._articles
+
+    def get_article(self, article_id):
+        self.fetched_pages.append(article_id)
+        return {"id": article_id, "body": "<article class='post'><p>эталон</p></article>",
+                "label": "Полезное"}
+
+    def create_article(self, title, slug, html, teaser, label,
+                       meta_description, meta_keywords):
+        self.created = dict(title=title, slug=slug, html=html, teaser=teaser, label=label,
+                            meta_description=meta_description, meta_keywords=meta_keywords)
+        return {"id": 77}
+
+    def set_article_cover(self, article_id, image_bytes, filename):
+        self.cover = (article_id, filename)
+        return "/media/articles/" + filename
+
+    def update_article_text(self, article_id, html, *, title=None, teaser=None,
+                            meta_description=None, meta_keywords=None):
+        self.updated_text = (article_id, html, title, meta_description, meta_keywords)
+        return {"id": article_id}
+
+
+@pytest.fixture
+def prepared_articles(db_session, prepared):
+    """Тот же сайт, но публикующий в раздел articles: родителя нет, префикс
+    пустой — его заменяет константа движка."""
+    prepared.site.publish_target = "articles"
+    prepared.site.articles_parent_id = None
+    prepared.site.articles_url_prefix = ""
+    db_session.commit()
+    return prepared
+
+
+def test_build_into_articles_section_creates_article_not_page(db_session, prepared_articles):
+    site_client = FakeArticlesClient()
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert prepared_articles.article.status == "published"
+    assert prepared_articles.article.remote_page_id == 77
+    assert site_client.created["slug"] == "chem-uteplit-karkasnyy-dom"
+
+
+def test_build_into_articles_section_records_engine_built_url(db_session, prepared_articles):
+    """Ответ раздела articles url не содержит — адрес собирает движок из
+    слага. Без своего расчёта ссылка на черновик в таблице партии оказалась
+    бы обрезанной до домена."""
+    make_builder(db_session, prepared_articles, FakeArticlesClient()).build()
+    assert prepared_articles.article.remote_url == \
+        "https://x.ru/articles/chem-uteplit-karkasnyy-dom/"
+
+
+def test_articles_teaser_is_built_from_meta_description(db_session, prepared_articles):
+    site_client = FakeArticlesClient()
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert site_client.created["teaser"] == "<p>описание</p>"
+
+
+def test_articles_label_is_chosen_from_existing_labels(db_session, prepared_articles):
+    """FakeTextClient на любой текстовый запрос отвечает «промпт картинки» —
+    в список рубрик сайта это не попадает, поэтому срабатывает фолбэк на
+    рубрику эталонной статьи (reference_article_id=312)."""
+    site_client = FakeArticlesClient()
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert site_client.created["label"] == "Полезное"
+
+
+def test_articles_label_uses_model_answer_when_it_matches(db_session, prepared_articles):
+    class LabelTextClient(FakeTextClient):
+        def complete_text(self, prompt):
+            self.prompts.append(prompt)
+            return TextResult("Рекомендации", 10, 20, 0.05)
+
+    site_client = FakeArticlesClient()
+    builder = make_builder(db_session, prepared_articles, site_client)
+    builder.text_client = LabelTextClient(builder.text_client.body)
+    builder.build()
+    assert site_client.created["label"] == "Рекомендации"
+
+
+def test_articles_build_fails_readably_when_section_has_no_labels(db_session,
+                                                                  prepared_articles):
+    site_client = FakeArticlesClient(articles=[])
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert site_client.created is None
+    assert prepared_articles.article.status == "failed"
+    assert "рубрик" in prepared_articles.article.error_text
+
+
+def test_articles_cover_goes_into_image_field(db_session, prepared_articles):
+    site_client = FakeArticlesClient()
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert site_client.cover == (77, "cp-article-1-cover.webp")
+
+
+def test_articles_slug_is_cut_to_fifty(db_session, prepared_articles):
+    """max_length слага в разделе — 50 (живая проверка OPTIONS), у статичных
+    страниц — 70."""
+    body = {
+        "title": "Чем утеплить каркасный дом зимой чтобы не промёрзли стены и углы",
+        "html": "<article class='post'><p>Текст</p><img><img></article>",
+        "meta_description": "описание", "meta_keywords": "утепление",
+    }
+    builder = make_builder(db_session, prepared_articles, FakeArticlesClient(), body=body)
+    builder.build()
+    assert len(prepared_articles.article.slug) <= 50
+
+
+def test_articles_duplicate_slug_is_skipped(db_session, prepared_articles):
+    """Дубль ловится по слагу: url в списке раздела не приходит вовсе."""
+    site_client = FakeArticlesClient(articles=[
+        {"id": 9, "title": "Старая", "slug": "chem-uteplit-karkasnyy-dom",
+         "label": "Полезное"},
+    ])
+    make_builder(db_session, prepared_articles, site_client).build()
+    assert site_client.created is None
+    assert prepared_articles.article.status == "failed"
+    assert "уже есть" in prepared_articles.article.error_text
+
+
+def test_articles_regenerate_text_patches_article_resource(db_session, prepared_articles):
+    site_client = FakeArticlesClient()
+    builder = make_builder(db_session, prepared_articles, site_client)
+    builder.build()
+    prepared_articles.article.regenerating = True
+    db_session.commit()
+    builder.regenerate_text()
+    assert site_client.updated_text[0] == 77
+    assert prepared_articles.article.error_text == ""

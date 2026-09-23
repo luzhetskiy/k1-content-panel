@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.clock import utcnow
 from app.models.site import Site
+from app.sites.target import make_target
 
 # Комментарии вырезаются перед подсчётом: закомментированная картинка не
 # рендерится, а лишний сгенерированный кадр стоит денег.
@@ -94,25 +95,37 @@ def sync_site_reference(db: Session, site: Site, client, commit: bool = True) ->
     раздела пишутся одной транзакцией, чтобы отказ на втором шаге не оставлял
     в БД наполовину обновлённую карточку). По умолчанию коммитит сама — так
     же, как `SettingsService.set`/`set_secret` (app/settings/service.py)."""
-    if not site.articles_parent_id:
+    target = make_target(site, client)
+    # Родитель нужен только ветке pages: там раздел произвольный и его префикс
+    # известен лишь сайту. У раздела articles адрес собирает сам движок
+    # (/articles/<slug>/), родителя у записи нет вообще — требовать его
+    # значило бы просить администратора выдумать несуществующую настройку.
+    # См. directions/2026-09-23-articles-target-design.md.
+    if target.kind == "pages" and not site.articles_parent_id:
         raise ReferenceError("не задан id родительской страницы раздела статей")
     if not site.reference_article_id:
         raise ReferenceError("Эталонная статья не задана — без неё разметку взять неоткуда")
 
-    parent = client.get_page(site.articles_parent_id)
-    prefix = parent.get("url") or ""
-    if not prefix:
-        raise ReferenceError(f"у страницы {site.articles_parent_id} нет url — "
-                             f"это точно раздел статей?")
+    prefix = ""
+    if target.kind == "pages":
+        parent = client.get_page(site.articles_parent_id)
+        prefix = parent.get("url") or ""
+        if not prefix:
+            raise ReferenceError(f"у страницы {site.articles_parent_id} нет url — "
+                                 f"это точно раздел статей?")
 
-    reference = client.get_page(site.reference_article_id)
-    html = reference.get("text") or reference.get("body") or ""
+    html = target.reference(site.reference_article_id)["html"]
     images = count_images(html)
     if images == 0:
         raise ReferenceError("в эталонной статье ни одной картинки — статьи получатся "
                              "без иллюстраций; проверь, тот ли это id")
 
-    site.articles_url_prefix = prefix if prefix.endswith("/") else prefix + "/"
+    # У ветки articles префикс — константа в коде (ARTICLES_URL_PREFIX), в
+    # карточке он остаётся пустым: хранить копию неизменяемого значения
+    # незачем, а признаком синхронизации для неё служит reference_html
+    # (ArticlesTarget.is_synced).
+    if prefix:
+        site.articles_url_prefix = prefix if prefix.endswith("/") else prefix + "/"
     site.reference_html = html
     site.reference_images = images
     site.reference_image_ratios = ",".join(measure_reference_image_ratios(client, html))

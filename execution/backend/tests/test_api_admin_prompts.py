@@ -36,8 +36,8 @@ def test_manager_reads_prompts(manager_client, seeded):
 def test_admin_lists_global_prompts(admin_client, seeded):
     body = admin_client.get("/api/admin/prompts").json()
     keys = {item["key"] for item in body if item["site_id"] is None}
-    assert keys == {"topics", "article_body", "cover", "content_image", "builder_text",
-                    "category_seeds", "category_variants", "category_meta"}
+    assert keys == {"topics", "article_body", "article_label", "cover", "content_image",
+                    "builder_text", "category_seeds", "category_variants", "category_meta"}
 
 
 def test_admin_saves_site_override(admin_client, seeded, db_session, site):

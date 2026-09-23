@@ -115,10 +115,21 @@ export default function AdminSitesPage() {
             { title: 'Домен', dataIndex: 'domain' },
             { title: 'Токен', dataIndex: 'api_token', width: 140 },
             {
-              title: 'Раздел статей', width: 180,
-              render: (_, r: SiteFull) => r.articles_url_prefix
-                ? `${r.articles_url_prefix} (parent ${r.articles_parent_id ?? '—'})`
-                : <Tag color="warning">не синхронизирован</Tag>,
+              title: 'Раздел статей', width: 200,
+              // У сайтов с publish_target='articles' раздел задан движком
+              // (/articles/), родителя у записи нет — показывать «parent —»
+              // там нечестно: выглядит как незаполненная настройка, хотя
+              // заполнять нечего. Признак синхронизации у этой ветки —
+              // эталон, а не префикс (он приходит константой с бэкенда).
+              render: (_, r: SiteFull) => {
+                const synced = r.publish_target === 'articles'
+                  ? Boolean(r.reference_synced_at)
+                  : Boolean(r.articles_url_prefix)
+                if (!synced) return <Tag color="warning">не синхронизирован</Tag>
+                return r.publish_target === 'articles'
+                  ? <>/articles/ <Tag color="blue">раздел статей</Tag></>
+                  : `${r.articles_url_prefix} (parent ${r.articles_parent_id ?? '—'})`
+              },
             },
             {
               title: 'Эталон', width: 190,
@@ -236,30 +247,54 @@ export default function AdminSitesPage() {
                             placeholder="практичный, без рекламных обещаний,
                                          обращение на «вы»" />
           </Form.Item>
-          <Form.Item name="publish_target" label="Куда публиковать">
+          <Form.Item name="publish_target" label="Куда публиковать"
+                     extra="«Раздел статей» — отдельный раздел сайта с адресами
+                            вида /articles/<слаг>/: родитель не нужен, но нужна
+                            рубрика — она выбирается из тех, что уже есть на сайте.">
             <Select options={[
-              { value: 'pages', label: 'Страницы (staticpages)' },
-              { value: 'articles', label: 'Раздел articles' },
+              { value: 'pages', label: 'Статичные страницы' },
+              { value: 'articles', label: 'Раздел статей (/articles/)' },
             ]} />
           </Form.Item>
-          {/* Префикс url не вводится: он берётся с самой родительской страницы
-              при синхронизации, иначе рано или поздно разъедется с сайтом. */}
-          <Form.Item name="articles_parent_id" label="ID родительской страницы раздела"
-                     extra={editing?.articles_url_prefix
-                       ? `Раздел на сайте: ${editing.articles_url_prefix}`
-                       : 'Раздел определится при синхронизации'}
-                     rules={[{ required: true, message: 'Без раздела публиковать некуда' }]}>
-            <InputNumber style={{ width: '100%' }} placeholder="25" />
+          {/* Родитель — настройка только ветки «Страницы»: там раздел
+              произвольный, и его префикс url берётся с самой родительской
+              страницы при синхронизации (вручную не вводится, иначе рано или
+              поздно разъедется с сайтом). У раздела articles адрес собирает
+              сам движок — /articles/<слаг>/, родителя у записи нет вовсе,
+              поэтому поле скрыто, а не просто необязательно: пустое поле
+              выглядело бы как забытая настройка. */}
+          <Form.Item noStyle shouldUpdate={(prev, next) =>
+            prev.publish_target !== next.publish_target}>
+            {({ getFieldValue }) => getFieldValue('publish_target') === 'articles' ? null : (
+              <Form.Item name="articles_parent_id" label="ID родительской страницы раздела"
+                         extra={editing?.articles_url_prefix
+                           ? `Раздел на сайте: ${editing.articles_url_prefix}`
+                           : 'Раздел определится при синхронизации'}
+                         rules={[{ required: true, message: 'Без раздела публиковать некуда' }]}>
+                <InputNumber style={{ width: '100%' }} placeholder="25" />
+              </Form.Item>
+            )}
           </Form.Item>
-          <Form.Item name="reference_article_id" label="ID эталонной статьи"
-                     extra={editing?.reference_synced_at
-                       ? `Синхронизирована ${dayjs(editing.reference_synced_at)
-                            .format('DD.MM.YYYY HH:mm')}, картинок в ней:
-                            ${editing.reference_images}`
-                       : `Её разметка — шаблон для всех статей сайта, а число картинок
-                          в ней задаёт число картинок в новых статьях`}
-                     rules={[{ required: true, message: 'Эталон обязателен' }]}>
-            <InputNumber style={{ width: '100%' }} />
+          {/* Откуда брать id — не мелочь: у двух веток это разные ресурсы
+              сайта, и id из чужого либо не найдётся, либо молча приведёт
+              эталон не к той разметке. */}
+          <Form.Item noStyle shouldUpdate={(prev, next) =>
+            prev.publish_target !== next.publish_target}>
+            {({ getFieldValue }) => (
+              <Form.Item name="reference_article_id" label="ID эталонной статьи"
+                         extra={editing?.reference_synced_at
+                           ? `Синхронизирована ${dayjs(editing.reference_synced_at)
+                                .format('DD.MM.YYYY HH:mm')}, картинок в ней:
+                                ${editing.reference_images}`
+                           : `Её разметка — шаблон для всех статей сайта, а число картинок
+                              в ней задаёт число картинок в новых статьях. ${
+                                getFieldValue('publish_target') === 'articles'
+                                  ? 'Это id записи в разделе статей сайта, не страницы.'
+                                  : 'Это id страницы сайта.'}`}
+                         rules={[{ required: true, message: 'Эталон обязателен' }]}>
+                <InputNumber style={{ width: '100%' }} />
+              </Form.Item>
+            )}
           </Form.Item>
           <Form.Item name="image_style_prompt" label="Стиль контентных картинок">
             <Input.TextArea rows={2} />

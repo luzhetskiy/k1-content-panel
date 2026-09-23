@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.models.prompt_template import PromptTemplate
 
-PROMPT_KEYS = ("topics", "article_body", "cover", "content_image", "builder_text",
-               "category_seeds", "category_variants", "category_meta")
+PROMPT_KEYS = ("topics", "article_body", "article_label", "cover", "content_image",
+               "builder_text", "category_seeds", "category_variants", "category_meta")
 
 # Набор переменных, который каждому промпту реально передаёт боевой код
 # (app/tasks.py и app/articles/builder.py). Объявлен здесь, а не разбросан по
@@ -24,6 +24,9 @@ PROMPT_VARIABLES: dict[str, frozenset[str]] = {
                          "existing_titles"}),
     "article_body": frozenset({"topic", "site_name", "site_description", "tone_of_voice",
                                "reference_html", "image_count", "image_paths"}),
+    # Рубрика статьи для сайтов с publish_target="articles"
+    # (app/articles/builder.py, _pick_label).
+    "article_label": frozenset({"topic", "title", "labels"}),
     "cover": frozenset({"topic", "cover_style"}),
     "content_image": frozenset({"topic", "paragraph", "image_style"}),
     "builder_text": frozenset({"company_name", "city", "category", "site_name",

@@ -19,13 +19,8 @@ from app.ai.watermark import apply_watermark
 from app.models.article import Article, ArticleImage
 from app.models.job import LlmUsage
 from app.models.site import Site
-from app.sites.client import (
-    ARTICLE_IMG_DIR,
-    SLUG_LIMIT_ARTICLES,
-    SLUG_LIMIT_PAGES,
-    SiteAPIError,
-    slugify,
-)
+from app.sites.client import ARTICLE_IMG_DIR, SiteAPIError, slugify
+from app.sites.target import ArticlesTarget, build_teaser, make_target, pick_label, require_label
 
 COVER_CROP = "3:2"
 CONTENT_CROP = "3:2"
@@ -78,10 +73,29 @@ class ArticleBuilder:
         self.site = site
         self.text_client = text_client
         self.image_generator = image_generator
-        self.site_client = site_client
+        self._site_client = site_client
+        # Куда пишется статья — в статичные страницы или в раздел articles.
+        # site_client остаётся у билдера только ради filemanager (загрузка
+        # картинок одинакова для обеих целей), всё остальное общение с сайтом
+        # идёт через цель (app/sites/target.py).
+        self.target = make_target(site, site_client)
         self.image_params = image_params
         self.watermark_bytes = watermark_bytes
         self.job_run_id = job_run_id
+
+    @property
+    def site_client(self):
+        return self._site_client
+
+    @site_client.setter
+    def site_client(self, client) -> None:
+        """Клиент сайта живёт в двух местах — у самого билдера (загрузка
+        файлов) и внутри цели публикации (запись страницы). Свойство держит
+        их согласованными: без него подмена builder.site_client оставляла бы
+        цель со старым клиентом, и половина обращений уходила бы не туда —
+        молча, потому что оба объекта рабочие."""
+        self._site_client = client
+        self.target.attach(client)
 
     # --- публичный вход ---
 
@@ -163,11 +177,11 @@ class ArticleBuilder:
         updated = 0
         try:
             # Явный цикл с commit() после каждой позиции, а не dict-
-            # comprehension: _image_prompt() внутри вызывает
+            # comprehension: _short_text_prompt() внутри вызывает
             # self._record_usage("text", ...), который делает
             # self.db.add(LlmUsage(...)), но сам ничего не коммитит. Если
             # промпт для позиции 1 посчитался (и LlmUsage добавлен в сессию,
-            # но не закоммичен), а для позиции 2 _image_prompt() бросил
+            # но не закоммичен), а для позиции 2 _short_text_prompt() бросил
             # LLMError/PromptError, внешний except ниже делает
             # self.db.rollback() — без промежуточного commit() здесь это
             # молча стирает уже оплаченную запись LlmUsage за позицию 1
@@ -176,7 +190,7 @@ class ArticleBuilder:
             # 0 строк LlmUsage после отката вместо 2).
             prompts: dict[int, str] = {}
             for position in positions:
-                prompts[position] = self._image_prompt("content_image", {
+                prompts[position] = self._short_text_prompt("content_image", {
                     "topic": self.article.topic,
                     "paragraph": f"иллюстрация {position} из {len(positions)}",
                     "image_style": self.site.image_style_prompt,
@@ -226,7 +240,7 @@ class ArticleBuilder:
                     self.db.commit()
 
             if updated:
-                self.site_client.update_page_text(self.article.remote_page_id, self.article.body_html)
+                self.target.update_text(self.article.remote_page_id, self.article.body_html)
 
             if first_error is not None:
                 self.article.error_text = (
@@ -245,7 +259,7 @@ class ArticleBuilder:
             #
             # Без этого except исключение (например SiteAPIError из
             # update_page_text — сеть/токен сайта — или LLMError/PromptError
-            # из _image_prompt при построении промптов) улетело бы наружу
+            # из _short_text_prompt при построении промптов) улетело бы наружу
             # необработанным: ArticleImage-строки и body_html уже
             # закоммичены построчно внутри цикла выше, но
             # regenerating остался бы True навсегда — статья
@@ -303,7 +317,7 @@ class ArticleBuilder:
             self.article.body_html = body["html"]
             self.article.meta_description = body.get("meta_description", "")
             self.article.meta_keywords = body.get("meta_keywords", "")
-            self.site_client.update_page_text(
+            self.target.update_text(
                 self.article.remote_page_id, self.article.body_html,
                 title=self.article.title, meta_description=self.article.meta_description,
                 meta_keywords=self.article.meta_keywords)
@@ -341,7 +355,7 @@ class ArticleBuilder:
         нужна, чтобы не перезаписать файл, который всё ещё показан)."""
         try:
             prompt = self._build_cover_prompt()
-            # Коммитим сразу — _build_cover_prompt() (через _image_prompt())
+            # Коммитим сразу — _build_cover_prompt() (через _short_text_prompt())
             # уже записала LlmUsage за реально оплаченный вызов текстовой
             # модели, и эта строка не должна пропасть при откате ниже, если
             # генерация картинки или загрузка обложки на сайт дальше упадёт
@@ -368,7 +382,7 @@ class ArticleBuilder:
             # или нет.
             next_version = max((c.version for c in covers), default=0) + 1
             filename = image_filename(self.article.id, 0, version=next_version)
-            self.site_client.set_page_cover(self.article.remote_page_id, result.data, filename)
+            self.target.set_cover(self.article.remote_page_id, result.data, filename)
             self.db.add(ArticleImage(article_id=self.article.id, kind="cover", position=0,
                                      version=next_version, prompt=prompt,
                                      remote_path=filename, cost=result.cost))
@@ -439,14 +453,12 @@ class ArticleBuilder:
         self.db.commit()
 
     def _slug_limit(self) -> int:
-        return (SLUG_LIMIT_ARTICLES if self.site.publish_target == "articles"
-                else SLUG_LIMIT_PAGES)
+        return self.target.slug_limit
 
     def _require_synced_reference(self) -> None:
         """Проверка идёт до первого платного вызова: без эталона разметку взять
         неоткуда, и падать на этом после генерации картинок было бы обидно."""
-        if not (self.site.reference_html and self.site.reference_images
-                and self.site.articles_url_prefix):
+        if not self.target.is_synced():
             raise SiteAPIError(
                 "эталон сайта не синхронизирован — нажми «Проверить и синхронизировать» "
                 "на карточке сайта")
@@ -545,7 +557,7 @@ class ArticleBuilder:
             # только эта статья не долетит до status="failed", но и вся
             # партия развалится с этого места.
             self.db.rollback()
-            target = f"{self.site.articles_url_prefix}{self.article.slug}/"
+            target = self.target.public_path(self.article.slug)
             raise ArticleBuildError(
                 f"на этот сайт уже собирается или опубликована другая статья "
                 f"с таким же адресом ({target}) — слаг совпал, попробуй "
@@ -554,13 +566,15 @@ class ArticleBuilder:
     def _guard_duplicate_url(self) -> None:
         """Дубль url означает повторный прогон той же темы — молча создавать
         вторую страницу нельзя."""
-        target = f"{self.site.articles_url_prefix}{self.article.slug}/"
-        taken = {p.get("url") for p in self.site_client.list_section_pages(
-            self.site.articles_url_prefix)}
-        if target in taken:
+        target = self.target.public_path(self.article.slug)
+        if target in self.target.taken_addresses():
             raise SiteAPIError(f"страница {target} уже есть на сайте")
 
-    def _image_prompt(self, key: str, variables: dict) -> str:
+    def _short_text_prompt(self, key: str, variables: dict) -> str:
+        """Короткий текстовый запрос к модели по шаблону из БД: промпт
+        картинки, промпт обложки, рубрика статьи. Раньше назывался
+        _image_prompt — имя перестало быть верным, когда тем же путём пошёл
+        выбор рубрики (_pick_label), не имеющий к картинкам отношения."""
         rendered = render_prompt(resolve_prompt(self.db, key, self.site.id), variables)
         result = self.text_client.complete_text(rendered)
         self._record_usage("text", result.tokens_prompt, result.tokens_completion, result.cost)
@@ -613,7 +627,7 @@ class ArticleBuilder:
     def _generate_content_images(self) -> list[tuple[int, bytes]]:
         count = self._image_count()
         prompts = [
-            self._image_prompt("content_image", {
+            self._short_text_prompt("content_image", {
                 "topic": self.article.topic,
                 "paragraph": f"иллюстрация {position} из {count}",
                 "image_style": self.site.image_style_prompt,
@@ -671,18 +685,39 @@ class ArticleBuilder:
         self.db.commit()
 
     def _create_page(self) -> dict:
-        page = self.site_client.create_page(
-            title=self.article.title,
-            url=f"{self.site.articles_url_prefix}{self.article.slug}/",
-            html=self.article.body_html,
-            parent_id=self.site.articles_parent_id,
-            meta_description=self.article.meta_description,
-            meta_keywords=self.article.meta_keywords,
+        page = self.target.create(
+            self.article,
+            teaser=build_teaser(self.article.meta_description, self.article.title),
+            label=self._pick_label(),
         )
         self.article.remote_page_id = page["id"]
-        self.article.remote_url = f"{self.site.base_url}{page.get('url', '')}"
+        # У раздела articles поля url в ответе нет вообще — адрес собирает сам
+        # движок из слага, поэтому фолбэк на public_path это не «на всякий
+        # случай», а штатный путь для этой ветки. У staticpages url в ответе
+        # есть и он авторитетнее нашего: сайт мог его нормализовать.
+        path = page.get("url") or self.target.public_path(self.article.slug)
+        self.article.remote_url = f"{self.site.base_url}{path}"
         self.db.commit()
         return page
+
+    def _pick_label(self) -> str:
+        """Рубрика статьи — обязательное поле раздела articles, у статичных
+        страниц аналога нет (там возвращается пустая строка и в запрос не
+        уходит). Модель выбирает из рубрик, которые уже есть на сайте, —
+        отдельным дешёвым промптом, а не расширением article_body: у сайтов
+        бывают свои переопределения article_body, и новое поле в его JSON
+        молча не доехало бы до них."""
+        if not isinstance(self.target, ArticlesTarget):
+            return ""
+        labels = self.target.labels()
+        if not labels:
+            return require_label("")
+        answer = self._short_text_prompt("article_label", {
+            "topic": self.article.topic,
+            "title": self.article.title,
+            "labels": labels,
+        })
+        return require_label(pick_label(answer, self.target))
 
     def _build_cover_prompt(self) -> str:
         """Общее построение промпта обложки для _attach_cover (первая
@@ -690,8 +725,8 @@ class ArticleBuilder:
         должно расходиться между ними."""
         style = (self.site.cover_style_prompt if self.site.cover_mode == "prompt"
                  else "в стиле уже существующих обложек этого сайта")
-        return self._image_prompt("cover", {"topic": self.article.topic,
-                                            "cover_style": style})
+        return self._short_text_prompt("cover", {"topic": self.article.topic,
+                                                 "cover_style": style})
 
     def _attach_cover(self, page_id: int) -> None:
         prompt = self._build_cover_prompt()
@@ -699,7 +734,7 @@ class ArticleBuilder:
             prompt=prompt, size=self.image_params["size"],
             quality=self.image_params["quality"], crop=COVER_CROP)
         filename = image_filename(self.article.id, 0)
-        self.site_client.set_page_cover(page_id, result.data, filename)
+        self.target.set_cover(page_id, result.data, filename)
         self.db.add(ArticleImage(article_id=self.article.id, kind="cover", position=0,
                                  prompt=prompt, remote_path=filename, cost=result.cost))
         self._record_usage("image", 0, 0, result.cost)

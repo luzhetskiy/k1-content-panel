@@ -33,6 +33,7 @@ from app.models.job import JobRun, LlmUsage
 from app.models.site import Site
 from app.settings.crypto import SecretDecryptionError
 from app.sites.client import SiteAPIError
+from app.sites.target import make_target
 from app.wordstat.client import WordstatAuthError, WordstatError
 from app.wordstat.factory import (
     WordstatConfigError, build_wordstat_client, hourly_limit, stoplist,
@@ -124,8 +125,13 @@ def generate_topics_sync(db, batch_id: int) -> None:
     job = _start_job(db, "generate_topics", site.id, batch.created_by_id,
                      {"batch_id": batch_id, "count": batch.requested_count})
     try:
-        existing = [p.get("title", "") for p in
-                    open_site_client(db, site).list_section_pages(site.articles_url_prefix)]
+        # Через цель публикации, а не напрямую списком страниц: у сайтов с
+        # publish_target="articles" уже опубликованные статьи лежат в своём
+        # ресурсе, и по префиксу url среди staticpages не нашлись бы вовсе —
+        # модель получала бы пустой список и предлагала темы, которые на
+        # сайте уже есть.
+        existing = [item["title"] for item in
+                    make_target(site, open_site_client(db, site)).list_existing()]
         template = resolve_prompt(db, "topics", site.id)
         text_client = build_text_client(db)
 

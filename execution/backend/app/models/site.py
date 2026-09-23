@@ -41,6 +41,17 @@ class Site(Base):
 
     # --- статьи ---
     publish_target: Mapped[str] = mapped_column(String(20), default="pages")  # pages|articles
+
+    @validates("publish_target")
+    def _check_publish_target(self, _key: str, value: str) -> str:
+        # Значение выбирает вся логика публикации (app/sites/target.py:
+        # make_target), и незнакомое молча трактовалось бы как "pages" —
+        # то есть статьи уехали бы не туда, куда просили, без единого
+        # признака ошибки. Тот же класс дефекта, что чинит эта доработка
+        # целиком: настройка, которая выглядит рабочей и делает не то.
+        if value not in ("pages", "articles"):
+            raise ValueError(f"publish_target: ожидается pages или articles, а не {value!r}")
+        return value
     # Раздел задаётся родительской страницей; её url подтягивается синхронизацией.
     # Никакого «/blog/» по умолчанию: раздел у каждого сайта свой.
     articles_parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

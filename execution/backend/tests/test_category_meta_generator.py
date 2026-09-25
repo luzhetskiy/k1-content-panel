@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
-from app.ai.text import JsonResult
+from app.ai.text import JsonResult, TextResult
 from app.category_meta.generator import MetaValidationError, generate_category
 from app.category_meta.seeds import SeedsError
 from app.category_meta.seo_text import plain_text
@@ -56,7 +56,7 @@ def seo_answer(phrase, city_in="в Москве", size=2600):
     html = block
     while len(plain_text(html)) < size:
         html += block
-    return {"seo_text": html}
+    return html
 
 
 class FakeText:
@@ -67,17 +67,19 @@ class FakeText:
     def __init__(self, answers, seo=None):
         self.answers = list(answers)
         self.seo = list(seo or [])
-        self.prompts, self.seo_prompts = [], []
+        self.prompts, self.seo_prompts, self.seo_reasoning = [], [], []
 
     def complete_json(self, prompt):
-        if '"seo_text"' in prompt:
-            self.seo_prompts.append(prompt)
-            if self.seo:
-                return JsonResult(self.seo.pop(0), 300, 900, 0.5)
-            phrase = re.search(r"Поисковая фраза: (.+?)\. Город", prompt).group(1)
-            return JsonResult(seo_answer(phrase), 300, 900, 0.5)
         self.prompts.append(prompt)
         return JsonResult(self.answers.pop(0), 100, 50, 0.3)
+
+    def complete_text(self, prompt, *, reasoning=True):
+        self.seo_prompts.append(prompt)
+        self.seo_reasoning.append(reasoning)
+        if self.seo:
+            return TextResult(self.seo.pop(0), 300, 900, 0.5)
+        phrase = re.search(r"Поисковая фраза: (.+?)\. Город", prompt).group(1)
+        return TextResult(seo_answer(phrase), 300, 900, 0.5)
 
 
 class FakeSite:
@@ -404,7 +406,7 @@ def test_category_without_seed(db_session, site, fanera):
 
 def test_seo_text_gets_products_keywords_and_is_retried(db_session, site, fanera):
     fanera.product_names_json = ["Фанера ФК 1525х1525х10"]
-    short = {"seo_text": "<h2>Фанера в Москве</h2><p>Коротко.</p>"}
+    short = "```html\n<h2>Фанера в Москве</h2><p>Коротко.</p>\n```"
     text = FakeText([VALID], seo=[short, seo_answer("фанера")])
     site_client = FakeSite()
     run(db_session, fanera, site, text=text, site_client=site_client)
@@ -413,13 +415,14 @@ def test_seo_text_gets_products_keywords_and_is_retried(db_session, site, fanera
     assert "фанера влагостойкая" in text.seo_prompts[0]          # keywords страницы
     assert "Заголовок страницы (h1): Фанера в Москве" in text.seo_prompts[0]
     assert "- SEO-текст должен быть 2500–3000 символов" in text.seo_prompts[1]
+    assert text.seo_reasoning == [False, False]      # рассуждения модели выключены
     assert fanera.status == "done" and fanera.seo_text.startswith("<h2>")
 
 
 def test_bad_seo_text_twice_publishes_nothing(db_session, site, fanera):
     site_client = FakeSite()
     with pytest.raises(MetaValidationError) as err:
-        run(db_session, fanera, site, text=FakeText([VALID], seo=[{"x": 1}, {"seo_text": ""}]),
+        run(db_session, fanera, site, text=FakeText([VALID], seo=["", "<p>Фанера</p>"]),
             site_client=site_client)
     assert str(err.value).startswith("SEO-текст не прошёл проверку")
     assert site_client.created == [] and fanera.title == ""

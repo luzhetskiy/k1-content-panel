@@ -92,8 +92,12 @@ class TextClient:
         self.backoff = backoff
         self.temperature = temperature
 
-    def complete_text(self, prompt: str) -> TextResult:
-        response = self._call(prompt)
+    def complete_text(self, prompt: str, *, reasoning: bool = True) -> TextResult:
+        """reasoning=False выключает скрытые рассуждения модели: для длинного
+        текста по готовому плану они не нужны, а стоят в 3–5 раз больше самого
+        текста (SEO-тексты категорий, 2026-09-25: 1,4 тыс. токенов ответа против
+        6–18 тыс. с рассуждениями)."""
+        response = self._call(prompt, reasoning=reasoning)
         return TextResult(self._content(response), *self._usage(response))
 
     def complete_json(self, prompt: str) -> JsonResult:
@@ -107,7 +111,9 @@ class TextClient:
             raise LLMError(f"модель вернула не JSON: {raw[:200]}") from exc
         return JsonResult(data, *self._usage(response))
 
-    def _call(self, prompt: str):
+    def _call(self, prompt: str, reasoning: bool = True):
+        # Формат RouterAI (как у OpenRouter); «thinking: disabled» он игнорирует.
+        extra = {} if reasoning else {"extra_body": {"reasoning": {"enabled": False}}}
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
@@ -115,6 +121,7 @@ class TextClient:
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=self.temperature,
+                    **extra,
                 )
             except _NON_RETRYABLE as exc:
                 raise LLMError(_non_retryable_message(exc)) from exc

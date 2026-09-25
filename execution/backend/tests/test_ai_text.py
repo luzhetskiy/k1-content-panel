@@ -14,9 +14,11 @@ class FakeCompletions:
         self.usage_cost = usage_cost
         self.fail_times = fail_times
         self.calls = 0
+        self.requests = []
 
     def create(self, **kwargs):
         self.calls += 1
+        self.requests.append(kwargs)
         if self.calls <= self.fail_times:
             raise RuntimeError("transport down")
         return SimpleNamespace(
@@ -64,6 +66,14 @@ def test_complete_text_returns_content_and_usage():
     assert result.tokens_prompt == 10
     assert result.tokens_completion == 20
     assert result.cost == 0.5
+
+
+def test_reasoning_is_switched_off_only_on_request():
+    client, create = fake_client("<p>Текст</p>")
+    TextClient(client, "test-model").complete_text("промпт")
+    TextClient(client, "test-model").complete_text("промпт", reasoning=False)
+    assert "extra_body" not in create.requests[0]
+    assert create.requests[1]["extra_body"] == {"reasoning": {"enabled": False}}
 
 
 def test_complete_json_strips_code_fence():

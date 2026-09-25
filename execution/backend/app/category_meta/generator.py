@@ -221,20 +221,18 @@ def generate_seo_text(db: Session, category: CategoryMeta, site, facts: Wordstat
     template = resolve_prompt(db, "category_seo_text", site.id)
     violations: list[str] = []
     for _attempt in range(LLM_ATTEMPTS):
-        result = text_client.complete_json(render_prompt(template, {
+        result = text_client.complete_text(render_prompt(template, {
             "site_name": site.name, "site_description": site.site_description,
             "category_name": category.name, "category_path": category.path or category.name,
             "form_nominative": category.form_nominative, "city_in": site.city_in,
-            "h1": tags["h1"], "keywords": split_phrases(tags["meta_keywords"]) + split_phrases(tags["ai_keywords"]),
+            "h1": tags["h1"],
+            "keywords": split_phrases(tags["meta_keywords"]) + split_phrases(tags["ai_keywords"]),
             "phrases": [f"{phrase} — {count}" for phrase, count in phrases[:SEO_TEXT_PHRASES]],
             "products": list(category.product_names_json or []),
             "violations": violations,
-        }))
+        }), reasoning=False)
         record_usage(result.tokens_prompt, result.tokens_completion, result.cost)
-        if not isinstance(result.data, dict) or not isinstance(result.data.get("seo_text"), str):
-            violations = ["модель вернула не JSON-объект с полем seo_text"]
-            continue
-        seo_text = clean_seo_html(result.data["seo_text"])
+        seo_text = clean_seo_html(result.text)
         violations = validate_seo_text(seo_text, ctx)
         if not violations:
             return seo_text

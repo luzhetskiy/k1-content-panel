@@ -262,6 +262,7 @@ export interface CategoryMetaRow {
   nominative_count: number | null; declined_count: number | null
   total_count: number | null; low_demand: boolean
   title: string; h1: string; meta_description: string; meta_keywords: string; ai_keywords: string
+  seo_text: string
   previous_json: Record<string, string> | null
   wait_until: string | null; updated_at: string
 }

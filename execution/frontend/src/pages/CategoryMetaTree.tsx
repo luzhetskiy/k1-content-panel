@@ -36,6 +36,13 @@ function StatusTag({ row }: { row: CategoryMetaRow }) {
   )
 }
 
+// SEO-текст — HTML с h2/p/ul; в карточке показываем текстом, абзацами.
+function seoParagraphs(html: string): string[] {
+  return html.split(/<\/(?:h2|h3|p|li)>/)
+    .map(part => part.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
 function withCount(text: string, max?: number): ReactNode {
   if (!text) return '—'
   return (
@@ -93,8 +100,8 @@ function CategoryDrawer({ row, onClose, onChanged }: {
   return (
     <Drawer open width={600} title={row.name} onClose={onClose}
             extra={canRegenerate && (
-              <Popconfirm title="Перегенерировать теги категории?"
-                          description="Новые теги сразу запишутся на сайт."
+              <Popconfirm title="Перегенерировать теги и SEO-текст категории?"
+                          description="Новые теги и текст сразу запишутся на сайт."
                           onConfirm={regenerate}>
                 <Button icon={<ReloadOutlined />} loading={busy}>Перегенерировать</Button>
               </Popconfirm>
@@ -115,6 +122,17 @@ function CategoryDrawer({ row, onClose, onChanged }: {
         <Descriptions.Item label="keywords">{withCount(row.meta_keywords)}</Descriptions.Item>
         <Descriptions.Item label="ai_keywords">{withCount(row.ai_keywords)}</Descriptions.Item>
       </Descriptions>
+      <Collapse size="small" style={{ marginTop: 16 }} items={[{
+        key: 'seo',
+        label: row.seo_text
+          ? `SEO-текст · ${seoParagraphs(row.seo_text).join(' ').length} символов`
+          : 'SEO-текст · ещё не написан',
+        children: row.seo_text
+          ? seoParagraphs(row.seo_text).map((part, i) => (
+            <Typography.Paragraph key={i} style={{ marginBottom: 8 }}>{part}</Typography.Paragraph>
+          ))
+          : '—',
+      }]} />
       <Descriptions title="Wordstat" column={1} size="small" bordered style={{ marginTop: 16 }}>
         <Descriptions.Item label="Фраза">{row.seed_phrase || '—'}</Descriptions.Item>
         {candidatesText(row) && (

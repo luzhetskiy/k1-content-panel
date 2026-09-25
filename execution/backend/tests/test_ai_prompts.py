@@ -111,6 +111,14 @@ def test_default_prompts_render_with_real_contexts(db_session):
                           "total_count": 96275, "phrases": ["фанера — 96275"],
                           "alternatives": ["фанерный лист — 198: фанерный лист"],
                           "violations": ["h1 пустой"]},
+        "category_seo_text": {"site_name": "X", "site_description": "описание",
+                              "category_name": "Фанера",
+                              "category_path": "Листовые материалы / Фанера",
+                              "form_nominative": "фанера", "city_in": "в Москве",
+                              "h1": "Фанера в Москве", "keywords": ["фанера купить"],
+                              "phrases": ["фанера — 96275"],
+                              "products": ["Фанера ФК 1525х1525х10"],
+                              "violations": ["в SEO-тексте нет «в Москве»"]},
     }
     for key in PROMPT_KEYS:
         # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из

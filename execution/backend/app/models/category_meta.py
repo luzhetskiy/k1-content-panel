@@ -57,6 +57,12 @@ class CategoryMeta(Base):
     meta_description: Mapped[str] = mapped_column(Text, default="")
     meta_keywords: Mapped[str] = mapped_column(Text, default="")
     ai_keywords: Mapped[str] = mapped_column(Text, default="")
+    # SEO-текст категории (HTML) — в seo_text метатега, а не категории: текст
+    # категории на сайте остаётся нетронутым, откат — очистить поле метатега.
+    seo_text: Mapped[str] = mapped_column(Text, default="")
+    # Названия товаров категории и её подкатегорий для SEO-текста; обновляются
+    # при каждом запуске, который читает дерево. None — ещё не читали.
+    product_names_json: Mapped[list | None] = mapped_column(JsonType, nullable=True)
     # Что стояло в метатеге сайта до ПЕРВОЙ нашей записи; {} — метатега не было.
     previous_json: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     remote_metatag_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -83,6 +89,8 @@ class MetaRun(Base):
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     total: Mapped[int] = mapped_column(Integer, default=0)
+    # tags — теги и SEO-текст; seo_text — только SEO-текст к готовым тегам.
+    mode: Mapped[str] = mapped_column(String(20), default="tags")
     error_text: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

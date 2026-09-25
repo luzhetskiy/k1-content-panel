@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.clock import as_utc, utcnow
 from app.models.category_meta import CategoryMeta, MetaRun
+from app.models.job import JobRun
 
 ACTIVE_STATUSES = ("queued", "in_work")
-# Мягкий лимит задачи категории — 2300 с ≈ 38 минут (CATEGORY_SOFT_LIMIT в
+# Мягкий лимит задачи категории — 3000 с = 50 минут (CATEGORY_SOFT_LIMIT в
 # app/tasks.py); раньше него «зависла» — ложная тревога.
-STUCK_AFTER = timedelta(minutes=40)
+STUCK_AFTER = timedelta(minutes=55)
 # Цепочка может честно стоять в очереди Celery за партией статей часами — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)
@@ -119,5 +120,27 @@ def finish_run_if_complete(db: Session, site_id: int, now: datetime | None = Non
     if run is None or _active_categories(db, site_id):
         return None
     run.finished_at = now or utcnow()
+    db.commit()
+    return run
+
+
+def open_partial_run(db: Session, site_id: int, rows: list[CategoryMeta], user_id: int | None,
+                     mode: str = "tags", params: dict | None = None) -> MetaRun:
+    """Запуск по готовому списку категорий — без чтения дерева и новых фраз:
+    «Перегенерировать ошибки» и дописывание SEO-текстов. Категории встают в
+    очередь; поставить в Celery первую — дело вызывающего."""
+    now = utcnow()
+    run = MetaRun(site_id=site_id, created_by_id=user_id, total=len(rows), started_at=now,
+                  mode=mode)
+    db.add(run)
+    db.flush()
+    job = JobRun(kind="category_meta_run", site_id=site_id, created_by_id=user_id,
+                 params_json={"run_id": run.id, "mode": mode, **(params or {})}, status="running")
+    db.add(job)
+    db.flush()
+    run.job_run_id = job.id
+    for row in rows:
+        row.status, row.error_text, row.wait_until, row.started_at = "queued", "", None, None
+        row.updated_at = now
     db.commit()
     return run

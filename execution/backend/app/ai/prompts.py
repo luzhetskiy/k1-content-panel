@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.models.prompt_template import PromptTemplate
 
 PROMPT_KEYS = ("topics", "article_body", "article_label", "cover", "content_image",
-               "builder_text", "category_seeds", "category_variants", "category_meta")
+               "builder_text", "category_seeds", "category_variants", "category_meta",
+               "category_seo_text")
 
 # Набор переменных, который каждому промпту реально передаёт боевой код
 # (app/tasks.py и app/articles/builder.py). Объявлен здесь, а не разбросан по
@@ -38,6 +39,9 @@ PROMPT_VARIABLES: dict[str, frozenset[str]] = {
                                 "category_path", "form_nominative", "form_buy", "form_price",
                                 "chosen_form", "sell_word", "city_in", "brand", "total_count",
                                 "phrases", "alternatives", "violations"}),
+    "category_seo_text": frozenset({"site_name", "site_description", "category_name",
+                                    "category_path", "form_nominative", "city_in", "h1",
+                                    "keywords", "phrases", "products", "violations"}),
 }
 
 # undefined=StrictUndefined: с дефолтным Undefined опечатка в имени переменной

@@ -17,6 +17,7 @@ from app.api.admin_sites import open_client as open_site_client
 from app.articles.builder import build_for, regenerate_article_for
 from app.articles.topics import filter_duplicates
 from app.category_meta.generator import MetaValidationError, generate_category
+from app.category_meta.products import refresh_product_names
 from app.category_meta.runs import (
     active_run, finish_run_if_complete, next_queued, run_counts,
 )
@@ -31,6 +32,7 @@ from app.models.company import Company, CompanyBatch
 from app.models.category_meta import CategoryMeta, MetaRun
 from app.models.job import JobRun, LlmUsage
 from app.models.site import Site
+from app.seed import seed_prompts
 from app.settings.crypto import SecretDecryptionError
 from app.sites.client import SiteAPIError
 from app.sites.target import make_target
@@ -658,12 +660,14 @@ def retry_company(company_id: int) -> None:
 
 # Худший случай категории: Wordstat до 6 запросов (4 варианта названия + 2 формы)
 # × (30 с × 3 попытки + паузы 2+4) = 576 с; LLM: проверка смысла вариантов +
-# 2 попытки тегов = 3 × 366 с = 1098 с; запись на сайт 3 попытки × (список
-# метатегов 120 с + запись 60 с) + паузы 1+2 = 543 с. Итого ≈ 2217 с.
-CATEGORY_SOFT_LIMIT = 2300
-CATEGORY_HARD_LIMIT = 2480
-# Подготовка запуска: страницы категорий и sitemap (~360 с) + фразы LLM пачками
-# по 60 категорий (366 с на пачку). 2400 с хватает на ~250 категорий.
+# 2 попытки тегов + 2 попытки SEO-текста = 5 × 366 с = 1830 с; запись на сайт
+# 3 попытки × (список метатегов 120 с + запись 60 с) + паузы 1+2 = 543 с.
+# Итого ≈ 2949 с.
+CATEGORY_SOFT_LIMIT = 3000
+CATEGORY_HARD_LIMIT = 3180
+# Подготовка запуска: страницы категорий и sitemap (~360 с) + товары (~180 с на
+# 90 страниц) + фразы LLM пачками по 60 категорий (366 с на пачку). 2400 с
+# хватает на ~200 категорий.
 RUN_START_SOFT_LIMIT = 2400
 RUN_START_HARD_LIMIT = 2580
 # У Redis-брокера visibility_timeout — час: задача с ETA дольше него
@@ -714,7 +718,9 @@ def start_meta_run_sync(db, run_id: int) -> int | None:
     run.job_run_id = job.id
     db.commit()
     try:
-        synced = sync_categories(db, site, open_site_client(db, site))
+        site_client = open_site_client(db, site)
+        synced = sync_categories(db, site, site_client)
+        refresh_product_names(db, site, site_client)
         pending = [row for row in synced.active if needs_seed(row)]
         missing_ids: set[int] = set()
         if pending:
@@ -788,6 +794,7 @@ def generate_category_meta_sync(db, category_id: int,
         return None, (following.id if following and following.id != category_id else None)
 
     run = active_run(db, site.id) if continue_run else None
+    seo_only = run is not None and run.mode == "seo_text"
     own_job: JobRun | None = None
 
     def job_id() -> int:
@@ -805,6 +812,7 @@ def generate_category_meta_sync(db, category_id: int,
 
     stop_run_text = ""
     try:
+        seed_prompts(db)   # промпт SEO-текста появился после первых запусков
         text_client = build_text_client(db)
         generate_category(
             db, category, site,
@@ -812,7 +820,8 @@ def generate_category_meta_sync(db, category_id: int,
             text_client=text_client, site_client=open_site_client(db, site),
             limit=hourly_limit(db), stoplist=stoplist(db),
             record_usage=lambda tp, tc, cost: _record_usage(db, job_id(), text_client.model,
-                                                            tp, tc, cost))
+                                                            tp, tc, cost),
+            seo_only=seo_only)
     except QuotaExceeded as wait:
         db.rollback()
         category.status = "queued"

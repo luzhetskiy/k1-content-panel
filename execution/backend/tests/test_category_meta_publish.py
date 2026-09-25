@@ -5,7 +5,8 @@ from app.models.category_meta import CategoryMeta
 from app.sites.client import SiteAPIError
 
 TAGS = {"title": "Фанера в Москве — купить | Стройбаза", "h1": "Фанера в Москве",
-        "meta_description": "описание", "meta_keywords": "фанера", "ai_keywords": "где купить"}
+        "meta_description": "описание", "meta_keywords": "фанера", "ai_keywords": "где купить",
+        "seo_text": "<h2>Фанера</h2><p>текст</p>"}
 URL = "/catalog/category/listovye-materialy/fanera/"
 
 
@@ -48,7 +49,16 @@ def test_existing_metatag_is_patched_and_previous_saved():
     assert site.created == []
     assert row.remote_metatag_id == 39
     assert row.previous_json == {"title": "", "h1": "Фанера любых видов", "meta_description": "",
-                                 "meta_keywords": "", "ai_keywords": ""}
+                                 "meta_keywords": "", "ai_keywords": "",
+                                 "seo_text": "<p>текст</p>"}
+
+
+def test_only_seo_text_is_patched_when_tags_are_ready():
+    site = FakeSite([{"id": 39, "url": URL, **TAGS, "seo_text": ""}])
+    row = category()
+    row.previous_json = {"title": ""}
+    publish_metatag(site, row, TAGS, ("seo_text",), sleep=lambda s: None)
+    assert site.updated == [(39, {"seo_text": TAGS["seo_text"]})]
 
 
 def test_missing_metatag_is_created():

@@ -40,10 +40,10 @@ def add_run(db, site, minutes_ago=0, **kwargs):
     return run
 
 
-def test_is_stuck_after_40_minutes(db_session, site):
-    # мягкий лимит задачи категории — 2300 с ≈ 38 мин; раньше него «зависла» не показываем
-    assert not is_stuck(add_category(db_session, site, 1, "in_work", started_minutes_ago=39), NOW)
-    assert is_stuck(add_category(db_session, site, 2, "in_work", started_minutes_ago=41), NOW)
+def test_is_stuck_after_55_minutes(db_session, site):
+    # мягкий лимит задачи категории — 3000 с = 50 мин; раньше него «зависла» не показываем
+    assert not is_stuck(add_category(db_session, site, 1, "in_work", started_minutes_ago=54), NOW)
+    assert is_stuck(add_category(db_session, site, 2, "in_work", started_minutes_ago=56), NOW)
     assert not is_stuck(add_category(db_session, site, 3, "done", started_minutes_ago=90), NOW)
 
 

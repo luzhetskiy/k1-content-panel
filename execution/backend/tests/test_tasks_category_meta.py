@@ -56,6 +56,9 @@ def patch_start(monkeypatch, *, answer=None, categories=CATEGORIES, list_error=N
         return categories
 
     client = SimpleNamespace(list_catalog_categories=list_catalog_categories,
+                             list_products=lambda: [
+                                 {"name": "Фанера ФК 10 мм", "categories": ["Фанера"],
+                                  "published": True}],
                              fetch_sitemap_paths=lambda: {"/catalog/listovye-materialy/",
                                                           "/catalog/category/listovye-materialy/fanera/"})
     monkeypatch.setattr("app.tasks.open_site_client", lambda db, site: client)
@@ -81,6 +84,8 @@ def test_start_queues_categories_and_returns_first(db_session, site, run, monkey
     assert first == rows[45].id
     assert (rows[45].status, rows[46].status, rows[70].status) == ("queued", "queued", "skipped")
     assert rows[46].form_buy == "купить ф46"
+    # у контейнера своих товаров нет — ему достаются товары подкатегорий
+    assert rows[45].product_names_json == rows[46].product_names_json == ["Фанера ФК 10 мм"]
     assert run.total == 2 and run.finished_at is None
     job = db_session.get(JobRun, run.job_run_id)
     assert job.kind == "category_meta_run" and job.status == "running"
@@ -239,6 +244,17 @@ def test_already_taken_category_is_skipped_but_chain_continues(db_session, site,
     patch_category(monkeypatch, lambda category, kwargs: pytest.fail("не должна запускаться"))
     assert generate_category_meta_sync(db_session, queued[0].id) == (None, queued[1].id)
     assert generate_category_meta_sync(db_session, queued[0].id, continue_run=False) == (None, None)
+
+
+def test_seo_text_run_passes_mode_and_regenerate_does_not(db_session, site, queued,
+                                                          monkeypatch):
+    db_session.add(MetaRun(site_id=site.id, total=3, mode="seo_text"))
+    db_session.commit()
+    modes = []
+    patch_category(monkeypatch, lambda category, kwargs: modes.append(kwargs["seo_only"]))
+    generate_category_meta_sync(db_session, queued[0].id)
+    generate_category_meta_sync(db_session, queued[1].id, continue_run=False)
+    assert modes == [True, False]
 
 
 def test_regenerate_uses_own_job_and_does_not_continue(db_session, site, queued, monkeypatch):

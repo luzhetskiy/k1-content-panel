@@ -44,6 +44,7 @@ FILEMANAGER_PATH = "/api/v1/filemanager/"
 ADDRESSES_SERVICES_PATH = "/api/v1/addresses-services/"
 CATALOG_CATEGORIES_PATH = "/api/v1/catalog-categories/"
 METATAGS_PATH = "/api/v1/metatags/"
+PRODUCTS_PATH = "/api/v1/products-common/"
 SITEMAP_PATH = "/sitemap.xml"
 
 # Хостинг сайтов отдаёт cookie-заглушку запросам без браузерного User-Agent
@@ -419,6 +420,10 @@ class SiteClient:
 
     def list_catalog_categories(self) -> list[dict]:
         return self._list_all(CATALOG_CATEGORIES_PATH, "список категорий каталога")
+
+    def list_products(self) -> list[dict]:
+        """Все товары: фильтр ?category= сайт игнорирует, page_size — тоже (50)."""
+        return self._list_all(PRODUCTS_PATH, "список товаров")
 
     def list_metatags(self) -> list[dict]:
         """Полный список: фильтр ?url= сайт игнорирует (проверено 2026-09-16)."""

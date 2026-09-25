@@ -18,7 +18,8 @@ from app.ai.text import LLMError
 from app.api.deps import get_current_user, get_db
 from app.category_meta.city import CityFormError, city_in_for
 from app.category_meta.runs import (
-    active_run, is_stale, is_stuck, last_run, last_successful_run, retryable_errors, run_progress,
+    active_run, is_stale, is_stuck, last_run, last_successful_run, open_partial_run,
+    retryable_errors, run_progress,
 )
 from app.clock import utcnow
 from app.models.category_meta import CategoryMeta, MetaRun
@@ -106,6 +107,7 @@ class CategoryOut(BaseModel):
     meta_description: str
     meta_keywords: str
     ai_keywords: str
+    seo_text: str
     previous_json: dict | None
     wait_until: datetime | None
     updated_at: datetime
@@ -150,7 +152,7 @@ def _category_out(site: Site, row: CategoryMeta) -> CategoryOut:
         nominative_count=row.nominative_count, declined_count=row.declined_count,
         total_count=row.total_count, low_demand=row.low_demand, title=row.title, h1=row.h1,
         meta_description=row.meta_description, meta_keywords=row.meta_keywords,
-        ai_keywords=row.ai_keywords, previous_json=row.previous_json,
+        ai_keywords=row.ai_keywords, seo_text=row.seo_text, previous_json=row.previous_json,
         wait_until=row.wait_until, updated_at=row.updated_at)
 
 
@@ -264,19 +266,7 @@ def _start_errors_run(db: Session, site: Site, rows: list[CategoryMeta], user: U
     очередь встают только упавшие и зависшие категории, дальше та же цепочка,
     что у полного обновления (прогресс, ожидание квоты, один слот воркера)."""
     _close_stale_run(db, site)
-    now = utcnow()
-    run = MetaRun(site_id=site.id, created_by_id=user.id, total=len(rows), started_at=now)
-    db.add(run)
-    db.flush()
-    job = JobRun(kind="category_meta_run", site_id=site.id, created_by_id=user.id,
-                 params_json={"run_id": run.id, "errors_only": True}, status="running")
-    db.add(job)
-    db.flush()
-    run.job_run_id = job.id
-    for row in rows:
-        row.status, row.error_text, row.wait_until, row.started_at = "queued", "", None, None
-        row.updated_at = now
-    db.commit()
+    open_partial_run(db, site.id, rows, user.id, params={"errors_only": True})
     enqueue_category_meta(rows[0].id)
 
 

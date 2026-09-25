@@ -1,6 +1,7 @@
 """Запись тегов категории в /api/v1/metatags/ сайта.
 
-Есть метатег с этим url — PATCH пяти полей, нет — POST. seo_text не трогаем.
+Есть метатег с этим url — PATCH полей, нет — POST. Поля — теги с SEO-текстом
+или, при дописывании текста к готовым тегам, один seo_text.
 POST вслепую не повторяется: ReadTimeout после отправки неотличим от «создано,
 ответ не дошёл». Поэтому каждая попытка заново читает список метатегов — если
 предыдущий POST на деле прошёл, следующая попытка найдёт запись и сделает PATCH
@@ -13,7 +14,8 @@ import time
 from app.models.category_meta import CategoryMeta
 from app.sites.client import SiteAPIError
 
-PUBLISHED_FIELDS = ("title", "h1", "meta_description", "meta_keywords", "ai_keywords")
+PUBLISHED_FIELDS = ("title", "h1", "meta_description", "meta_keywords", "ai_keywords",
+                    "seo_text")
 MAX_ATTEMPTS = 3
 
 
@@ -28,8 +30,9 @@ def _find(site_client, url: str) -> dict | None:
     return None
 
 
-def publish_metatag(site_client, category: CategoryMeta, tags: dict, sleep=time.sleep) -> None:
-    fields = {name: tags[name] for name in PUBLISHED_FIELDS}
+def publish_metatag(site_client, category: CategoryMeta, tags: dict,
+                    names: tuple[str, ...] = PUBLISHED_FIELDS, sleep=time.sleep) -> None:
+    fields = {name: tags[name] for name in names}
     for attempt in range(MAX_ATTEMPTS):
         try:
             existing = _find(site_client, category.url)

@@ -8,7 +8,9 @@
   только среди означающих тот же товар: если лидирует не первый вариант, смысл
   проверяет LLM по частым запросам («псб» — это банк);
 - факты Wordstat сохраняются в категорию до вызова LLM — если теги не пройдут
-  проверку, в карточке всё равно видно, что показал Wordstat.
+  проверку, в карточке всё равно видно, что показал Wordstat;
+- SEO-текст пишется отдельным запросом после тегов и уходит на сайт вместе с
+  ними; в режиме «только SEO-текст» теги берутся готовые, на сайт — один seo_text.
 """
 
 from __future__ import annotations
@@ -22,10 +24,11 @@ from app.ai.prompts import render_prompt, resolve_prompt
 from app.category_meta.forms import (
     LOW_DEMAND_THRESHOLD, buy_queries, choose_form, filter_stoplist, forms_differ, sell_word,
 )
-from app.category_meta.publish import publish_metatag
+from app.category_meta.publish import PUBLISHED_FIELDS, publish_metatag
 from app.category_meta.seeds import SeedsError, dedupe_variants
+from app.category_meta.seo_text import clean_seo_html, validate_seo_text
 from app.category_meta.validate import (
-    TAG_FIELDS, MetaContext, clean_keywords, normalize_tags, validate_tags,
+    TAG_FIELDS, MetaContext, clean_keywords, normalize_tags, split_phrases, validate_tags,
 )
 from app.clock import utcnow
 from app.models.category_meta import CategoryMeta
@@ -37,6 +40,7 @@ TOP_KIND = "top"
 EXACT_KIND = "exact"
 TOP_PHRASES = 300        # сколько фраз просить у topRequests
 PROMPT_PHRASES = 100     # сколько из них показать модели
+SEO_TEXT_PHRASES = 30    # сколько частых фраз показать для SEO-текста
 ALTERNATIVE_PHRASES = 15 # сколько частых фраз показать у каждого проигравшего варианта
 VERIFY_PHRASES = 10      # сколько частых фраз показать при проверке смысла варианта
 LLM_ATTEMPTS = 2         # первая попытка + одна с перечнем нарушений
@@ -164,18 +168,23 @@ def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
                       for variant, result in parsed_same if variant is not winner])
 
 
+def _context(category: CategoryMeta, site, facts: WordstatFacts, stoplist: list[str],
+             phrases, alternatives) -> MetaContext:
+    return MetaContext(form_nominative=category.form_nominative, form_buy=category.form_buy,
+                       form_price=category.form_price,
+                       chosen_form=facts.chosen_form, city=site.city, city_in=site.city_in,
+                       brand=site.brand,
+                       wordstat_phrases=[phrase for phrase, _ in phrases]
+                       + [phrase for _, _, alt in alternatives for phrase, _ in alt],
+                       stoplist=stoplist, site_description=site.site_description)
+
+
 def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFacts,
                   text_client, stoplist: list[str], record_usage) -> dict:
     phrases = filter_stoplist(facts.phrases, stoplist)
     alternatives = [(phrase, count, filter_stoplist(alt_phrases, stoplist))
                     for phrase, count, alt_phrases in facts.alternatives]
-    ctx = MetaContext(form_nominative=category.form_nominative, form_buy=category.form_buy,
-                      form_price=category.form_price,
-                      chosen_form=facts.chosen_form, city=site.city, city_in=site.city_in,
-                      brand=site.brand,
-                      wordstat_phrases=[phrase for phrase, _ in phrases]
-                      + [phrase for _, _, alt in alternatives for phrase, _ in alt],
-                      stoplist=stoplist, site_description=site.site_description)
+    ctx = _context(category, site, facts, stoplist, phrases, alternatives)
     template = resolve_prompt(db, "category_meta", site.id)
     violations: list[str] = []
     for _attempt in range(LLM_ATTEMPTS):
@@ -205,11 +214,43 @@ def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFact
     raise MetaValidationError("теги не прошли проверку: " + "; ".join(violations))
 
 
+def generate_seo_text(db: Session, category: CategoryMeta, site, facts: WordstatFacts,
+                      tags: dict, text_client, stoplist: list[str], record_usage) -> str:
+    phrases = filter_stoplist(facts.phrases, stoplist)
+    ctx = _context(category, site, facts, stoplist, phrases, [])
+    template = resolve_prompt(db, "category_seo_text", site.id)
+    violations: list[str] = []
+    for _attempt in range(LLM_ATTEMPTS):
+        result = text_client.complete_json(render_prompt(template, {
+            "site_name": site.name, "site_description": site.site_description,
+            "category_name": category.name, "category_path": category.path or category.name,
+            "form_nominative": category.form_nominative, "city_in": site.city_in,
+            "h1": tags["h1"], "keywords": split_phrases(tags["meta_keywords"]) + split_phrases(tags["ai_keywords"]),
+            "phrases": [f"{phrase} — {count}" for phrase, count in phrases[:SEO_TEXT_PHRASES]],
+            "products": list(category.product_names_json or []),
+            "violations": violations,
+        }))
+        record_usage(result.tokens_prompt, result.tokens_completion, result.cost)
+        if not isinstance(result.data, dict) or not isinstance(result.data.get("seo_text"), str):
+            violations = ["модель вернула не JSON-объект с полем seo_text"]
+            continue
+        seo_text = clean_seo_html(result.data["seo_text"])
+        violations = validate_seo_text(seo_text, ctx)
+        if not violations:
+            return seo_text
+    raise MetaValidationError("SEO-текст не прошёл проверку: " + "; ".join(violations))
+
+
 def generate_category(db: Session, category: CategoryMeta, site, *, wordstat_factory,
                       text_client, site_client, limit: int, stoplist: list[str],
-                      record_usage, now: datetime | None = None) -> None:
+                      record_usage, now: datetime | None = None, seo_only: bool = False) -> None:
+    """seo_only — дописать SEO-текст к готовым тегам: теги не пересчитываются,
+    на сайт уходит только seo_text. Wordstat нужен и здесь (частые фразы для
+    текста), но почти всегда берётся из кеша прошлой генерации тегов."""
     if not category.seed_phrase:
         raise SeedsError("у категории нет поисковой фразы — обновите метатеги проекта целиком")
+    if seo_only and not category.title:
+        raise MetaValidationError("у категории нет тегов — перегенерируйте её целиком")
     facts = collect_facts(db, category, site.wordstat_region_id, wordstat_factory, limit, now,
                           verify=verify_variants_with_llm(db, site, text_client, record_usage))
     category.chosen_form = facts.chosen_form
@@ -219,9 +260,16 @@ def generate_category(db: Session, category: CategoryMeta, site, *, wordstat_fac
     category.low_demand = facts.total_count < LOW_DEMAND_THRESHOLD
     db.commit()
 
-    tags = generate_tags(db, category, site, facts, text_client, stoplist, record_usage)
-    publish_metatag(site_client, category, tags)
-    for name in TAG_FIELDS:
+    if seo_only:
+        tags = {name: getattr(category, name) for name in TAG_FIELDS}
+        names: tuple[str, ...] = ("seo_text",)
+    else:
+        tags = generate_tags(db, category, site, facts, text_client, stoplist, record_usage)
+        names = PUBLISHED_FIELDS
+    tags["seo_text"] = generate_seo_text(db, category, site, facts, tags, text_client, stoplist,
+                                         record_usage)
+    publish_metatag(site_client, category, tags, names)
+    for name in names:
         setattr(category, name, tags[name])
     category.status = "done"
     category.error_text = ""

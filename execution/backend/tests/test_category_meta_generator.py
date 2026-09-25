@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ from sqlalchemy import func, select
 from app.ai.text import JsonResult
 from app.category_meta.generator import MetaValidationError, generate_category
 from app.category_meta.seeds import SeedsError
+from app.category_meta.seo_text import plain_text
 from app.models.category_meta import CategoryMeta, WordstatCall
 from app.models.site import Site
 from app.seed import seed_prompts
@@ -49,28 +51,50 @@ class FakeWordstat:
         return EXACT.get(phrase) or (TOP if phrase == "фанера" else {"totalCount": "3"})
 
 
+def seo_answer(phrase, city_in="в Москве", size=2600):
+    block = f"<h2>{phrase.capitalize()} {city_in}</h2><p>Как выбрать {phrase}: виды и назначение.</p>"
+    html = block
+    while len(plain_text(html)) < size:
+        html += block
+    return {"seo_text": html}
+
+
 class FakeText:
+    """Промпты тегов — в prompts, SEO-текста — в seo_prompts; ответ на SEO-текст
+    по умолчанию собирается из фразы промпта, чтобы тесты тегов его не касались."""
     model = "m"
 
-    def __init__(self, answers):
+    def __init__(self, answers, seo=None):
         self.answers = list(answers)
-        self.prompts = []
+        self.seo = list(seo or [])
+        self.prompts, self.seo_prompts = [], []
 
     def complete_json(self, prompt):
+        if '"seo_text"' in prompt:
+            self.seo_prompts.append(prompt)
+            if self.seo:
+                return JsonResult(self.seo.pop(0), 300, 900, 0.5)
+            phrase = re.search(r"Поисковая фраза: (.+?)\. Город", prompt).group(1)
+            return JsonResult(seo_answer(phrase), 300, 900, 0.5)
         self.prompts.append(prompt)
         return JsonResult(self.answers.pop(0), 100, 50, 0.3)
 
 
 class FakeSite:
-    def __init__(self):
-        self.created = []
+    def __init__(self, metatags=None):
+        self.metatags = list(metatags or [])
+        self.created, self.updated = [], []
 
     def list_metatags(self):
-        return []
+        return self.metatags
 
     def create_metatag(self, url, fields):
         self.created.append((url, fields))
         return {"id": 7}
+
+    def update_metatag(self, metatag_id, fields):
+        self.updated.append((metatag_id, fields))
+        return {"id": metatag_id}
 
 
 @pytest.fixture
@@ -116,7 +140,9 @@ def test_full_cycle_with_form_check(db_session, site, fanera):
     assert fanera.total_count == 96275 and fanera.low_demand is False
     assert fanera.status == "done" and fanera.title == VALID["title"]
     assert site_client.created[0][0] == "/catalog/category/listovye-materialy/fanera/"
-    assert usage == [(100, 50, 0.3)]
+    assert site_client.created[0][1]["seo_text"].startswith("<h2>Фанера в Москве</h2>")
+    assert fanera.seo_text == site_client.created[0][1]["seo_text"]
+    assert usage == [(100, 50, 0.3), (300, 900, 0.5)]
     assert db_session.scalar(select(func.count()).select_from(WordstatCall)) == 3
 
 
@@ -374,3 +400,48 @@ def test_category_without_seed(db_session, site, fanera):
     fanera.seed_phrase = ""
     with pytest.raises(SeedsError):
         run(db_session, fanera, site)
+
+
+def test_seo_text_gets_products_keywords_and_is_retried(db_session, site, fanera):
+    fanera.product_names_json = ["Фанера ФК 1525х1525х10"]
+    short = {"seo_text": "<h2>Фанера в Москве</h2><p>Коротко.</p>"}
+    text = FakeText([VALID], seo=[short, seo_answer("фанера")])
+    site_client = FakeSite()
+    run(db_session, fanera, site, text=text, site_client=site_client)
+    assert len(text.seo_prompts) == 2
+    assert "Фанера ФК 1525х1525х10" in text.seo_prompts[0]
+    assert "фанера влагостойкая" in text.seo_prompts[0]          # keywords страницы
+    assert "Заголовок страницы (h1): Фанера в Москве" in text.seo_prompts[0]
+    assert "- SEO-текст должен быть 2500–3000 символов" in text.seo_prompts[1]
+    assert fanera.status == "done" and fanera.seo_text.startswith("<h2>")
+
+
+def test_bad_seo_text_twice_publishes_nothing(db_session, site, fanera):
+    site_client = FakeSite()
+    with pytest.raises(MetaValidationError) as err:
+        run(db_session, fanera, site, text=FakeText([VALID], seo=[{"x": 1}, {"seo_text": ""}]),
+            site_client=site_client)
+    assert str(err.value).startswith("SEO-текст не прошёл проверку")
+    assert site_client.created == [] and fanera.title == ""
+
+
+def test_seo_only_keeps_tags_and_patches_only_seo_text(db_session, site, fanera):
+    for name, value in VALID.items():
+        setattr(fanera, name, value)
+    db_session.commit()
+    site_client = FakeSite([{"id": 39, "url": fanera.url, **VALID, "seo_text": ""}])
+    fanera.previous_json = {}
+    text = FakeText([])                     # промпт тегов не нужен
+    generate_category(db_session, fanera, site, wordstat_factory=FakeWordstat,
+                      text_client=text, site_client=site_client, limit=100, stoplist=[],
+                      record_usage=lambda *a: None, seo_only=True)
+    assert text.prompts == [] and len(text.seo_prompts) == 1
+    assert site_client.updated == [(39, {"seo_text": fanera.seo_text})]
+    assert fanera.title == VALID["title"] and fanera.status == "done"
+
+
+def test_seo_only_needs_ready_tags(db_session, site, fanera):
+    with pytest.raises(MetaValidationError, match="нет тегов"):
+        generate_category(db_session, fanera, site, wordstat_factory=FakeWordstat,
+                          text_client=FakeText([]), site_client=FakeSite(), limit=100,
+                          stoplist=[], record_usage=lambda *a: None, seo_only=True)

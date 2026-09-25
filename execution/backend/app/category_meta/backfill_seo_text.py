@@ -1,6 +1,7 @@
 """Разовое дописывание SEO-текстов к категориям, у которых теги уже готовы.
 
-Без аргументов — только показывает, что будет сделано:
+Берёт категории с готовыми тегами и без текста — повторный запуск добирает
+пропущенные, не переписывая готовые. Без аргументов — только показывает, что будет сделано:
     python -m app.category_meta.backfill_seo_text
 Запуск по сайтам (id из списка) или по всем:
     python -m app.category_meta.backfill_seo_text --start 3 5
@@ -30,7 +31,8 @@ from app.tasks import enqueue_category_meta
 def ready_categories(db: Session, site_id: int) -> list[CategoryMeta]:
     return list(db.scalars(select(CategoryMeta).where(
         CategoryMeta.site_id == site_id, CategoryMeta.status == "done",
-        CategoryMeta.title != "", CategoryMeta.seed_phrase != "").order_by(CategoryMeta.id)))
+        CategoryMeta.title != "", CategoryMeta.seed_phrase != "",
+        CategoryMeta.seo_text == "").order_by(CategoryMeta.id)))
 
 
 def start_site(db: Session, site: Site) -> str:

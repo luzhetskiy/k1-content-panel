@@ -245,12 +245,14 @@ export interface MetaRunState {
 }
 export interface MetaProject {
   site_id: number; name: string; domain: string; base_url: string
-  city: string; city_in: string; brand: string; wordstat_region_id: number | null
+  city: string; city_in: string; without_city: boolean; brand: string
+  wordstat_region_id: number | null
   updated_at: string | null; last_error: string; error_count: number; retry_count: number
   run: MetaRunState | null
 }
 export interface MetaProjectIn {
-  site_id: number; city: string; city_in: string; brand: string; wordstat_region_id: number
+  site_id: number; city: string; city_in: string; without_city: boolean; brand: string
+  wordstat_region_id: number
 }
 export interface WordstatRegion { id: number; label: string; path: string }
 export interface CategoryMetaRow {

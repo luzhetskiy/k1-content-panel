@@ -94,5 +94,8 @@ class Site(Base):
     # С предлогом: «в Москве», «во Владимире» — предлог зависит от слова, поэтому
     # хранится готовой фразой, а не падежной формой.
     city_in: Mapped[str] = mapped_column(String(200), default="")
+    # «Не добавлять город»: теги пишутся без города (city_in пуст). city тогда
+    # нужен только для поиска региона Wordstat и может быть пустым.
+    meta_without_city: Mapped[bool] = mapped_column(Boolean, default=False)
     wordstat_region_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     brand: Mapped[str] = mapped_column(String(200), default="")

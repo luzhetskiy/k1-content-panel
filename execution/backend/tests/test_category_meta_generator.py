@@ -78,7 +78,7 @@ class FakeText:
         self.seo_reasoning.append(reasoning)
         if self.seo:
             return TextResult(self.seo.pop(0), 300, 900, 0.5)
-        phrase = re.search(r"Поисковая фраза: (.+?)\. Город", prompt).group(1)
+        phrase = re.search(r"Поисковая фраза: (.+?)\.", prompt).group(1)
         return TextResult(seo_answer(phrase), 300, 900, 0.5)
 
 
@@ -402,6 +402,39 @@ def test_category_without_seed(db_session, site, fanera):
     fanera.seed_phrase = ""
     with pytest.raises(SeedsError):
         run(db_session, fanera, site)
+
+
+NO_CITY = {
+    **VALID,
+    "title": "Фанера — купить по выгодной цене | Стройбаза",
+    "h1": "Фанера влагостойкая и ламинированная",
+    "meta_description": ("Фанера по выгодной цене: влагостойкая ФСФ, ФК, ламинированная и "
+                         "берёзовая. Листы 1525×1525 и 2440×1220 мм, толщина 4–40 мм, "
+                         "подберём сорт под задачу."),
+    "meta_keywords": "фанера, фанера купить, фанера москва, фанера оптом дешево",
+    "ai_keywords": ("где купить фанеру, какая фанера подходит для пола, "
+                    "влагостойкая фанера ФСФ цена, фанера ФК или ФСФ что выбрать, "
+                    "ламинированная фанера для опалубки, фанера 18 мм купить, "
+                    "лист фанеры 1525×1525 цена, берёзовая фанера для мебели, "
+                    "фанера с доставкой, сколько стоит лист фанеры"),
+}
+
+
+def test_project_without_city_ignores_stored_city(db_session, site, fanera):
+    """«Не добавлять город»: город, оставшийся в карточке для поиска региона,
+    не попадает ни в промпты, ни в проверку, ни в запасные keywords."""
+    site.meta_without_city = True
+    text = FakeText([NO_CITY], seo=[seo_answer("фанера", city_in="")])
+    site_client = FakeSite()
+    run(db_session, fanera, site, text=text, site_client=site_client)
+    assert fanera.status == "done", fanera.error_text
+    for prompt in (text.prompts[0], text.seo_prompts[0]):
+        assert "Город:" not in prompt and "в Москве" not in prompt
+        assert "Город и регион не упоминай" in prompt
+    assert "Запросов по фразе в регионе за 30 дней" in text.prompts[0]
+    # «фанера москва» — из выдачи Wordstat, её модель вправе взять; отсеивается
+    # только то, чего нет в статистике.
+    assert fanera.meta_keywords == "фанера, фанера купить, фанера москва"
 
 
 def test_seo_text_gets_products_keywords_and_is_retried(db_session, site, fanera):

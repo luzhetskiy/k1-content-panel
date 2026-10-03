@@ -168,11 +168,22 @@ def collect_facts(db: Session, category: CategoryMeta, region_id: int | None,
                       for variant, result in parsed_same if variant is not winner])
 
 
+def _city(site) -> str:
+    return "" if site.meta_without_city else site.city
+
+
+def _city_in(site) -> str:
+    """Пусто у проекта «не добавлять город» — по этому признаку промпты и
+    проверки пишут теги без города. Флаг важнее поля: city_in мог остаться
+    от записи в обход API."""
+    return "" if site.meta_without_city else site.city_in
+
+
 def _context(category: CategoryMeta, site, facts: WordstatFacts, stoplist: list[str],
              phrases, alternatives) -> MetaContext:
     return MetaContext(form_nominative=category.form_nominative, form_buy=category.form_buy,
                        form_price=category.form_price,
-                       chosen_form=facts.chosen_form, city=site.city, city_in=site.city_in,
+                       chosen_form=facts.chosen_form, city=_city(site), city_in=_city_in(site),
                        brand=site.brand,
                        wordstat_phrases=[phrase for phrase, _ in phrases]
                        + [phrase for _, _, alt in alternatives for phrase, _ in alt],
@@ -193,7 +204,7 @@ def generate_tags(db: Session, category: CategoryMeta, site, facts: WordstatFact
             "category_name": category.name, "category_path": category.path or category.name,
             "form_nominative": category.form_nominative, "form_buy": category.form_buy,
             "form_price": category.form_price, "chosen_form": facts.chosen_form,
-            "sell_word": sell_word(phrases), "city_in": site.city_in, "brand": site.brand,
+            "sell_word": sell_word(phrases), "city_in": _city_in(site), "brand": site.brand,
             "total_count": facts.total_count,
             "phrases": [f"{phrase} — {count}" for phrase, count in phrases[:PROMPT_PHRASES]],
             "alternatives": [
@@ -224,7 +235,7 @@ def generate_seo_text(db: Session, category: CategoryMeta, site, facts: Wordstat
         result = text_client.complete_text(render_prompt(template, {
             "site_name": site.name, "site_description": site.site_description,
             "category_name": category.name, "category_path": category.path or category.name,
-            "form_nominative": category.form_nominative, "city_in": site.city_in,
+            "form_nominative": category.form_nominative, "city_in": _city_in(site),
             "h1": tags["h1"],
             "keywords": split_phrases(tags["meta_keywords"]) + split_phrases(tags["ai_keywords"]),
             "phrases": [f"{phrase} — {count}" for phrase, count in phrases[:SEO_TEXT_PHRASES]],

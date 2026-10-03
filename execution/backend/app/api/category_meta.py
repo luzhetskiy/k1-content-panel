@@ -37,8 +37,9 @@ router = APIRouter(prefix="/api/category-meta", tags=["category-meta"])
 
 class ProjectIn(BaseModel):
     site_id: int
-    city: str
+    city: str = ""
     city_in: str = ""        # пусто — определит LLM
+    without_city: bool = False   # не добавлять город в теги
     brand: str
     wordstat_region_id: int
 
@@ -60,6 +61,7 @@ class ProjectOut(BaseModel):
     base_url: str
     city: str
     city_in: str
+    without_city: bool
     brand: str
     wordstat_region_id: int | None
     updated_at: datetime | None      # finished_at последнего успешного запуска
@@ -128,7 +130,8 @@ def _project_out(db: Session, site: Site) -> ProjectOut:
         CategoryMeta.status.in_(("failed", "in_work")))).all()
     return ProjectOut(
         site_id=site.id, name=site.name, domain=site.domain, base_url=site.base_url,
-        city=site.city, city_in=site.city_in, brand=site.brand,
+        city=site.city, city_in=site.city_in, without_city=site.meta_without_city,
+        brand=site.brand,
         wordstat_region_id=site.wordstat_region_id,
         updated_at=successful.finished_at if successful else None,
         last_error=finished.error_text if finished else "",
@@ -165,11 +168,17 @@ def _project_or_404(db: Session, site_id: int) -> Site:
 
 def _apply_project(db: Session, site: Site, payload: ProjectIn) -> None:
     city, brand = payload.city.strip(), payload.brand.strip()
-    if not city or not brand:
-        raise HTTPException(400, "укажите город и бренд")
+    if not brand:
+        raise HTTPException(400, "укажите бренд")
+    if not city and not payload.without_city:
+        raise HTTPException(400, "укажите город или отметьте «Не добавлять город в теги»")
     city_in = " ".join(payload.city_in.split())
+    # Без города в тегах фраза с предлогом не нужна: не тратим вызов LLM, а при
+    # снятии флага она определится заново по текущему городу.
+    if payload.without_city:
+        city_in = ""
     # Город сменили, а поле «с предлогом» осталось прежним — оно от старого города.
-    if not city_in or (city != site.city and city_in == site.city_in):
+    elif not city_in or (city != site.city and city_in == site.city_in):
         try:
             city_in = city_in_for(build_text_client(db, max_retries=1), city)
         except AIConfigError as exc:
@@ -178,6 +187,7 @@ def _apply_project(db: Session, site: Site, payload: ProjectIn) -> None:
             raise HTTPException(502, f"не удалось определить город с предлогом: {exc} — "
                                      f"впишите его вручную") from exc
     site.city, site.city_in, site.brand = city, city_in, brand
+    site.meta_without_city = payload.without_city
     site.wordstat_region_id = payload.wordstat_region_id
     site.meta_enabled = True
 
@@ -239,7 +249,8 @@ def regions(q: str, db: Session = Depends(get_db), _user: User = Depends(get_cur
 
 
 def _project_ready(site: Site) -> bool:
-    return bool(site.city_in and site.brand and site.wordstat_region_id)
+    return bool((site.city_in or site.meta_without_city) and site.brand
+                and site.wordstat_region_id)
 
 
 def _is_busy(db: Session, site: Site) -> bool:

@@ -50,6 +50,11 @@ def test_required_phrase_city_and_headings():
         "в SEO-тексте нет «в Москве»"]
 
 
+def test_without_city_text_needs_no_city():
+    html = "<h2>Фанера</h2><p>" + "Какую фанеру выбрать для пола и стен. " * 70 + "</p>"
+    assert validate_seo_text(html, ctx(city="", city_in="")) == []
+
+
 def test_claims_and_stoplist():
     errors = validate_seo_text(text_of(2600, " Всё в наличии, как в Леруа."), ctx())
     assert "в SEO-тексте утверждение «в наличии», которого нет в описании сайта" in errors

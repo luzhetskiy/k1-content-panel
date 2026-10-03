@@ -92,6 +92,55 @@ def test_update_project_city_change_recomputes_city_in(manager_client, project, 
     assert resp.json()["city_in"] == "в Твери"
 
 
+def no_llm(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise AssertionError("без города в тегах город с предлогом не определяется")
+
+    monkeypatch.setattr("app.api.category_meta.build_text_client", fail)
+
+
+def test_create_project_without_city_skips_city_in(manager_client, site, monkeypatch):
+    """«Не добавлять город»: город не обязателен, LLM не зовётся."""
+    no_llm(monkeypatch)
+    resp = manager_client.post("/api/category-meta/projects",
+                               json=payload(site, city="", city_in="", without_city=True,
+                                            wordstat_region_id=225))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["without_city"], body["city"], body["city_in"]) == (True, "", "")
+
+
+def test_without_city_clears_stored_city_in(manager_client, project, monkeypatch, db_session):
+    no_llm(monkeypatch)
+    resp = manager_client.put(f"/api/category-meta/projects/{project.id}",
+                              json=payload(project, without_city=True))
+    assert (resp.json()["without_city"], resp.json()["city"], resp.json()["city_in"]) == \
+        (True, "Москва", "")
+    db_session.refresh(project)
+    assert project.meta_without_city is True and project.city_in == ""
+
+
+def test_turning_city_back_on_recomputes_city_in(manager_client, project, monkeypatch, db_session):
+    project.meta_without_city, project.city_in = True, ""
+    db_session.commit()
+    monkeypatch.setattr("app.api.category_meta.build_text_client", lambda db, max_retries=None: object())
+    monkeypatch.setattr("app.api.category_meta.city_in_for", lambda client, city: "в Москве")
+    resp = manager_client.put(f"/api/category-meta/projects/{project.id}",
+                              json=payload(project, city_in=""))
+    assert (resp.json()["without_city"], resp.json()["city_in"]) == (False, "в Москве")
+
+
+def test_with_city_city_is_required(manager_client, site):
+    resp = manager_client.post("/api/category-meta/projects", json=payload(site, city=" "))
+    assert resp.status_code == 400
+
+
+def test_run_project_without_city(manager_client, project, enqueued, db_session):
+    project.meta_without_city, project.city, project.city_in = True, "", ""
+    db_session.commit()
+    assert manager_client.post(f"/api/category-meta/projects/{project.id}/run").status_code == 200
+
+
 def test_delete_project_keeps_categories(manager_client, project, db_session):
     db_session.add(CategoryMeta(site_id=project.id, remote_id=46, name="Фанера"))
     db_session.commit()

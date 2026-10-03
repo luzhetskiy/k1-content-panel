@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import dayjs from 'dayjs'
 import {
-  Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message,
+  Button, Card, Checkbox, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message,
 } from 'antd'
 import {
   DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SyncOutlined,
@@ -60,6 +60,7 @@ function ProjectModal({ project, sites, usedSiteIds, onClose, onSaved }: {
   onSaved: () => void
 }) {
   const [form] = Form.useForm<MetaProjectIn>()
+  const withoutCity = Boolean(Form.useWatch('without_city', form))
   const [regions, setRegions] = useState<WordstatRegion[]>([])
   const [searching, setSearching] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -68,10 +69,10 @@ function ProjectModal({ project, sites, usedSiteIds, onClose, onSaved }: {
     if (project) {
       form.setFieldsValue({
         site_id: project.site_id, city: project.city, city_in: project.city_in,
-        brand: project.brand, wordstat_region_id: project.wordstat_region_id ?? undefined,
+        without_city: project.without_city, brand: project.brand, wordstat_region_id: project.wordstat_region_id ?? undefined,
       })
       if (project.wordstat_region_id) {
-        setRegions([{ id: project.wordstat_region_id, label: project.city,
+        setRegions([{ id: project.wordstat_region_id, label: project.city || 'Регион',
                       path: `регион ${project.wordstat_region_id}` }])
       }
     }
@@ -94,7 +95,8 @@ function ProjectModal({ project, sites, usedSiteIds, onClose, onSaved }: {
   const submit = async (values: MetaProjectIn) => {
     setSaving(true)
     try {
-      const payload = { ...values, city_in: values.city_in || '' }
+      const payload = { ...values, city: values.city || '', city_in: values.city_in || '',
+                        without_city: Boolean(values.without_city) }
       if (project) await updateMetaProject(project.site_id, payload)
       else await createMetaProject(payload)
       message.success('Проект сохранён')
@@ -115,9 +117,17 @@ function ProjectModal({ project, sites, usedSiteIds, onClose, onSaved }: {
         <Form.Item name="site_id" label="Сайт" rules={[{ required: true, message: 'Выберите сайт' }]}>
           <Select disabled={Boolean(project)} options={siteOptions} placeholder="Сайт из раздела «Сайты»" />
         </Form.Item>
-        <Form.Item label="Город" required>
+        <Form.Item name="without_city" valuePropName="checked"
+                   extra="Для проектов, где город в тегах не нужен: title, h1, description, keywords и SEO-текст пишутся без города">
+          <Checkbox>Не добавлять город в теги</Checkbox>
+        </Form.Item>
+        <Form.Item label="Город" required={!withoutCity}
+                   extra={withoutCity
+                     ? 'Нужен только для поиска региона Wordstat. Статистика по всей стране — регион «Россия»'
+                     : undefined}>
           <Space.Compact style={{ width: '100%' }}>
-            <Form.Item name="city" noStyle rules={[{ required: true, message: 'Укажите город' }]}>
+            <Form.Item name="city" noStyle
+                       rules={[{ required: !withoutCity, message: 'Укажите город' }]}>
               <Input placeholder="Москва" />
             </Form.Item>
             <Button onClick={findRegions} loading={searching}>Найти регион</Button>
@@ -129,10 +139,12 @@ function ProjectModal({ project, sites, usedSiteIds, onClose, onSaved }: {
           <Select placeholder="Нажмите «Найти регион»"
                   options={regions.map(r => ({ value: r.id, label: `${r.label} — ${r.path}` }))} />
         </Form.Item>
-        <Form.Item name="city_in" label="Город с предлогом"
-                   extra="«в Москве», «во Владимире». Оставьте пустым — определится автоматически">
-          <Input placeholder="в Москве" />
-        </Form.Item>
+        {!withoutCity && (
+          <Form.Item name="city_in" label="Город с предлогом"
+                     extra="«в Москве», «во Владимире». Оставьте пустым — определится автоматически">
+            <Input placeholder="в Москве" />
+          </Form.Item>
+        )}
         <Form.Item name="brand" label="Бренд в конце title"
                    rules={[{ required: true, message: 'Укажите бренд' }]}>
           <Input placeholder="Стройбаза" />
@@ -261,7 +273,15 @@ export default function CategoryMetaPage() {
                 </Space>
               ),
             },
-            { title: 'Город', dataIndex: 'city', width: 140 },
+            {
+              title: 'Город', width: 140,
+              render: (_, p: MetaProject) => (
+                <Space direction="vertical" size={2}>
+                  {p.city && <span>{p.city}</span>}
+                  {p.without_city && <Tag>без города в тегах</Tag>}
+                </Space>
+              ),
+            },
             { title: 'Состояние', width: 280, render: (_, p: MetaProject) => <ProjectState project={p} /> },
             {
               title: '', width: 260,

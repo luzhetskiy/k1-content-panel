@@ -125,6 +125,36 @@ def test_name_forms_are_allowed_keywords():
             "цена аксессуаров для химического анкера в брянске"} <= allowed
 
 
+def no_city_tags(**overrides):
+    tags = {
+        "title": "Фанера — купить по выгодной цене | Стройбаза",
+        "h1": "Фанера влагостойкая и ламинированная",
+        "meta_description": ("Фанера по выгодной цене: влагостойкая ФСФ, ФК, ламинированная "
+                             "и берёзовая. Листы 1525×1525 и 2440×1220 мм, толщина 4–40 мм, "
+                             "подберём сорт под задачу."),
+        "meta_keywords": "фанера, фанера купить, фанера цена, фанера фсф",
+        "ai_keywords": ("где купить фанеру, какая фанера подходит для пола, "
+                        "влагостойкая фанера ФСФ цена, фанера ФК или ФСФ что выбрать, "
+                        "ламинированная фанера для опалубки, фанера 18 мм купить, "
+                        "лист фанеры 1525×1525 цена, берёзовая фанера для мебели, "
+                        "фанера с доставкой, сколько стоит лист фанеры"),
+    }
+    tags.update(overrides)
+    return tags
+
+
+def test_without_city_tags_pass_without_city():
+    """Проект «не добавлять город»: город в тегах не требуется."""
+    assert validate_tags(no_city_tags(), ctx(city="", city_in="")) == []
+
+
+def test_without_city_keywords_fall_back_to_name_and_skip_city_forms():
+    no_city = ctx(city="", city_in="", wordstat_phrases=[])
+    tags = clean_keywords(no_city_tags(meta_keywords="фанера оптом дешево"), no_city)
+    assert tags["meta_keywords"] == "фанера"
+    assert allowed_keywords(no_city) == {"фанера", "купить фанеру"}
+
+
 def test_ai_keywords_count():
     errors = validate_tags(valid_tags(ai_keywords="где купить фанеру"), ctx())
     assert "ai_keywords: нужно 10–15 фраз (1)" in errors

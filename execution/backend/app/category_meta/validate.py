@@ -31,8 +31,8 @@ class MetaContext:
     form_nominative: str
     form_buy: str
     chosen_form: str               # nominative | declined
-    city: str                      # «Москва»
-    city_in: str                   # «в Москве»
+    city: str                      # «Москва»; пусто — проект без города в тегах
+    city_in: str                   # «в Москве»; пусто — проект без города в тегах
     brand: str
     form_price: str = ""           # «цена фанеры»
     wordstat_phrases: list[str] = field(default_factory=list)
@@ -70,19 +70,20 @@ def allowed_keywords(ctx: MetaContext) -> set[str]:
     """Фразы из выдачи Wordstat и формы названия категории — сами по себе и с
     городом. Формы нужны редким товарам: у «аксессуаров для химического анкера»
     выдача пустая, и без них модели нечего было бы написать."""
-    city, city_in = _norm(ctx.city), _norm(ctx.city_in)
+    cities = [_norm(city) for city in (ctx.city, ctx.city_in) if _norm(city)]
     allowed = {_norm(phrase) for phrase in ctx.wordstat_phrases}
     for form in (ctx.form_nominative, ctx.form_buy, ctx.form_price):
         form = _norm(form)
         if form:
-            allowed |= {form, f"{form} {city}", f"{form} {city_in}"}
+            allowed |= {form, *(f"{form} {city}" for city in cities)}
     return allowed
 
 
 def clean_keywords(tags: dict, ctx: MetaContext) -> dict:
     """Фразы не из статистики выкидываются молча: из-за keywords — тега, который
     поисковики почти не учитывают, — категория не должна падать вместе с
-    хорошими title и description. Не осталось ничего — название с городом."""
+    хорошими title и description. Не осталось ничего — название с городом
+    (у проекта без города — просто название)."""
     allowed = allowed_keywords(ctx)
     kept = [phrase for phrase in split_phrases(tags["meta_keywords"]) if _norm(phrase) in allowed]
     if not kept:
@@ -103,7 +104,7 @@ def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
     lead = ctx.form_nominative if ctx.chosen_form == "nominative" else ctx.form_buy
     if not _norm(title).startswith(_norm(lead)):
         errors.append(f"title должен начинаться с «{lead}»")
-    if city_in not in _norm(title):
+    if city_in and city_in not in _norm(title):
         errors.append(f"в title нет «{ctx.city_in}»")
     if "купит" not in _norm(title) and "цен" not in _norm(title):
         errors.append("в title нет продающего слова «купить» или «цена»")
@@ -114,7 +115,7 @@ def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
         errors.append(f"h1 длиннее {H1_MAX} символов ({len(h1)})")
     if _norm(ctx.brand) in _norm(h1):
         errors.append("в h1 не должно быть бренда")
-    if city_in not in _norm(h1):
+    if city_in and city_in not in _norm(h1):
         errors.append(f"в h1 нет «{ctx.city_in}»")
     if _norm(h1) == _norm(title.removesuffix(suffix)):
         errors.append("h1 не должен повторять title")
@@ -122,7 +123,7 @@ def validate_tags(tags: dict, ctx: MetaContext) -> list[str]:
     if not DESCRIPTION_MIN <= len(description) <= DESCRIPTION_MAX:
         errors.append(f"description должен быть {DESCRIPTION_MIN}–{DESCRIPTION_MAX} "
                       f"символов ({len(description)})")
-    if city_in not in _norm(description):
+    if city_in and city_in not in _norm(description):
         errors.append(f"в description нет «{ctx.city_in}»")
     site_description = _norm(ctx.site_description)
     for label, pattern in FORBIDDEN_CLAIMS.items():

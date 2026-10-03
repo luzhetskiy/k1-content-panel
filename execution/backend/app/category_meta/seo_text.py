@@ -57,7 +57,7 @@ def validate_seo_text(seo_html: str, ctx: MetaContext) -> list[str]:
         errors.append("в SEO-тексте нет подзаголовков <h2>")
     if _norm(ctx.form_nominative) not in text:
         errors.append(f"в SEO-тексте нет фразы «{ctx.form_nominative}»")
-    if _norm(ctx.city_in) not in text:
+    if _norm(ctx.city_in) and _norm(ctx.city_in) not in text:
         errors.append(f"в SEO-тексте нет «{ctx.city_in}»")
     site_description = _norm(ctx.site_description)
     for label, pattern in FORBIDDEN_CLAIMS.items():

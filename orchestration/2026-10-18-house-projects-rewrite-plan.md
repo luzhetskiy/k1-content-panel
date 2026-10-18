@@ -10,7 +10,11 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 963 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 964 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+
+**Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
+- `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
+- `clean_model_html` берёт только содержимое блока ``` (в любом регистре), пояснения до и после блока отбрасываются; `validate_rewrite` отклоняет ответ, который не начинается с `<` и не кончается `>` — иначе «Вот текст:» уходил бы на сайт (ревью Task 2, правило — в Task 3).
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -444,6 +448,7 @@ def test_block_before_section_is_none():
 
 def test_clean_model_html_strips_fence():
     assert clean_model_html("```html\n<p>Текст</p>\n```") == "<p>Текст</p>"
+    assert clean_model_html("Вот текст:\n```HTML\n<p>Текст</p>\n```\nГотово.") == "<p>Текст</p>"
     assert clean_model_html("  <p>Текст</p> ") == "<p>Текст</p>"
     assert clean_model_html(None) == ""
 
@@ -452,6 +457,7 @@ def test_plain_text_and_same_html():
     assert plain_text("<p>Дом&nbsp;82 м²</p>\n<ul><li>плита</li></ul>") == "Дом 82 м² плита"
     assert same_html("<p>a</p>\n  <p>b</p>", "<p>a</p><p>b</p>")
     assert same_html("<p>a<br />b</p>", "<p>a<br>b</p>")
+    assert same_html("<p>«a» 11×9 b\xa0c</p>", "<p>&laquo;a&raquo; 11&times;9 b&nbsp;c</p>")
     assert not same_html("<p>a b</p>", "<p>ab</p>")
     assert not same_html("<p>a</p>", "<p>b</p>")
 ````
@@ -486,7 +492,7 @@ from dataclasses import dataclass
 _OPEN_TAG = r"<{tag}\b[^>]*>"
 _CLASS = re.compile(r"""\bclass\s*=\s*(["'])(.*?)\1""", re.DOTALL)
 _DIV_TOKEN = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
-_FENCE = re.compile(r"^```[a-z]*\s*|\s*```$")
+_FENCED = re.compile(r"```[\w-]*[ \t]*\r?\n?(.*?)\r?\n?[ \t]*```", re.DOTALL)
 
 
 @dataclass
@@ -533,8 +539,11 @@ def replace_description(page_html: str, block: DescriptionBlock, new_inner: str)
 
 
 def clean_model_html(raw: object) -> str:
-    """Ответ модели без обёртки ```html — остальное оценивает проверка."""
-    return _FENCE.sub("", str(raw or "").strip()).strip()
+    """Если модель обернула ответ в ```html, берётся только содержимое блока:
+    пояснения до и после него на сайт не попадают. Остальное оценивает проверка."""
+    text = str(raw or "").strip()
+    fenced = _FENCED.search(text)
+    return (fenced.group(1) if fenced else text).strip()
 
 
 def plain_text(fragment: str) -> str:
@@ -542,15 +551,16 @@ def plain_text(fragment: str) -> str:
 
 
 def _normalized(fragment: str) -> str:
+    fragment = html.unescape(fragment)
     fragment = re.sub(r">\s+<", "><", fragment)
     fragment = re.sub(r"<br\s*/?>", "<br>", fragment, flags=re.IGNORECASE)
     return " ".join(fragment.split())
 
 
 def same_html(first: str, second: str) -> bool:
-    """Совпадение без учёта пробелов, переносов между тегами и `<br />` против
-    `<br>`: админка сайта переформатирует разметку при сохранении, и это не
-    правка текста."""
+    """Совпадение без учёта пробелов, переносов между тегами, `<br />` против
+    `<br>` и сущностей (`&nbsp;`, `&laquo;`) против самих символов: админка
+    сайта переформатирует разметку при сохранении, и это не правка текста."""
     return _normalized(first) == _normalized(second)
 ````
 
@@ -571,7 +581,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 3: Проверка рерайта
 
-Объём ±10 %, все числа оригинала (`82.64` = `82,64`, `11×9` — два числа), те же `h3` и пункты списков, теги только из оригинала, совпадение 4-словных цепочек не больше 25 %.
+Ответ — только HTML (без пояснений до и после), объём ±10 %, все числа оригинала (`82.64` = `82,64`, `11×9` — два числа), те же `h3` и пункты списков, теги только из оригинала, совпадение 4-словных цепочек не больше 25 %.
 
 **Files:**
 - Create: `execution/backend/app/house_projects/validate.py`
@@ -628,6 +638,12 @@ def test_structure_changes_are_reported():
     assert any("пунктов в списках [1], в оригинале [2]" in e
                for e in validate_rewrite(ORIGINAL, merged))
     assert list_sizes("<p>без списков</p>") == []
+
+
+def test_text_around_html_is_reported():
+    errors = validate_rewrite(ORIGINAL, "Вот вариант:\n" + REWRITE)
+    assert any("не чистый HTML" in e for e in errors)
+    assert not any("не чистый HTML" in e for e in validate_rewrite(ORIGINAL, " " + REWRITE + "\n"))
 
 
 def test_foreign_tag_is_reported():
@@ -710,6 +726,10 @@ def volume_range(original: str) -> tuple[int, int]:
 
 def validate_rewrite(original: str, rewritten: str) -> list[str]:
     errors: list[str] = []
+    stripped = rewritten.strip()
+    if not (stripped.startswith("<") and stripped.endswith(">")):
+        errors.append("ответ — не чистый HTML: верни только разметку описания, "
+                      "без пояснений до и после")
     low, high = volume_range(original)
     size = len(plain_text(rewritten))
     if not low <= size <= high:
@@ -737,7 +757,7 @@ def validate_rewrite(original: str, rewritten: str) -> list[str]:
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_house_projects_validate.py`
-Expected: `7 passed`
+Expected: `8 passed`
 
 - [ ] **Commit**
 
@@ -2760,7 +2780,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_p
 Expected: `15 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `963 passed`
+Expected: `964 passed`
 
 - [ ] **Commit**
 

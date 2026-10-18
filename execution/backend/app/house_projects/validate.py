@@ -20,9 +20,18 @@ _LIST = re.compile(r"<(ul|ol)\b[^>]*>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
 _WORD = re.compile(r"\w+")
 
 
+def number_spellings(fragment: str) -> dict[str, str]:
+    """Число → как оно впервые написано в тексте: подсказка модели на повтор
+    должна повторять написание оригинала («21,17», а не «21.17»)."""
+    spellings: dict[str, str] = {}
+    for value in _NUMBER.findall(plain_text(fragment)):
+        spellings.setdefault(value.replace(",", "."), value)
+    return spellings
+
+
 def numbers(fragment: str) -> set[str]:
     """«82.64» и «82,64» — одно число; «11×9» — два."""
-    return {value.replace(",", ".") for value in _NUMBER.findall(plain_text(fragment))}
+    return set(number_spellings(fragment))
 
 
 def tag_names(fragment: str) -> set[str]:
@@ -64,9 +73,17 @@ def validate_rewrite(original: str, rewritten: str) -> list[str]:
     size = len(plain_text(rewritten))
     if not low <= size <= high:
         errors.append(f"объём {size} символов без тегов, нужно {low}–{high}")
-    missing = sorted(numbers(original) - numbers(rewritten), key=lambda v: float(v))
+    source, target = number_spellings(original), number_spellings(rewritten)
+    missing = sorted(set(source) - set(target), key=float)
     if missing:
-        errors.append(f"пропали числа из оригинала: {', '.join(missing)} — верни их как были")
+        errors.append(f"пропали числа из оригинала: {', '.join(source[v] for v in missing)} "
+                      f"— верни их как были")
+    # Однозначные числа — пересказ («в 2 уровня» вместо «двухуровневая»), а от
+    # двух цифр и дробные — уже новый факт: «служит 100 лет», лишняя площадь.
+    added = sorted((v for v in set(target) - set(source) if len(v) > 1), key=float)
+    if added:
+        errors.append(f"числа, которых нет в оригинале: {', '.join(target[v] for v in added)} "
+                      f"— не добавляй новых сведений")
     if heading_count(rewritten) != heading_count(original):
         errors.append(f"подзаголовков <h3> {heading_count(rewritten)}, "
                       f"в оригинале {heading_count(original)}")

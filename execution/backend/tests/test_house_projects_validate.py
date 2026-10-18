@@ -28,6 +28,20 @@ def test_missing_number_is_reported():
     assert any("пропали числа из оригинала: 9.06" in e for e in errors)
 
 
+def test_missing_number_keeps_original_spelling():
+    original = ORIGINAL.replace("82.64", "82,64")
+    errors = validate_rewrite(original, REWRITE.replace("82,64 м²", "восемьдесят с лишним м²"))
+    assert any("пропали числа из оригинала: 82,64 —" in e for e in errors)
+
+
+def test_invented_number_is_reported_but_single_digit_is_not():
+    invented = REWRITE.replace("монолитная плита.", "монолитная плита на 100 лет.")
+    assert any("числа, которых нет в оригинале: 100" in e
+               for e in validate_rewrite(ORIGINAL, invented))
+    retold = REWRITE.replace("растут двое детей", "растут 2 детей")
+    assert validate_rewrite(ORIGINAL, retold) == []
+
+
 def test_volume_bounds():
     low, high = volume_range("<p>" + "а" * 100 + "</p>")
     assert (low, high) == (90, 110)

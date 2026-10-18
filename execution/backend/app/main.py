@@ -28,6 +28,7 @@ from app.api import (
     category_meta,
     company_batches,
     company_imports,
+    house_projects,
     jobs,
     sites,
     tasks_status,
@@ -38,7 +39,7 @@ app = FastAPI(title="k1 content service")
 
 for module in (auth, sites, admin_sites, admin_settings, admin_prompts,
                admin_users, article_batches, company_imports, company_batches,
-               jobs, tasks_status, category_meta):
+               jobs, tasks_status, category_meta, house_projects):
     app.include_router(module.router)
 
 

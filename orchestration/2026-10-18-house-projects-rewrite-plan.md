@@ -10,7 +10,7 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 972 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 973 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
 
 **Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
 - `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
@@ -18,7 +18,7 @@
 - `validate_rewrite` ловит новые числа от двух цифр и дробные («служит 100 лет» — новый факт; однозначные вроде «в 2 уровня» — пересказ), а пропавшее число в подсказке модели пишет как в оригинале («21,17», а не «21.17») — ревью Task 3;
 - промпт `project_rewrite` прямо запрещает новые числа (в том числе из названия проекта — «от 80 м²» в описании может не быть), округление и пересчёт, а также склейку пунктов списка — единственный сбой пробы (ревью Task 4);
 - `sync_pages` пропускает страницу, удалённую на сайте во время чтения (404 карточки — это «удалена на сайте», а не провал запуска), и читает один раз страницу, пришедшую в постраничной выдаче дважды (иначе — нарушение уникальности и «непредвиденная ошибка») — ревью Task 6;
-- жизненный цикл запуска (ревью Task 7): признак жизни запуска — последнее изменение ЛЮБОЙ страницы сайта (иначе живой запуск старше 2 часов в паузе между страницами считался оборванным, и повторный старт давал вторую цепочку); `finish_run_if_complete` не закрывает запуск с `total=0` — он ещё синхронизирует, а «нечего делать» закрывает сам старт; `pages_for_mode` не берёт страницу живой задачи (`is_taken`). В Task 9 — поздний старт уже закрытого запуска ничего не делает, страница захватывается одним `UPDATE … WHERE status='queued'`, а не взятая страница цепочку не продолжает (прыжок к следующей давал вторую цепочку). В Task 10 — страница живого запуска, часами ждущая очереди, не показывается «потерянной».
+- жизненный цикл запуска (ревью Task 7): признак жизни запуска — последнее изменение ЛЮБОЙ страницы сайта (иначе живой запуск старше 2 часов в паузе между страницами считался оборванным, и повторный старт давал вторую цепочку); `finish_run_if_complete` не закрывает запуск с `total=0` — он ещё синхронизирует, а «нечего делать» закрывает сам старт; `pages_for_mode` не берёт страницу живой задачи (`is_taken`). В Task 9 — поздний старт уже закрытого запуска ничего не делает, страница захватывается одним `UPDATE … WHERE status='queued'`, а не взятая страница цепочку не продолжает (прыжок к следующей давал вторую цепочку). В Task 10 — страница живого запуска, часами ждущая очереди, не показывается «потерянной», а «Переписать» на странице оборванного запуска сначала закрывает этот запуск (иначе переписанная страница «оживляла» его, и проект стоял занятым ещё два часа).
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -2605,6 +2605,20 @@ def test_rewrite_one_allowed_for_stuck_and_lost(manager_client, db_session, proj
         assert manager_client.post(f"/api/house-projects/pages/{page.id}/rewrite").status_code == 200
 
 
+def test_rewrite_one_aborts_stale_run(manager_client, db_session, project, enqueued):
+    long_ago = utcnow() - STALE_AFTER - timedelta(hours=1)
+    run = ProjectRewriteRun(site_id=project.id, total=2, started_at=long_ago)
+    db_session.add(run)
+    db_session.commit()
+    stuck = add_page(db_session, project, 16, "in_work", started_at=long_ago, updated_at=long_ago)
+    waiting = add_page(db_session, project, 17, "queued", updated_at=long_ago)
+    assert manager_client.post(f"/api/house-projects/pages/{stuck.id}/rewrite").status_code == 200
+    assert run.finished_at is not None and run.error_text.startswith("прерван")
+    assert (stuck.status, waiting.status) == ("queued", "new")
+    body = manager_client.get("/api/house-projects/projects").json()[0]
+    assert body["run"] is None and body["busy"]
+
+
 def test_waiting_pages_of_live_run_are_not_lost(manager_client, db_session, project):
     now = utcnow()
     long_ago = now - STALE_AFTER - timedelta(hours=1)
@@ -2635,7 +2649,7 @@ def test_update_and_delete_project(manager_client, db_session, project, site_cli
 - [ ] **Step 2: Запустить — падает**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_projects.py`
-Expected: FAIL — `3 failed, 13 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
+Expected: FAIL — `3 failed, 14 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
 
 - [ ] **Step 3: Реализация**
 
@@ -2898,8 +2912,14 @@ def rewrite_one(page_id: int, db: Session = Depends(get_db),
     row, site = _page_or_404(db, page_id)
     if row.status == "skipped":
         raise HTTPException(400, f"страница пропущена: {row.skip_reason}")
-    if _run_alive(db, site):
-        raise HTTPException(409, BUSY_TEXT)
+    run = active_run(db, site.id)
+    if run is not None:
+        if not is_stale(db, run):
+            raise HTTPException(409, BUSY_TEXT)
+        # Оборванный запуск закрываем, как перед новым запуском: иначе
+        # переписанная страница своим updated_at «оживила» бы его, и проект
+        # стоял бы занятым ещё два часа без единой работающей задачи.
+        abort_run(db, run, "прерван: цепочка задач оборвалась, страница переписана отдельно")
     if is_taken(row):
         raise HTTPException(409, "страница уже в работе")
     row.status, row.error_text, row.started_at = "queued", "", None
@@ -2936,10 +2956,10 @@ def rewrite_one(page_id: int, db: Session = Depends(get_db),
 - [ ] **Step 4: Запустить — проходит, затем полный регресс**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_projects.py`
-Expected: `16 passed`
+Expected: `17 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `972 passed`
+Expected: `973 passed`
 
 - [ ] **Commit**
 

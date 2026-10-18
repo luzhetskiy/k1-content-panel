@@ -38,11 +38,20 @@ def sync_pages(db: Session, site, site_client, sleep=time.sleep) -> list[HousePr
     """Прямые дети projects_parent_id — в панель; пропавшие — «удалена на сайте».
     Возвращает страницы, которые сейчас есть на сайте."""
     listed = with_retries(lambda: site_client.list_section_pages(""), sleep)
-    children = []
+    children, read = [], set()
     for item in listed:
-        if item.get("id") == site.projects_parent_id:
+        page_id = item.get("id")
+        # Страница может прийти дважды: выдача постраничная, и добавление
+        # страницы на сайте во время чтения сдвигает её.
+        if page_id == site.projects_parent_id or page_id in read:
             continue
-        detail = with_retries(lambda: site_client.get_page(item["id"]), sleep)
+        read.add(page_id)
+        try:
+            detail = with_retries(lambda: site_client.get_page(page_id), sleep)
+        except SiteAPIError as exc:
+            if exc.status_code == 404:
+                continue   # удалили, пока читали список — станет «удалена на сайте»
+            raise
         if detail.get("parent") == site.projects_parent_id:
             children.append(detail)
 
@@ -59,8 +68,9 @@ def sync_pages(db: Session, site, site_client, sleep=time.sleep) -> list[HousePr
         row.title = (detail.get("title") or "")[:300]
         row.url = (detail.get("url") or "")[:500]
         if row.status == "skipped":
-            # Вернулась на сайт или у неё появился блок описания — задача
-            # страницы проверит блок заново.
+            # Вернулась на сайт. Блок описания задача страницы проверит заново,
+            # когда возьмёт её в работу: «Все заново» — всегда, «Только
+            # новые» — если страница ещё не переписывалась.
             row.status = "done" if row.rewritten_at else "new"
             row.skip_reason = ""
             row.updated_at = now

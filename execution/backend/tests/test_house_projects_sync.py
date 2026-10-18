@@ -80,6 +80,27 @@ def test_moved_to_other_parent_is_skipped(db_session, site):
     assert pages_of(db_session, site)[16].skip_reason == NOT_ON_SITE
 
 
+def test_page_deleted_while_reading_is_not_fatal(db_session, site):
+    class Vanishing(FakeSite):
+        def get_page(self, page_id):
+            if page_id == 17:
+                raise SiteAPIError("страница 17: HTTP 404", status_code=404)
+            return super().get_page(page_id)
+
+    client = Vanishing({16: card("а", "/pr/a/", 15), 17: card("б", "/pr/b/", 15)})
+    assert [p.remote_id for p in sync_pages(db_session, site, client)] == [16]
+
+
+def test_page_listed_twice_is_read_once(db_session, site):
+    class Shifted(FakeSite):
+        def list_section_pages(self, prefix):
+            return super().list_section_pages(prefix) * 2
+
+    client = Shifted({16: card("а", "/pr/a/", 15)})
+    assert [p.remote_id for p in sync_pages(db_session, site, client)] == [16]
+    assert client.reads == [16]
+
+
 def test_skipped_without_description_is_rechecked(db_session, site):
     from app.clock import utcnow
 

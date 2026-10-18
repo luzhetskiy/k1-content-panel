@@ -10,7 +10,7 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 973 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 978 тестов зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
 
 **Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
 - `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
@@ -18,7 +18,8 @@
 - `validate_rewrite` ловит новые числа от двух цифр и дробные («служит 100 лет» — новый факт; однозначные вроде «в 2 уровня» — пересказ), а пропавшее число в подсказке модели пишет как в оригинале («21,17», а не «21.17») — ревью Task 3;
 - промпт `project_rewrite` прямо запрещает новые числа (в том числе из названия проекта — «от 80 м²» в описании может не быть), округление и пересчёт, а также склейку пунктов списка — единственный сбой пробы (ревью Task 4);
 - `sync_pages` пропускает страницу, удалённую на сайте во время чтения (404 карточки — это «удалена на сайте», а не провал запуска), и читает один раз страницу, пришедшую в постраничной выдаче дважды (иначе — нарушение уникальности и «непредвиденная ошибка») — ревью Task 6;
-- жизненный цикл запуска (ревью Task 7): признак жизни запуска — последнее изменение ЛЮБОЙ страницы сайта (иначе живой запуск старше 2 часов в паузе между страницами считался оборванным, и повторный старт давал вторую цепочку); `finish_run_if_complete` не закрывает запуск с `total=0` — он ещё синхронизирует, а «нечего делать» закрывает сам старт; `pages_for_mode` не берёт страницу живой задачи (`is_taken`). В Task 9 — поздний старт уже закрытого запуска ничего не делает, страница захватывается одним `UPDATE … WHERE status='queued'`, а не взятая страница цепочку не продолжает (прыжок к следующей давал вторую цепочку). В Task 10 — страница живого запуска, часами ждущая очереди, не показывается «потерянной», а «Переписать» на странице оборванного запуска сначала закрывает этот запуск (иначе переписанная страница «оживляла» его, и проект стоял занятым ещё два часа).
+- жизненный цикл запуска (ревью Task 7): признак жизни запуска — последнее изменение ЛЮБОЙ страницы сайта (иначе живой запуск старше 2 часов в паузе между страницами считался оборванным, и повторный старт давал вторую цепочку); `finish_run_if_complete` не закрывает запуск с `total=0` — он ещё синхронизирует, а «нечего делать» закрывает сам старт; `pages_for_mode` не берёт страницу живой задачи (`is_taken`). В Task 9 — поздний старт уже закрытого запуска ничего не делает, страница захватывается одним `UPDATE … WHERE status='queued'`, а не взятая страница цепочку не продолжает (прыжок к следующей давал вторую цепочку). В Task 10 — страница живого запуска, часами ждущая очереди, не показывается «потерянной», а «Переписать» на странице оборванного запуска сначала закрывает этот запуск (иначе переписанная страница «оживляла» его, и проект стоял занятым ещё два часа);
+- рерайт страницы (ревью Task 8): перед записью страница перечитывается и блок вставляется в свежую (правка описания за время рерайта — `RewriteError`, ничего не пишется; правки остальной страницы сохраняются); после записи страница читается ещё раз, и `rewritten_html` — блок таким, каким его хранит сайт (иначе ответ, потерянный после записи, или своя нормализация разметки сайтом делали наш текст «ручной правкой», и он тихо становился оригиналом); обрыв сети после отправки проверяется по факту; пустой блок описания — «нет блока описания».
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -1656,8 +1657,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 `execution/backend/tests/test_house_projects_rewriter.py`:
 
 ````python
-from types import SimpleNamespace
-
 import pytest
 
 from app.ai.text import TextResult
@@ -1666,6 +1665,7 @@ from app.house_projects.rewriter import NO_DESCRIPTION, RewriteError, rewrite_pa
 from app.models.house_project import HouseProjectPage
 from app.models.site import Site
 from app.seed import seed_prompts
+from app.sites.client import SiteAPIError
 
 ORIGINAL = ("<p>Представляем проект уютного дома площадью 82.64 м², идеально подходящего "
             "для семьи из четырёх человек.</p>"
@@ -1689,9 +1689,13 @@ def page_html(inner):
 
 
 class FakeSite:
-    def __init__(self, inner):
+    def __init__(self, inner, *, store=lambda html: html, patch_error=None,
+                 stored_on_error=True):
         self.text = page_html(inner) if inner is not None else "<p>без блока</p>"
         self.patches = []
+        self.store = store                    # как сайт сохраняет присланный HTML
+        self.patch_error = patch_error        # ошибка PATCH после отправки тела
+        self.stored_on_error = stored_on_error
 
     def get_page(self, page_id):
         return {"id": page_id, "title": "Проект дома из кирпича", "url": "/pr/k/",
@@ -1700,18 +1704,24 @@ class FakeSite:
     def update_page_text(self, page_id, html, *, as_is=False):
         assert as_is
         self.patches.append(html)
-        self.text = html
+        if self.patch_error is None or self.stored_on_error:
+            self.text = self.store(html)
+        if self.patch_error is not None:
+            raise self.patch_error
         return {"id": page_id}
 
 
 class FakeLLM:
-    def __init__(self, *answers):
+    def __init__(self, *answers, during=None):
         self.answers = list(answers)
         self.prompts = []
+        self.during = during      # что происходит на сайте, пока модель пишет
 
     def complete_text(self, prompt, *, reasoning=True):
         assert reasoning is False
         self.prompts.append(prompt)
+        if self.during:
+            self.during()
         return TextResult(self.answers.pop(0), 100, 50, 0.5)
 
 
@@ -1770,8 +1780,10 @@ def test_manual_edit_becomes_new_original(db_session, site, page):
     run(db_session, page, site, client, FakeLLM(GOOD))
     edited = ORIGINAL.replace("82.64", "84.10")
     client.text = page_html(edited)
-    run(db_session, page, site, client, FakeLLM(GOOD.replace("82,64", "84,10")))
+    llm = FakeLLM(GOOD.replace("82,64", "84,10"))
+    run(db_session, page, site, client, llm)
     assert page.original_html == edited
+    assert "84.10" in llm.prompts[0] and page.rewrite_count == 2
 
 
 def test_whitespace_change_is_not_an_edit(db_session, site, page):
@@ -1799,10 +1811,57 @@ def test_two_failures_raise_and_do_not_touch_site(db_session, site, page):
 
 
 def test_page_without_description_is_skipped(db_session, site, page):
-    client, llm = FakeSite(None), FakeLLM()
-    run(db_session, page, site, client, llm)
-    assert (page.status, page.skip_reason) == ("skipped", NO_DESCRIPTION)
-    assert llm.prompts == [] and client.patches == []
+    for client in (FakeSite(None), FakeSite("  <p> </p>  ")):
+        llm = FakeLLM()
+        page.status = "in_work"
+        run(db_session, page, site, client, llm)
+        assert (page.status, page.skip_reason) == ("skipped", NO_DESCRIPTION)
+        assert llm.prompts == [] and client.patches == []
+
+
+def test_rest_of_page_edited_during_rewrite_is_kept(db_session, site, page):
+    client = FakeSite(ORIGINAL)
+
+    def edit_chars():
+        client.text = client.text.replace("Площадь 82", "Площадь 82, гараж")
+
+    run(db_session, page, site, client, FakeLLM(GOOD, during=edit_chars))
+    assert "Площадь 82, гараж" in client.patches[0] and GOOD in client.patches[0]
+
+
+def test_description_edited_during_rewrite_is_not_overwritten(db_session, site, page):
+    client = FakeSite(ORIGINAL)
+
+    def edit_description():
+        client.text = page_html(ORIGINAL.replace("82.64", "84.10"))
+
+    with pytest.raises(RewriteError, match="изменилось во время рерайта"):
+        run(db_session, page, site, client, FakeLLM(GOOD, during=edit_description))
+    assert client.patches == []
+
+
+def test_site_normalized_markup_is_remembered_as_ours(db_session, site, page):
+    client = FakeSite(ORIGINAL, store=lambda html: html.replace("<li>", '<li class="x">'))
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert '<li class="x">' in page.rewritten_html
+    # следующий запуск узнаёт свой текст и переписывает от прежнего оригинала
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert page.original_html == ORIGINAL
+
+
+def test_lost_patch_response_but_text_stored_counts_as_done(db_session, site, page):
+    client = FakeSite(ORIGINAL, patch_error=SiteAPIError("сеть недоступна", status_code=None))
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert (page.status, page.rewritten_html, page.rewrite_count) == ("done", GOOD, 1)
+
+
+def test_patch_failure_leaves_page_untouched(db_session, site, page):
+    for error in (SiteAPIError("сеть недоступна", status_code=None),
+                  SiteAPIError("HTTP 400", status_code=400)):
+        client = FakeSite(ORIGINAL, patch_error=error, stored_on_error=False)
+        with pytest.raises(SiteAPIError):
+            run(db_session, page, site, client, FakeLLM(GOOD))
+        assert (page.rewritten_html, page.rewrite_count, page.rewritten_at) == ("", 0, None)
 ````
 
 - [ ] **Step 2: Запустить — падает**
@@ -1817,10 +1876,16 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.house_projects.rew
 ````python
 """Рерайт описания одной страницы проекта дома.
 
-Порядок: свежая страница с сайта → оригинал (в первый раз — то, что на сайте;
-правка руками после нас — новый оригинал) → LLM → проверка → вставка блока в
-только что прочитанную страницу → PATCH. На сайт уходит только текст,
-прошедший проверку."""
+Порядок: страница с сайта → оригинал (в первый раз — то, что на сайте; правка
+руками после нас — новый оригинал) → LLM → проверка → страница перечитывается
+и блок вставляется в свежую → PATCH → страница читается ещё раз, и наш текст
+запоминается таким, каким его хранит сайт. На сайт уходит только текст,
+прошедший проверку.
+
+Зачем последнее чтение: свой текст на сайте панель узнаёт по `rewritten_html`.
+Если запись прошла, а ответ не дошёл, или сайт хранит разметку иначе, чем мы её
+отправили, наш же рерайт при следующем запуске выглядел бы ручной правкой и
+тихо стал бы новым оригиналом."""
 
 from __future__ import annotations
 
@@ -1836,6 +1901,7 @@ from app.house_projects.markup import (
 from app.house_projects.sync import with_retries
 from app.house_projects.validate import validate_rewrite
 from app.models.house_project import HouseProjectPage
+from app.sites.client import SiteAPIError
 
 LLM_ATTEMPTS = 2     # первая попытка + одна с перечнем нарушений
 NO_DESCRIPTION = "нет блока описания"
@@ -1858,19 +1924,34 @@ def refresh_original(page: HouseProjectPage, current: str) -> None:
         page.original_html = current
 
 
-def rewrite_page(db: Session, page: HouseProjectPage, site, *, site_client, text_client,
-                 record_usage, sleep=time.sleep) -> None:
+def _read_block(site_client, page: HouseProjectPage, sleep):
+    """(карточка страницы, её HTML, блок описания или None)."""
     detail = with_retries(lambda: site_client.get_page(page.remote_id), sleep)
     page_html = detail.get("text") or ""
+    return detail, page_html, find_description(page_html)
+
+
+def _stored_text(site_client, page: HouseProjectPage, sleep) -> str | None:
+    """Описание, каким его сейчас хранит сайт; None — прочитать не удалось."""
+    try:
+        _, _, block = _read_block(site_client, page, sleep)
+    except SiteAPIError:
+        return None
+    return block.inner_html.strip() if block else None
+
+
+def rewrite_page(db: Session, page: HouseProjectPage, site, *, site_client, text_client,
+                 record_usage, sleep=time.sleep) -> None:
+    detail, _, block = _read_block(site_client, page, sleep)
     page.title = (detail.get("title") or page.title)[:300]
     page.url = (detail.get("url") or page.url)[:500]
-    block = find_description(page_html)
-    if block is None:
+    if block is None or not plain_text(block.inner_html):
         page.status, page.skip_reason, page.error_text = "skipped", NO_DESCRIPTION, ""
         page.updated_at = utcnow()
         db.commit()
         return
-    refresh_original(page, block.inner_html.strip())
+    current = block.inner_html.strip()
+    refresh_original(page, current)
     db.commit()
 
     template = resolve_prompt(db, "project_rewrite", site.id)
@@ -1889,11 +1970,27 @@ def rewrite_page(db: Session, page: HouseProjectPage, site, *, site_client, text
     else:
         raise RewriteError("рерайт не прошёл проверку: " + "; ".join(violations))
 
-    new_html = replace_description(page_html, block, candidate)
-    with_retries(lambda: site_client.update_page_text(page.remote_id, new_html, as_is=True),
-                 sleep)
+    # Пока работала модель, страницу могли править в админке: вставляем блок в
+    # свежую страницу, а если поправили само описание — не затираем правку.
+    _, fresh_html, fresh_block = _read_block(site_client, page, sleep)
+    if fresh_block is None or not same_html(fresh_block.inner_html, current):
+        raise RewriteError("описание на сайте изменилось во время рерайта — "
+                           "перепишите страницу ещё раз")
+    new_html = replace_description(fresh_html, fresh_block, candidate)
+    try:
+        with_retries(lambda: site_client.update_page_text(page.remote_id, new_html,
+                                                          as_is=True), sleep)
+    except SiteAPIError as exc:
+        # Сеть оборвалась после отправки — сайт мог текст принять: проверяем по факту.
+        if exc.status_code is not None:
+            raise
+        stored = _stored_text(site_client, page, sleep)
+        if stored is None or not same_html(stored, candidate):
+            raise
+    else:
+        stored = _stored_text(site_client, page, sleep)
     now = utcnow()
-    page.rewritten_html = candidate
+    page.rewritten_html = stored or candidate
     page.rewritten_at = now
     page.rewrite_count += 1
     page.status, page.error_text, page.skip_reason = "done", "", ""
@@ -1904,7 +2001,7 @@ def rewrite_page(db: Session, page: HouseProjectPage, site, *, site_client, text
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_house_projects_rewriter.py`
-Expected: `7 passed`
+Expected: `12 passed`
 
 - [ ] **Commit**
 
@@ -2959,7 +3056,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_p
 Expected: `17 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `973 passed`
+Expected: `978 passed`
 
 - [ ] **Commit**
 
@@ -3697,6 +3794,26 @@ PY
 ```
 
 Expected: `56`. Раскрыть проект — 56 страниц «Ещё не переписана». Открыть карточку выбранной страницы → «Переписать». Через минуту: статус «Переписана», дата, в карточке оригинал и новый текст, объём в пределах ±10 %.
+
+Сверка «записали → прочитали»: блок, который хранит сайт, совпадает с отправленным текстом с точностью до `same_html` — иначе сайт нормализует разметку так, что повтор может принять наш текст за правку:
+
+```bash
+docker compose run --rm -T backend python <<'PY'
+from app.db import SessionLocal
+from app.api.admin_sites import open_client
+from app.house_projects.markup import find_description, same_html
+from app.models.house_project import HouseProjectPage
+from app.models.site import Site
+
+db = SessionLocal()
+page = db.query(HouseProjectPage).filter(HouseProjectPage.rewrite_count > 0).first()
+site = db.get(Site, page.site_id)
+site_text = open_client(db, site).get_page(page.remote_id)["text"]
+print(same_html(find_description(site_text).inner_html, page.rewritten_html))
+PY
+```
+
+Expected: `True`.
 
 - [ ] **Step 4: Проверить страницу на сайте**
 

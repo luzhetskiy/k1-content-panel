@@ -2747,7 +2747,7 @@ def test_update_and_delete_project(manager_client, db_session, project, site_cli
 - [ ] **Step 2: Запустить — падает**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_projects.py`
-Expected: FAIL — `3 failed, 14 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
+Expected: FAIL — `4 failed, 13 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
 
 - [ ] **Step 3: Реализация**
 

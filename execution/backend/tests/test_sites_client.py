@@ -174,6 +174,8 @@ def test_update_page_text_as_is_keeps_comments_and_whitespace(monkeypatch):
     html = "<section>\n<!-- Хар-ки и описание -->\n<p>x</p>\n</section>\n"
     SiteClient("https://x.ru", "token").update_page_text(16, html, as_is=True)
     assert captured["json"] == {"text": html}
+    SiteClient("https://x.ru", "token").update_page_text(16, html)
+    assert captured["json"] == {"text": "<section>\n\n<p>x</p>\n</section>"}
 
 
 def test_fetch_file_resolves_relative_url_against_base(monkeypatch):

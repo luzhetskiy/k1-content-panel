@@ -949,7 +949,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ````diff
 --- a/execution/backend/tests/test_sites_client.py
 +++ b/execution/backend/tests/test_sites_client.py
-@@ -163,6 +163,19 @@ def test_update_page_text_includes_title_and_meta_when_given(monkeypatch):
+@@ -163,6 +163,21 @@ def test_update_page_text_includes_title_and_meta_when_given(monkeypatch):
      }
  
  
@@ -964,6 +964,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 +    html = "<section>\n<!-- Хар-ки и описание -->\n<p>x</p>\n</section>\n"
 +    SiteClient("https://x.ru", "token").update_page_text(16, html, as_is=True)
 +    assert captured["json"] == {"text": html}
++    SiteClient("https://x.ru", "token").update_page_text(16, html)
++    assert captured["json"] == {"text": "<section>\n\n<p>x</p>\n</section>"}
 +
 +
  def test_fetch_file_resolves_relative_url_against_base(monkeypatch):

@@ -99,3 +99,11 @@ class Site(Base):
     meta_without_city: Mapped[bool] = mapped_column(Boolean, default=False)
     wordstat_region_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     brand: Mapped[str] = mapped_column(String(200), default="")
+
+    # --- проекты домов (directions/2026-10-18-house-projects-rewrite-design.md) ---
+    projects_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Родительская staticpage раздела; страницы проектов — её прямые дети.
+    # Url у детей свой (/pr/...), поэтому раздел задаётся id, а не префиксом.
+    projects_parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Название родителя на момент добавления — менеджер сверяет, что не ошибся с id.
+    projects_parent_title: Mapped[str] = mapped_column(String(300), default="")

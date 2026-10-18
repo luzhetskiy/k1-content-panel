@@ -3,6 +3,7 @@ from app.models.category_meta import CategoryMeta, MetaRun, WordstatCache, Words
 from app.models.company import (
     Company, CompanyBatch, CompanyCandidate, CompanyImport, CompanyInfo,
 )
+from app.models.house_project import HouseProjectPage, ProjectRewriteRun
 from app.models.job import JobRun, LlmUsage
 from app.models.prompt_template import PromptTemplate
 from app.models.setting import Setting
@@ -16,6 +17,7 @@ __all__ = [
     "Article", "ArticleBatch", "ArticleImage",
     "CategoryMeta", "MetaRun", "WordstatCache", "WordstatCall",
     "Company", "CompanyBatch", "CompanyCandidate", "CompanyImport", "CompanyInfo",
+    "HouseProjectPage", "ProjectRewriteRun",
     "JobRun", "LlmUsage",
     "PromptTemplate", "Setting", "Site", "User",
 ]

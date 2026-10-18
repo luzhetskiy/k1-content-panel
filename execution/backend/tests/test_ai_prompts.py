@@ -119,6 +119,11 @@ def test_default_prompts_render_with_real_contexts(db_session):
                               "phrases": ["фанера — 96275"],
                               "products": ["Фанера ФК 1525х1525х10"],
                               "violations": ["в SEO-тексте нет «в Москве»"]},
+        "project_rewrite": {"site_name": "X", "tone_of_voice": "тон",
+                            "title": "Проект дома из кирпича от 80 м²",
+                            "description_html": "<p>Дом площадью 82.64 м².</p>",
+                            "char_count": 2180,
+                            "violations": ["пропали числа из оригинала: 9.06"]},
     }
     for key in PROMPT_KEYS:
         # PROMPT_VARIABLES — то, по чему check_template судит о шаблоне из

@@ -38,7 +38,7 @@ def test_admin_lists_global_prompts(admin_client, seeded):
     keys = {item["key"] for item in body if item["site_id"] is None}
     assert keys == {"topics", "article_body", "article_label", "cover", "content_image",
                     "builder_text", "category_seeds", "category_variants", "category_meta",
-                    "category_seo_text"}
+                    "category_seo_text", "project_rewrite"}
 
 
 def test_admin_saves_site_override(admin_client, seeded, db_session, site):

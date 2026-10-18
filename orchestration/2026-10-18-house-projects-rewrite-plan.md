@@ -10,11 +10,12 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 964 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 966 тестов зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
 
 **Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
 - `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
-- `clean_model_html` берёт только содержимое блока ``` (в любом регистре), пояснения до и после блока отбрасываются; `validate_rewrite` отклоняет ответ, который не начинается с `<` и не кончается `>` — иначе «Вот текст:» уходил бы на сайт (ревью Task 2, правило — в Task 3).
+- `clean_model_html` берёт только содержимое блока ``` (в любом регистре), пояснения до и после блока отбрасываются; `validate_rewrite` отклоняет ответ, который не начинается с `<` и не кончается `>` — иначе «Вот текст:» уходил бы на сайт (ревью Task 2, правило — в Task 3);
+- `validate_rewrite` ловит новые числа от двух цифр и дробные («служит 100 лет» — новый факт; однозначные вроде «в 2 уровня» — пересказ), а пропавшее число в подсказке модели пишет как в оригинале («21,17», а не «21.17») — ревью Task 3.
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -581,7 +582,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 3: Проверка рерайта
 
-Ответ — только HTML (без пояснений до и после), объём ±10 %, все числа оригинала (`82.64` = `82,64`, `11×9` — два числа), те же `h3` и пункты списков, теги только из оригинала, совпадение 4-словных цепочек не больше 25 %.
+Ответ — только HTML (без пояснений до и после), объём ±10 %, все числа оригинала (`82.64` = `82,64`, `11×9` — два числа) и никаких новых от двух цифр, те же `h3` и пункты списков, теги только из оригинала, совпадение 4-словных цепочек не больше 25 %.
 
 **Files:**
 - Create: `execution/backend/app/house_projects/validate.py`
@@ -620,6 +621,20 @@ def test_numbers_normalize_comma_and_split_dimensions():
 def test_missing_number_is_reported():
     errors = validate_rewrite(ORIGINAL, REWRITE.replace("9.06", "девять"))
     assert any("пропали числа из оригинала: 9.06" in e for e in errors)
+
+
+def test_missing_number_keeps_original_spelling():
+    original = ORIGINAL.replace("82.64", "82,64")
+    errors = validate_rewrite(original, REWRITE.replace("82,64 м²", "восемьдесят с лишним м²"))
+    assert any("пропали числа из оригинала: 82,64 —" in e for e in errors)
+
+
+def test_invented_number_is_reported_but_single_digit_is_not():
+    invented = REWRITE.replace("монолитная плита.", "монолитная плита на 100 лет.")
+    assert any("числа, которых нет в оригинале: 100" in e
+               for e in validate_rewrite(ORIGINAL, invented))
+    retold = REWRITE.replace("растут двое детей", "растут 2 детей")
+    assert validate_rewrite(ORIGINAL, retold) == []
 
 
 def test_volume_bounds():
@@ -690,9 +705,18 @@ _LIST = re.compile(r"<(ul|ol)\b[^>]*>(.*?)</\1\s*>", re.DOTALL | re.IGNORECASE)
 _WORD = re.compile(r"\w+")
 
 
+def number_spellings(fragment: str) -> dict[str, str]:
+    """Число → как оно впервые написано в тексте: подсказка модели на повтор
+    должна повторять написание оригинала («21,17», а не «21.17»)."""
+    spellings: dict[str, str] = {}
+    for value in _NUMBER.findall(plain_text(fragment)):
+        spellings.setdefault(value.replace(",", "."), value)
+    return spellings
+
+
 def numbers(fragment: str) -> set[str]:
     """«82.64» и «82,64» — одно число; «11×9» — два."""
-    return {value.replace(",", ".") for value in _NUMBER.findall(plain_text(fragment))}
+    return set(number_spellings(fragment))
 
 
 def tag_names(fragment: str) -> set[str]:
@@ -734,9 +758,17 @@ def validate_rewrite(original: str, rewritten: str) -> list[str]:
     size = len(plain_text(rewritten))
     if not low <= size <= high:
         errors.append(f"объём {size} символов без тегов, нужно {low}–{high}")
-    missing = sorted(numbers(original) - numbers(rewritten), key=lambda v: float(v))
+    source, target = number_spellings(original), number_spellings(rewritten)
+    missing = sorted(set(source) - set(target), key=float)
     if missing:
-        errors.append(f"пропали числа из оригинала: {', '.join(missing)} — верни их как были")
+        errors.append(f"пропали числа из оригинала: {', '.join(source[v] for v in missing)} "
+                      f"— верни их как были")
+    # Однозначные числа — пересказ («в 2 уровня» вместо «двухуровневая»), а от
+    # двух цифр и дробные — уже новый факт: «служит 100 лет», лишняя площадь.
+    added = sorted((v for v in set(target) - set(source) if len(v) > 1), key=float)
+    if added:
+        errors.append(f"числа, которых нет в оригинале: {', '.join(target[v] for v in added)} "
+                      f"— не добавляй новых сведений")
     if heading_count(rewritten) != heading_count(original):
         errors.append(f"подзаголовков <h3> {heading_count(rewritten)}, "
                       f"в оригинале {heading_count(original)}")
@@ -757,7 +789,7 @@ def validate_rewrite(original: str, rewritten: str) -> list[str]:
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_house_projects_validate.py`
-Expected: `8 passed`
+Expected: `10 passed`
 
 - [ ] **Commit**
 
@@ -2780,7 +2812,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_p
 Expected: `15 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `964 passed`
+Expected: `966 passed`
 
 - [ ] **Commit**
 

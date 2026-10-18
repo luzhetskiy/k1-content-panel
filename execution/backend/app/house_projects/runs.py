@@ -14,9 +14,9 @@ from app.models.house_project import HouseProjectPage, ProjectRewriteRun
 from app.models.job import JobRun
 
 ACTIVE_STATUSES = ("queued", "in_work")
-# Мягкий лимит задачи страницы — 1200 с (PAGE_SOFT_LIMIT в app/tasks.py);
-# раньше него «зависла» — ложная тревога.
-STUCK_AFTER = timedelta(minutes=25)
+# Жёсткий лимит задачи страницы — 1560 с = 26 минут (PAGE_HARD_LIMIT в
+# app/tasks.py); раньше него «зависла» — ложная тревога.
+STUCK_AFTER = timedelta(minutes=30)
 # Цепочка может честно стоять в очереди Celery за партией статей — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)

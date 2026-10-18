@@ -1479,9 +1479,9 @@ from app.models.house_project import HouseProjectPage, ProjectRewriteRun
 from app.models.job import JobRun
 
 ACTIVE_STATUSES = ("queued", "in_work")
-# Мягкий лимит задачи страницы — 1200 с (PAGE_SOFT_LIMIT в app/tasks.py);
-# раньше него «зависла» — ложная тревога.
-STUCK_AFTER = timedelta(minutes=25)
+# Жёсткий лимит задачи страницы — 1560 с = 26 минут (PAGE_HARD_LIMIT в
+# app/tasks.py); раньше него «зависла» — ложная тревога.
+STUCK_AFTER = timedelta(minutes=30)
 # Цепочка может честно стоять в очереди Celery за партией статей — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)
@@ -2279,7 +2279,7 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
  from app.models.job import JobRun, LlmUsage
  from app.models.site import Site
  from app.seed import seed_prompts
-@@ -891,3 +896,198 @@
+@@ -891,3 +896,199 @@
          enqueue_category_meta(category_id, continue_run=continue_run, countdown=countdown)
      elif following is not None:
          enqueue_category_meta(following)
@@ -2287,10 +2287,11 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 +
 +# --- проекты домов: рерайт описаний (directions/2026-10-18-house-projects-rewrite-design.md) ---
 +
-+# Худший случай страницы: чтение 3 × 60 с + паузы 1+2 = 183 с; LLM 2 попытки ×
-+# 366 с = 732 с; PATCH 3 × 60 с + 3 = 183 с. Итого ≈ 1100 с; обычно — минута.
-+PAGE_SOFT_LIMIT = 1200
-+PAGE_HARD_LIMIT = 1260
++# Худший случай страницы: три чтения (до рерайта, перед записью, после неё) и
++# PATCH — по 3 × 60 с + паузы 1+2 = 183 с, итого 732 с; LLM 2 попытки × 366 с =
++# 732 с. Итого ≈ 1460 с; обычно — минута.
++PAGE_SOFT_LIMIT = 1500
++PAGE_HARD_LIMIT = 1560
 +# Синхронизация — карточка каждой страницы сайта: на stroybaza-samara.ru 265
 +# запросов, 1–2 минуты; запас на медленный сайт и повторы.
 +REWRITE_START_SOFT_LIMIT = 1800

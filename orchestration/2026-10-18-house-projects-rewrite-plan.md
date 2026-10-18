@@ -3796,6 +3796,25 @@ PY
 
 Expected: `56`. Раскрыть проект — 56 страниц «Ещё не переписана». Открыть карточку выбранной страницы → «Переписать». Через минуту: статус «Переписана», дата, в карточке оригинал и новый текст, объём в пределах ±10 %.
 
+**Перед подъёмом воркера** посмотреть очередь Celery: `docker exec execution-redis-1 redis-cli lrange celery 0 -1`. 2026-10-18 там лежало старое `generate_category_meta [81]` — живой воркер записал бы метатеги на боевой сайт. Если очередь не пуста — воркер не поднимать, а выполнить задачу страницы тем же кодом в разовом контейнере:
+
+```bash
+docker compose run --rm -T backend python <<'PY'
+from app.clock import utcnow
+from app.db import SessionLocal
+from app.models.house_project import HouseProjectPage
+from app.tasks import rewrite_project_page_sync
+
+db = SessionLocal()
+page = db.query(HouseProjectPage).filter_by(remote_id=16).one()
+page.status, page.updated_at = "queued", utcnow()
+db.commit()
+rewrite_project_page_sync(db, page.id, continue_run=False)
+db.refresh(page)
+print(page.status, page.error_text, page.rewrite_count)
+PY
+```
+
 Сверка «записали → прочитали»: блок, который хранит сайт, совпадает с отправленным текстом с точностью до `same_html` — иначе сайт нормализует разметку так, что повтор может принять наш текст за правку:
 
 ```bash
@@ -3819,6 +3838,10 @@ Expected: `True`.
 - [ ] **Step 4: Проверить страницу на сайте**
 
 Открыть страницу на сайте: описание новое; характеристики, фото, планировки, кнопки и форма «Рассчитаем стоимость» на месте и работают. Показать владельцу оригинал и новый текст из карточки.
+
+HTML вне блока сравнивать с копией страницы до рерайта **после замены `\r\n` на `\n`**: сайт при сохранении сам переводит переводы строк в CRLF (проверено 2026-10-18), внешне это ничего не меняет.
+
+**Исполнено 2026-10-18** на странице 16 (см. дизайн, «Живая проверка»): все шаги 1–5 прошли.
 
 - [ ] **Step 5: Повтор от оригинала**
 

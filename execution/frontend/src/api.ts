@@ -290,4 +290,43 @@ export const getMetaCategories = (siteId: number) =>
 export const regenerateMetaCategory = (id: number) =>
   api.post<CategoryMetaRow>(`/category-meta/categories/${id}/regenerate`).then(r => r.data)
 
+// --- проекты домов ---
+export type RewriteMode = 'new' | 'all'
+export interface RewriteRunState {
+  id: number; mode: RewriteMode; total: number; done: number; failed: number
+  started_at: string; stale: boolean
+}
+export interface HouseProject {
+  site_id: number; name: string; domain: string; parent_id: number; parent_title: string
+  pages: number; rewritten: number; new_count: number; error_count: number
+  last_rewritten_at: string | null; last_error: string; busy: boolean
+  run: RewriteRunState | null
+}
+export interface HouseProjectIn { site_id: number; parent_id: number }
+export interface HouseProjectPageRow {
+  id: number; remote_id: number; title: string; url: string; page_url: string
+  status: string; skip_reason: string; error_text: string; stuck: boolean
+  rewritten_at: string | null; rewrite_count: number
+  original_chars: number; rewritten_chars: number; updated_at: string
+}
+export interface HouseProjectPageDetail extends HouseProjectPageRow {
+  original_html: string; rewritten_html: string
+}
+export const getHouseProjects = () =>
+  api.get<HouseProject[]>('/house-projects/projects').then(r => r.data)
+export const createHouseProject = (d: HouseProjectIn) =>
+  api.post<HouseProject>('/house-projects/projects', d).then(r => r.data)
+export const updateHouseProject = (siteId: number, d: HouseProjectIn) =>
+  api.put<HouseProject>(`/house-projects/projects/${siteId}`, d).then(r => r.data)
+export const deleteHouseProject = (siteId: number) =>
+  api.delete(`/house-projects/projects/${siteId}`)
+export const runHouseProject = (siteId: number, mode: RewriteMode) =>
+  api.post<HouseProject>(`/house-projects/projects/${siteId}/run`, { mode }).then(r => r.data)
+export const getHouseProjectPages = (siteId: number) =>
+  api.get<HouseProjectPageRow[]>(`/house-projects/projects/${siteId}/pages`).then(r => r.data)
+export const getHouseProjectPage = (id: number) =>
+  api.get<HouseProjectPageDetail>(`/house-projects/pages/${id}`).then(r => r.data)
+export const rewriteHouseProjectPage = (id: number) =>
+  api.post<HouseProjectPageRow>(`/house-projects/pages/${id}/rewrite`).then(r => r.data)
+
 export default api

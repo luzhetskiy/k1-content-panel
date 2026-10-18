@@ -36,3 +36,13 @@ export const CATEGORY_META_STATUS: Record<string, { color: string; label: string
   failed: { color: 'error', label: 'Ошибка' },
   skipped: { color: 'default', label: 'Пропущена' },
 }
+
+/** Статусы страницы в разделе «Проекты домов». */
+export const HOUSE_PROJECT_PAGE_STATUS: Record<string, { color: string; label: string }> = {
+  new: { color: 'default', label: 'Ещё не переписана' },
+  queued: { color: 'default', label: 'В очереди' },
+  in_work: { color: 'processing', label: 'В работе' },
+  done: { color: 'success', label: 'Переписана' },
+  failed: { color: 'error', label: 'Ошибка' },
+  skipped: { color: 'default', label: 'Пропущена' },
+}

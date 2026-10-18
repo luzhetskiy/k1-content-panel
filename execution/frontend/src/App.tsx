@@ -4,7 +4,7 @@ import { ConfigProvider, Layout, Menu, Drawer, Button, Dropdown } from 'antd'
 import {
   FileTextOutlined, HomeOutlined, GlobalOutlined, BulbOutlined,
   SettingOutlined, TeamOutlined, HistoryOutlined, MenuOutlined,
-  CloseOutlined, UserOutlined, NotificationOutlined, TagsOutlined,
+  CloseOutlined, UserOutlined, NotificationOutlined, TagsOutlined, BuildOutlined,
 } from '@ant-design/icons'
 import { useAuth } from './auth'
 import { logout } from './api'
@@ -14,6 +14,7 @@ import BatchPage from './pages/BatchPage'
 import BuildersPage from './pages/BuildersPage'
 import BuilderBatchPage from './pages/BuilderBatchPage'
 import CategoryMetaPage from './pages/CategoryMetaPage'
+import HouseProjectsPage from './pages/HouseProjectsPage'
 import JobsPage from './pages/JobsPage'
 import AdminSitesPage from './pages/AdminSitesPage'
 import AdminPromptsPage from './pages/AdminPromptsPage'
@@ -27,6 +28,7 @@ const navItems = [
   { key: '/articles', label: 'Статьи', icon: <FileTextOutlined />, admin: false },
   { key: '/builders', label: 'Строители', icon: <HomeOutlined />, admin: false },
   { key: '/category-meta', label: 'Метатеги категорий', icon: <TagsOutlined />, admin: false },
+  { key: '/house-projects', label: 'Проекты домов', icon: <BuildOutlined />, admin: false },
   { key: '/jobs', label: 'Журнал', icon: <HistoryOutlined />, admin: false },
   // Сайты/Промпты доступны и менеджеру (require_role("admin", "manager")
   // на бэкенде, app/api/admin_sites.py и app/api/admin_prompts.py) — admin:
@@ -207,6 +209,7 @@ function Shell() {
             <Route path="/builders" element={<BuildersPage />} />
             <Route path="/builders/:id" element={<BuilderBatchPage />} />
             <Route path="/category-meta" element={<CategoryMetaPage />} />
+            <Route path="/house-projects" element={<HouseProjectsPage />} />
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/admin/sites" element={<AdminSitesPage />} />
             <Route path="/admin/prompts" element={<AdminPromptsPage />} />

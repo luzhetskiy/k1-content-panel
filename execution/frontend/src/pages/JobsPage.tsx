@@ -12,6 +12,8 @@ const KIND: Record<string, string> = {
   // оставлено для уже существующих в БД исторических job-записей.
   regenerate_article_images: 'Перегенерация картинок',
   regenerate_article: 'Перегенерация статьи',
+  project_rewrite_run: 'Рерайт проектов домов',
+  project_rewrite_page: 'Рерайт страницы проекта',
 }
 
 export default function JobsPage() {

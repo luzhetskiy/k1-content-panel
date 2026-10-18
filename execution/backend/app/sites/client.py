@@ -230,7 +230,7 @@ class SiteClient:
 
     def update_page_text(self, page_id: int, html: str, *, title: str | None = None,
                          meta_description: str | None = None,
-                         meta_keywords: str | None = None) -> dict:
+                         meta_keywords: str | None = None, as_is: bool = False) -> dict:
         """PATCH тела уже существующей страницы. Используется вне обычного
         потока сборки (build_for создаёт страницу один раз и больше не
         трогает) — для ручного исправления уже опубликованного контента
@@ -245,8 +245,13 @@ class SiteClient:
         менять только текст. regenerate_text — единственный вызывающий,
         которому нужны все четыре поля в одном PATCH: заголовок, meta и
         текст обновляются на сайте атомарно, а не рассинхронизированной
-        парой запросов."""
-        payload = {"text": strip_html_comments(html).strip()}
+        парой запросов.
+
+        as_is=True — HTML уходит без вырезания комментариев и обрезки: рерайт
+        проекта дома (app/house_projects/rewriter.py) меняет на странице один
+        блок, а всё вокруг, включая `<!-- Хар-ки и описание -->`, должно
+        остаться байт в байт."""
+        payload = {"text": html if as_is else strip_html_comments(html).strip()}
         if title is not None:
             payload["title"] = title
         if meta_description is not None:

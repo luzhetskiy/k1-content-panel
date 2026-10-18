@@ -163,6 +163,19 @@ def test_update_page_text_includes_title_and_meta_when_given(monkeypatch):
     }
 
 
+def test_update_page_text_as_is_keeps_comments_and_whitespace(monkeypatch):
+    captured = {}
+
+    def fake_patch(url, **kwargs):
+        captured.update(json=kwargs["json"])
+        return FakeResponse(200, {"id": 16})
+
+    monkeypatch.setattr("app.sites.client.requests.patch", fake_patch)
+    html = "<section>\n<!-- Хар-ки и описание -->\n<p>x</p>\n</section>\n"
+    SiteClient("https://x.ru", "token").update_page_text(16, html, as_is=True)
+    assert captured["json"] == {"text": html}
+
+
 def test_fetch_file_resolves_relative_url_against_base(monkeypatch):
     captured = {}
 

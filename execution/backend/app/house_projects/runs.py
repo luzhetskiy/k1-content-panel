@@ -20,7 +20,6 @@ STUCK_AFTER = timedelta(minutes=25)
 # Цепочка может честно стоять в очереди Celery за партией статей — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)
-MODES = ("new", "all")
 
 
 @dataclass
@@ -42,6 +41,13 @@ def is_lost(page: HouseProjectPage, now: datetime | None = None) -> bool:
     now = now or utcnow()
     return (page.status == "queued" and page.updated_at is not None
             and as_utc(page.updated_at) < now - STALE_AFTER)
+
+
+def is_taken(page: HouseProjectPage, now: datetime | None = None) -> bool:
+    """Страницу сейчас обрабатывает или ждёт живая задача: в очереди или в работе,
+    не зависла и не потерялась."""
+    return (page.status in ACTIVE_STATUSES and not is_stuck(page, now)
+            and not is_lost(page, now))
 
 
 def active_run(db: Session, site_id: int) -> ProjectRewriteRun | None:
@@ -72,9 +78,14 @@ def is_stale(db: Session, run: ProjectRewriteRun, now: datetime | None = None) -
     if run.finished_at is not None:
         return False
     now = now or utcnow()
-    pages = active_pages(db, run.site_id)
-    if any(page.status == "in_work" and not is_stuck(page, now) for page in pages):
+    if any(page.status == "in_work" and not is_stuck(page, now)
+           for page in active_pages(db, run.site_id)):
         return False
+    # Признак жизни — последнее изменение ЛЮБОЙ страницы сайта, а не только
+    # стоящих в очереди: только что переписанная страница из очереди уже ушла,
+    # а следующая честно ждёт слот воркера за партией статей.
+    pages = db.scalars(select(HouseProjectPage).where(
+        HouseProjectPage.site_id == run.site_id)).all()
     moments = [as_utc(run.started_at)] + [as_utc(p.updated_at) for p in pages if p.updated_at]
     return max(moments) < now - STALE_AFTER
 
@@ -86,8 +97,7 @@ def is_busy(db: Session, site_id: int, now: datetime | None = None) -> bool:
     run = active_run(db, site_id)
     if run is not None and not is_stale(db, run, now):
         return True
-    return any(not is_stuck(page, now) and not is_lost(page, now)
-               for page in active_pages(db, site_id))
+    return any(is_taken(page, now) for page in active_pages(db, site_id))
 
 
 def run_counts(db: Session, run: ProjectRewriteRun) -> tuple[int, int]:
@@ -110,12 +120,14 @@ def run_progress(db: Session, run: ProjectRewriteRun, now: datetime | None = Non
 def pages_for_mode(db: Session, site_id: int, mode: str,
                    now: datetime | None = None) -> list[HouseProjectPage]:
     """new — ещё не переписанные, с ошибкой, зависшие и потерянные; all — все,
-    кроме пропущенных."""
-    rows = db.scalars(select(HouseProjectPage).where(
+    кроме пропущенных. Страницу, которую сейчас обрабатывает живая задача, не
+    берёт ни один режим — даже если запуск начат в обход проверки занятости."""
+    now = now or utcnow()
+    rows = [row for row in db.scalars(select(HouseProjectPage).where(
         HouseProjectPage.site_id == site_id, HouseProjectPage.status != "skipped")
-        .order_by(HouseProjectPage.remote_id)).all()
+        .order_by(HouseProjectPage.remote_id)).all() if not is_taken(row, now)]
     if mode == "all":
-        return list(rows)
+        return rows
     return [row for row in rows
             if row.status in ("new", "failed") or is_stuck(row, now) or is_lost(row, now)]
 
@@ -142,9 +154,12 @@ def abort_run(db: Session, run: ProjectRewriteRun, text: str) -> None:
 
 def finish_run_if_complete(db: Session, site_id: int,
                            now: datetime | None = None) -> ProjectRewriteRun | None:
-    """Закрывает открытый запуск, если у сайта не осталось queued/in_work."""
+    """Закрывает открытый запуск, если у сайта не осталось queued/in_work.
+    total == 0 — запуск ещё читает страницы с сайта: закрыть его могла бы чужая
+    задача страницы, закончившая работу в это время. Запуск, которому нечего
+    делать, закрывает сам старт запуска."""
     run = active_run(db, site_id)
-    if run is None or active_pages(db, site_id):
+    if run is None or run.total == 0 or active_pages(db, site_id):
         return None
     run.finished_at = now or utcnow()
     db.commit()

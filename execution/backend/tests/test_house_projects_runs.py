@@ -38,7 +38,8 @@ def test_pages_for_mode(db_session, site):
     add_page(db_session, site, 6, "in_work", started_at=now)
     add_page(db_session, site, 7, "queued", updated_at=now - STALE_AFTER - timedelta(minutes=1))
     assert [p.remote_id for p in pages_for_mode(db_session, site.id, "new")] == [1, 3, 5, 7]
-    assert [p.remote_id for p in pages_for_mode(db_session, site.id, "all")] == [1, 2, 3, 5, 6, 7]
+    # 6 — в работе у живой задачи: её не берёт и «Все заново»
+    assert [p.remote_id for p in pages_for_mode(db_session, site.id, "all")] == [1, 2, 3, 5, 7]
 
 
 def test_is_stuck_and_is_lost(db_session, site):
@@ -84,6 +85,24 @@ def test_stale_run(db_session, site):
     queued.updated_at = now
     db_session.commit()
     assert not is_stale(db_session, run, now)
+
+
+def test_recently_finished_page_keeps_long_run_alive(db_session, site):
+    now = utcnow()
+    run = ProjectRewriteRun(site_id=site.id, total=3, started_at=now - timedelta(hours=3))
+    db_session.add(run)
+    add_page(db_session, site, 1, "done", updated_at=now - timedelta(seconds=30))
+    add_page(db_session, site, 2, "queued", updated_at=now - timedelta(hours=3))
+    assert not is_stale(db_session, run, now)
+    assert is_busy(db_session, site.id, now)
+
+
+def test_syncing_run_is_not_finished_by_other_task(db_session, site):
+    run = ProjectRewriteRun(site_id=site.id, total=0, started_at=utcnow())
+    db_session.add(run)
+    db_session.commit()
+    assert finish_run_if_complete(db_session, site.id) is None
+    assert run.finished_at is None
 
 
 def test_working_page_keeps_run_alive(db_session, site):

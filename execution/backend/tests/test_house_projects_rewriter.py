@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from app.ai.text import TextResult
@@ -8,6 +6,7 @@ from app.house_projects.rewriter import NO_DESCRIPTION, RewriteError, rewrite_pa
 from app.models.house_project import HouseProjectPage
 from app.models.site import Site
 from app.seed import seed_prompts
+from app.sites.client import SiteAPIError
 
 ORIGINAL = ("<p>Представляем проект уютного дома площадью 82.64 м², идеально подходящего "
             "для семьи из четырёх человек.</p>"
@@ -31,9 +30,13 @@ def page_html(inner):
 
 
 class FakeSite:
-    def __init__(self, inner):
+    def __init__(self, inner, *, store=lambda html: html, patch_error=None,
+                 stored_on_error=True):
         self.text = page_html(inner) if inner is not None else "<p>без блока</p>"
         self.patches = []
+        self.store = store                    # как сайт сохраняет присланный HTML
+        self.patch_error = patch_error        # ошибка PATCH после отправки тела
+        self.stored_on_error = stored_on_error
 
     def get_page(self, page_id):
         return {"id": page_id, "title": "Проект дома из кирпича", "url": "/pr/k/",
@@ -42,18 +45,24 @@ class FakeSite:
     def update_page_text(self, page_id, html, *, as_is=False):
         assert as_is
         self.patches.append(html)
-        self.text = html
+        if self.patch_error is None or self.stored_on_error:
+            self.text = self.store(html)
+        if self.patch_error is not None:
+            raise self.patch_error
         return {"id": page_id}
 
 
 class FakeLLM:
-    def __init__(self, *answers):
+    def __init__(self, *answers, during=None):
         self.answers = list(answers)
         self.prompts = []
+        self.during = during      # что происходит на сайте, пока модель пишет
 
     def complete_text(self, prompt, *, reasoning=True):
         assert reasoning is False
         self.prompts.append(prompt)
+        if self.during:
+            self.during()
         return TextResult(self.answers.pop(0), 100, 50, 0.5)
 
 
@@ -112,8 +121,10 @@ def test_manual_edit_becomes_new_original(db_session, site, page):
     run(db_session, page, site, client, FakeLLM(GOOD))
     edited = ORIGINAL.replace("82.64", "84.10")
     client.text = page_html(edited)
-    run(db_session, page, site, client, FakeLLM(GOOD.replace("82,64", "84,10")))
+    llm = FakeLLM(GOOD.replace("82,64", "84,10"))
+    run(db_session, page, site, client, llm)
     assert page.original_html == edited
+    assert "84.10" in llm.prompts[0] and page.rewrite_count == 2
 
 
 def test_whitespace_change_is_not_an_edit(db_session, site, page):
@@ -141,7 +152,54 @@ def test_two_failures_raise_and_do_not_touch_site(db_session, site, page):
 
 
 def test_page_without_description_is_skipped(db_session, site, page):
-    client, llm = FakeSite(None), FakeLLM()
-    run(db_session, page, site, client, llm)
-    assert (page.status, page.skip_reason) == ("skipped", NO_DESCRIPTION)
-    assert llm.prompts == [] and client.patches == []
+    for client in (FakeSite(None), FakeSite("  <p> </p>  ")):
+        llm = FakeLLM()
+        page.status = "in_work"
+        run(db_session, page, site, client, llm)
+        assert (page.status, page.skip_reason) == ("skipped", NO_DESCRIPTION)
+        assert llm.prompts == [] and client.patches == []
+
+
+def test_rest_of_page_edited_during_rewrite_is_kept(db_session, site, page):
+    client = FakeSite(ORIGINAL)
+
+    def edit_chars():
+        client.text = client.text.replace("Площадь 82", "Площадь 82, гараж")
+
+    run(db_session, page, site, client, FakeLLM(GOOD, during=edit_chars))
+    assert "Площадь 82, гараж" in client.patches[0] and GOOD in client.patches[0]
+
+
+def test_description_edited_during_rewrite_is_not_overwritten(db_session, site, page):
+    client = FakeSite(ORIGINAL)
+
+    def edit_description():
+        client.text = page_html(ORIGINAL.replace("82.64", "84.10"))
+
+    with pytest.raises(RewriteError, match="изменилось во время рерайта"):
+        run(db_session, page, site, client, FakeLLM(GOOD, during=edit_description))
+    assert client.patches == []
+
+
+def test_site_normalized_markup_is_remembered_as_ours(db_session, site, page):
+    client = FakeSite(ORIGINAL, store=lambda html: html.replace("<li>", '<li class="x">'))
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert '<li class="x">' in page.rewritten_html
+    # следующий запуск узнаёт свой текст и переписывает от прежнего оригинала
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert page.original_html == ORIGINAL
+
+
+def test_lost_patch_response_but_text_stored_counts_as_done(db_session, site, page):
+    client = FakeSite(ORIGINAL, patch_error=SiteAPIError("сеть недоступна", status_code=None))
+    run(db_session, page, site, client, FakeLLM(GOOD))
+    assert (page.status, page.rewritten_html, page.rewrite_count) == ("done", GOOD, 1)
+
+
+def test_patch_failure_leaves_page_untouched(db_session, site, page):
+    for error in (SiteAPIError("сеть недоступна", status_code=None),
+                  SiteAPIError("HTTP 400", status_code=400)):
+        client = FakeSite(ORIGINAL, patch_error=error, stored_on_error=False)
+        with pytest.raises(SiteAPIError):
+            run(db_session, page, site, client, FakeLLM(GOOD))
+        assert (page.rewritten_html, page.rewrite_count, page.rewritten_at) == ("", 0, None)

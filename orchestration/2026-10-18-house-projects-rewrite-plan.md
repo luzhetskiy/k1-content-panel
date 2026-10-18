@@ -10,13 +10,14 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 966 тестов зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 968 тестов зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
 
 **Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
 - `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
 - `clean_model_html` берёт только содержимое блока ``` (в любом регистре), пояснения до и после блока отбрасываются; `validate_rewrite` отклоняет ответ, который не начинается с `<` и не кончается `>` — иначе «Вот текст:» уходил бы на сайт (ревью Task 2, правило — в Task 3);
 - `validate_rewrite` ловит новые числа от двух цифр и дробные («служит 100 лет» — новый факт; однозначные вроде «в 2 уровня» — пересказ), а пропавшее число в подсказке модели пишет как в оригинале («21,17», а не «21.17») — ревью Task 3;
-- промпт `project_rewrite` прямо запрещает новые числа (в том числе из названия проекта — «от 80 м²» в описании может не быть), округление и пересчёт, а также склейку пунктов списка — единственный сбой пробы (ревью Task 4).
+- промпт `project_rewrite` прямо запрещает новые числа (в том числе из названия проекта — «от 80 м²» в описании может не быть), округление и пересчёт, а также склейку пунктов списка — единственный сбой пробы (ревью Task 4);
+- `sync_pages` пропускает страницу, удалённую на сайте во время чтения (404 карточки — это «удалена на сайте», а не провал запуска), и читает один раз страницу, пришедшую в постраничной выдаче дважды (иначе — нарушение уникальности и «непредвиденная ошибка») — ревью Task 6.
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -1120,6 +1121,27 @@ def test_moved_to_other_parent_is_skipped(db_session, site):
     assert pages_of(db_session, site)[16].skip_reason == NOT_ON_SITE
 
 
+def test_page_deleted_while_reading_is_not_fatal(db_session, site):
+    class Vanishing(FakeSite):
+        def get_page(self, page_id):
+            if page_id == 17:
+                raise SiteAPIError("страница 17: HTTP 404", status_code=404)
+            return super().get_page(page_id)
+
+    client = Vanishing({16: card("а", "/pr/a/", 15), 17: card("б", "/pr/b/", 15)})
+    assert [p.remote_id for p in sync_pages(db_session, site, client)] == [16]
+
+
+def test_page_listed_twice_is_read_once(db_session, site):
+    class Shifted(FakeSite):
+        def list_section_pages(self, prefix):
+            return super().list_section_pages(prefix) * 2
+
+    client = Shifted({16: card("а", "/pr/a/", 15)})
+    assert [p.remote_id for p in sync_pages(db_session, site, client)] == [16]
+    assert client.reads == [16]
+
+
 def test_skipped_without_description_is_rechecked(db_session, site):
     from app.clock import utcnow
 
@@ -1211,11 +1233,20 @@ def sync_pages(db: Session, site, site_client, sleep=time.sleep) -> list[HousePr
     """Прямые дети projects_parent_id — в панель; пропавшие — «удалена на сайте».
     Возвращает страницы, которые сейчас есть на сайте."""
     listed = with_retries(lambda: site_client.list_section_pages(""), sleep)
-    children = []
+    children, read = [], set()
     for item in listed:
-        if item.get("id") == site.projects_parent_id:
+        page_id = item.get("id")
+        # Страница может прийти дважды: выдача постраничная, и добавление
+        # страницы на сайте во время чтения сдвигает её.
+        if page_id == site.projects_parent_id or page_id in read:
             continue
-        detail = with_retries(lambda: site_client.get_page(item["id"]), sleep)
+        read.add(page_id)
+        try:
+            detail = with_retries(lambda: site_client.get_page(page_id), sleep)
+        except SiteAPIError as exc:
+            if exc.status_code == 404:
+                continue   # удалили, пока читали список — станет «удалена на сайте»
+            raise
         if detail.get("parent") == site.projects_parent_id:
             children.append(detail)
 
@@ -1232,8 +1263,9 @@ def sync_pages(db: Session, site, site_client, sleep=time.sleep) -> list[HousePr
         row.title = (detail.get("title") or "")[:300]
         row.url = (detail.get("url") or "")[:500]
         if row.status == "skipped":
-            # Вернулась на сайт или у неё появился блок описания — задача
-            # страницы проверит блок заново.
+            # Вернулась на сайт. Блок описания задача страницы проверит заново,
+            # когда возьмёт её в работу: «Все заново» — всегда, «Только
+            # новые» — если страница ещё не переписывалась.
             row.status = "done" if row.rewritten_at else "new"
             row.skip_reason = ""
             row.updated_at = now
@@ -1249,7 +1281,7 @@ def sync_pages(db: Session, site, site_client, sleep=time.sleep) -> list[HousePr
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_house_projects_sync.py`
-Expected: `7 passed`
+Expected: `9 passed`
 
 - [ ] **Commit**
 
@@ -2815,7 +2847,7 @@ Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_p
 Expected: `15 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `966 passed`
+Expected: `968 passed`
 
 - [ ] **Commit**
 

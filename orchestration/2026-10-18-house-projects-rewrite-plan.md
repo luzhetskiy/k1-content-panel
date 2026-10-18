@@ -10,14 +10,15 @@
 
 **Дизайн:** `directions/2026-10-18-house-projects-rewrite-design.md` — читать перед началом.
 
-**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 968 тестов зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
+**Происхождение кода:** весь код и все тесты этого плана прогнаны до записи плана на копии репозитория от `main` (73e4139): полный регресс бэкенда — 972 теста зелёные, миграция с нуля, откат и `alembic check` на Postgres 16 — без расхождений, `npm run build` (с `tsc`) проходит. Модуль разметки проверен на всех 56 страницах проектов stroybaza-samara.ru (блок найден везде, вставка без изменений возвращает страницу байт в байт), промпт и пороги — на 5 страницах с `openai/gpt-6-luna-pro` (см. дизайн, «Проба до реализации»). Копируйте блоки дословно; если тест не проходит — это дефект реализации или среды, а не повод править тест. Если всё же нашли дефект в самом плане — правка идёт в ДВА места: код и текст плана.
 
 **Доработки по ревью при исполнении (2026-10-18).** Блоки кода ниже обновлены до итогового состояния; что изменилось против первой редакции и почему:
 - `same_html` сравнивает с раскрытыми HTML-сущностями — сайт хранит часть описаний с `&nbsp;` (7 из 56 страниц Самары), и пересохранение редактором (`«` → `&laquo;`) иначе считалось бы ручной правкой и подменяло оригинал нашим рерайтом (ревью Task 2);
 - `clean_model_html` берёт только содержимое блока ``` (в любом регистре), пояснения до и после блока отбрасываются; `validate_rewrite` отклоняет ответ, который не начинается с `<` и не кончается `>` — иначе «Вот текст:» уходил бы на сайт (ревью Task 2, правило — в Task 3);
 - `validate_rewrite` ловит новые числа от двух цифр и дробные («служит 100 лет» — новый факт; однозначные вроде «в 2 уровня» — пересказ), а пропавшее число в подсказке модели пишет как в оригинале («21,17», а не «21.17») — ревью Task 3;
 - промпт `project_rewrite` прямо запрещает новые числа (в том числе из названия проекта — «от 80 м²» в описании может не быть), округление и пересчёт, а также склейку пунктов списка — единственный сбой пробы (ревью Task 4);
-- `sync_pages` пропускает страницу, удалённую на сайте во время чтения (404 карточки — это «удалена на сайте», а не провал запуска), и читает один раз страницу, пришедшую в постраничной выдаче дважды (иначе — нарушение уникальности и «непредвиденная ошибка») — ревью Task 6.
+- `sync_pages` пропускает страницу, удалённую на сайте во время чтения (404 карточки — это «удалена на сайте», а не провал запуска), и читает один раз страницу, пришедшую в постраничной выдаче дважды (иначе — нарушение уникальности и «непредвиденная ошибка») — ревью Task 6;
+- жизненный цикл запуска (ревью Task 7): признак жизни запуска — последнее изменение ЛЮБОЙ страницы сайта (иначе живой запуск старше 2 часов в паузе между страницами считался оборванным, и повторный старт давал вторую цепочку); `finish_run_if_complete` не закрывает запуск с `total=0` — он ещё синхронизирует, а «нечего делать» закрывает сам старт; `pages_for_mode` не берёт страницу живой задачи (`is_taken`). В Task 9 — поздний старт уже закрытого запуска ничего не делает, страница захватывается одним `UPDATE … WHERE status='queued'`, а не взятая страница цепочку не продолжает (прыжок к следующей давал вторую цепочку). В Task 10 — страница живого запуска, часами ждущая очереди, не показывается «потерянной».
 
 **Правки существующих файлов** даны дифами относительно `main` — переносите их построчно (или `git apply`, если дифф скопирован в файл целиком). Новые файлы даны целиком.
 
@@ -1344,7 +1345,8 @@ def test_pages_for_mode(db_session, site):
     add_page(db_session, site, 6, "in_work", started_at=now)
     add_page(db_session, site, 7, "queued", updated_at=now - STALE_AFTER - timedelta(minutes=1))
     assert [p.remote_id for p in pages_for_mode(db_session, site.id, "new")] == [1, 3, 5, 7]
-    assert [p.remote_id for p in pages_for_mode(db_session, site.id, "all")] == [1, 2, 3, 5, 6, 7]
+    # 6 — в работе у живой задачи: её не берёт и «Все заново»
+    assert [p.remote_id for p in pages_for_mode(db_session, site.id, "all")] == [1, 2, 3, 5, 7]
 
 
 def test_is_stuck_and_is_lost(db_session, site):
@@ -1390,6 +1392,24 @@ def test_stale_run(db_session, site):
     queued.updated_at = now
     db_session.commit()
     assert not is_stale(db_session, run, now)
+
+
+def test_recently_finished_page_keeps_long_run_alive(db_session, site):
+    now = utcnow()
+    run = ProjectRewriteRun(site_id=site.id, total=3, started_at=now - timedelta(hours=3))
+    db_session.add(run)
+    add_page(db_session, site, 1, "done", updated_at=now - timedelta(seconds=30))
+    add_page(db_session, site, 2, "queued", updated_at=now - timedelta(hours=3))
+    assert not is_stale(db_session, run, now)
+    assert is_busy(db_session, site.id, now)
+
+
+def test_syncing_run_is_not_finished_by_other_task(db_session, site):
+    run = ProjectRewriteRun(site_id=site.id, total=0, started_at=utcnow())
+    db_session.add(run)
+    db_session.commit()
+    assert finish_run_if_complete(db_session, site.id) is None
+    assert run.finished_at is None
 
 
 def test_working_page_keeps_run_alive(db_session, site):
@@ -1464,7 +1484,6 @@ STUCK_AFTER = timedelta(minutes=25)
 # Цепочка может честно стоять в очереди Celery за партией статей — поэтому
 # «оборвалась» только после двух часов без единого признака жизни.
 STALE_AFTER = timedelta(hours=2)
-MODES = ("new", "all")
 
 
 @dataclass
@@ -1486,6 +1505,13 @@ def is_lost(page: HouseProjectPage, now: datetime | None = None) -> bool:
     now = now or utcnow()
     return (page.status == "queued" and page.updated_at is not None
             and as_utc(page.updated_at) < now - STALE_AFTER)
+
+
+def is_taken(page: HouseProjectPage, now: datetime | None = None) -> bool:
+    """Страницу сейчас обрабатывает или ждёт живая задача: в очереди или в работе,
+    не зависла и не потерялась."""
+    return (page.status in ACTIVE_STATUSES and not is_stuck(page, now)
+            and not is_lost(page, now))
 
 
 def active_run(db: Session, site_id: int) -> ProjectRewriteRun | None:
@@ -1516,9 +1542,14 @@ def is_stale(db: Session, run: ProjectRewriteRun, now: datetime | None = None) -
     if run.finished_at is not None:
         return False
     now = now or utcnow()
-    pages = active_pages(db, run.site_id)
-    if any(page.status == "in_work" and not is_stuck(page, now) for page in pages):
+    if any(page.status == "in_work" and not is_stuck(page, now)
+           for page in active_pages(db, run.site_id)):
         return False
+    # Признак жизни — последнее изменение ЛЮБОЙ страницы сайта, а не только
+    # стоящих в очереди: только что переписанная страница из очереди уже ушла,
+    # а следующая честно ждёт слот воркера за партией статей.
+    pages = db.scalars(select(HouseProjectPage).where(
+        HouseProjectPage.site_id == run.site_id)).all()
     moments = [as_utc(run.started_at)] + [as_utc(p.updated_at) for p in pages if p.updated_at]
     return max(moments) < now - STALE_AFTER
 
@@ -1530,8 +1561,7 @@ def is_busy(db: Session, site_id: int, now: datetime | None = None) -> bool:
     run = active_run(db, site_id)
     if run is not None and not is_stale(db, run, now):
         return True
-    return any(not is_stuck(page, now) and not is_lost(page, now)
-               for page in active_pages(db, site_id))
+    return any(is_taken(page, now) for page in active_pages(db, site_id))
 
 
 def run_counts(db: Session, run: ProjectRewriteRun) -> tuple[int, int]:
@@ -1554,12 +1584,14 @@ def run_progress(db: Session, run: ProjectRewriteRun, now: datetime | None = Non
 def pages_for_mode(db: Session, site_id: int, mode: str,
                    now: datetime | None = None) -> list[HouseProjectPage]:
     """new — ещё не переписанные, с ошибкой, зависшие и потерянные; all — все,
-    кроме пропущенных."""
-    rows = db.scalars(select(HouseProjectPage).where(
+    кроме пропущенных. Страницу, которую сейчас обрабатывает живая задача, не
+    берёт ни один режим — даже если запуск начат в обход проверки занятости."""
+    now = now or utcnow()
+    rows = [row for row in db.scalars(select(HouseProjectPage).where(
         HouseProjectPage.site_id == site_id, HouseProjectPage.status != "skipped")
-        .order_by(HouseProjectPage.remote_id)).all()
+        .order_by(HouseProjectPage.remote_id)).all() if not is_taken(row, now)]
     if mode == "all":
-        return list(rows)
+        return rows
     return [row for row in rows
             if row.status in ("new", "failed") or is_stuck(row, now) or is_lost(row, now)]
 
@@ -1586,9 +1618,12 @@ def abort_run(db: Session, run: ProjectRewriteRun, text: str) -> None:
 
 def finish_run_if_complete(db: Session, site_id: int,
                            now: datetime | None = None) -> ProjectRewriteRun | None:
-    """Закрывает открытый запуск, если у сайта не осталось queued/in_work."""
+    """Закрывает открытый запуск, если у сайта не осталось queued/in_work.
+    total == 0 — запуск ещё читает страницы с сайта: закрыть его могла бы чужая
+    задача страницы, закончившая работу в это время. Запуск, которому нечего
+    делать, закрывает сам старт запуска."""
     run = active_run(db, site_id)
-    if run is None or active_pages(db, site_id):
+    if run is None or run.total == 0 or active_pages(db, site_id):
         return None
     run.finished_at = now or utcnow()
     db.commit()
@@ -1598,7 +1633,7 @@ def finish_run_if_complete(db: Session, site_id: int,
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_house_projects_runs.py`
-Expected: `8 passed`
+Expected: `10 passed`
 
 - [ ] **Commit**
 
@@ -2090,13 +2125,27 @@ def test_single_page_rewrite_has_own_job_and_no_chain(db_session, site, patch):
 
 
 def test_page_taken_by_other_task_is_not_processed_twice(db_session, site, patch):
+    client = FakeSite({16: page_text(), 17: page_text()})
+    patch(client)
+    taken = HouseProjectPage(site_id=site.id, remote_id=16, status="in_work",
+                             started_at=utcnow())
+    waiting = HouseProjectPage(site_id=site.id, remote_id=17, status="queued")
+    db_session.add_all([taken, waiting])
+    db_session.commit()
+    # Цепочку ведёт задача, взявшая страницу 16: прыжок к 17 отсюда дал бы вторую.
+    assert rewrite_project_page_sync(db_session, taken.id) is None
+    assert client.patches == [] and waiting.status == "queued"
+
+
+def test_late_start_of_closed_run_does_nothing(db_session, site, patch):
     client = FakeSite({16: page_text()})
     patch(client)
-    page = HouseProjectPage(site_id=site.id, remote_id=16, status="done")
-    db_session.add(page)
+    run = new_run(db_session, site)
+    run.finished_at, run.error_text = utcnow(), "прерван"
     db_session.commit()
-    assert rewrite_project_page_sync(db_session, page.id) is None
-    assert client.patches == []
+    assert start_rewrite_run_sync(db_session, run.id) is None
+    assert pages(db_session, site) == {}
+    assert run.job_run_id is None
 ````
 
 - [ ] **Step 2: Запустить — падает**
@@ -2111,7 +2160,15 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 ````diff
 --- a/execution/backend/app/tasks.py
 +++ b/execution/backend/app/tasks.py
-@@ -27,9 +27,13 @@ from app.celery_app import celery_app
+@@ -8,6 +8,7 @@
+ from datetime import timedelta
+ 
+ from celery import current_task
++from sqlalchemy import update
+ from celery.exceptions import SoftTimeLimitExceeded
+ 
+ from app.ai.factory import AIConfigError, build_text_client
+@@ -27,9 +28,13 @@
  from app.clock import utcnow
  from app.companies.builder import build_for as build_for_company
  from app.db import SessionLocal
@@ -2125,7 +2182,7 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
  from app.models.job import JobRun, LlmUsage
  from app.models.site import Site
  from app.seed import seed_prompts
-@@ -891,3 +895,188 @@ def generate_category_meta(category_id: int, continue_run: bool = True) -> None:
+@@ -891,3 +896,198 @@
          enqueue_category_meta(category_id, continue_run=continue_run, countdown=countdown)
      elif following is not None:
          enqueue_category_meta(following)
@@ -2171,6 +2228,10 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 +def start_rewrite_run_sync(db, run_id: int) -> int | None:
 +    """Синхронизация страниц и отбор по режиму; возвращает id первой страницы цепочки."""
 +    run = db.get(ProjectRewriteRun, run_id)
++    if run is None or run.finished_at is not None:
++        # Запуск уже закрыт — например, прерван как оборванный, пока это
++        # сообщение ждало слот воркера. Начинать для него цепочку поздно.
++        return None
 +    site = db.get(Site, run.site_id)
 +    job = _start_job(db, "project_rewrite_run", site.id, run.created_by_id,
 +                     {"run_id": run_id, "mode": run.mode})
@@ -2199,7 +2260,11 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 +
 +    first = rewrite_runs.next_queued(db, site.id)
 +    if first is None:
-+        _complete_rewrite_run(db, site.id)
++        # Нечего делать. finish_run_if_complete запуск с total=0 не закрывает
++        # (так выглядит запуск посреди синхронизации) — закрываем здесь.
++        run.finished_at = utcnow()
++        db.commit()
++        _close_rewrite_job(db, run)
 +        return None
 +    return first.id
 +
@@ -2225,12 +2290,19 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 +    if page is None:
 +        return None
 +    site = db.get(Site, page.site_id)
-+    if page.status != "queued":
-+        # Страницу уже взяла другая задача — не обрабатываем дважды, цепочку не рвём.
-+        if not continue_run:
-+            return None
-+        following = rewrite_runs.next_queued(db, site.id)
-+        return following.id if following and following.id != page_id else None
++    # Захват — одним UPDATE с условием: два воркера с одним сообщением не
++    # возьмут страницу оба. Не взяли — её уже обрабатывает другая задача (или
++    # запуск прерван и очередь сброшена), и цепочку ведёт она: прыжок к
++    # следующей странице отсюда запустил бы вторую цепочку.
++    now = utcnow()
++    claimed = db.execute(
++        update(HouseProjectPage)
++        .where(HouseProjectPage.id == page_id, HouseProjectPage.status == "queued")
++        .values(status="in_work", started_at=now, updated_at=now)).rowcount
++    db.commit()
++    if not claimed:
++        return None
++    db.refresh(page)
 +
 +    run = rewrite_runs.active_run(db, site.id) if continue_run else None
 +    own_job: JobRun | None = None
@@ -2242,11 +2314,6 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 +        if own_job is None:
 +            own_job = _start_job(db, "project_rewrite_page", site.id, None, {"page_id": page_id})
 +        return own_job.id
-+
-+    page.status = "in_work"
-+    page.started_at = utcnow()
-+    page.updated_at = utcnow()
-+    db.commit()
 +
 +    stop_run_text = ""
 +    try:
@@ -2319,7 +2386,7 @@ Expected: FAIL — `ImportError: cannot import name 'rewrite_project_page_sync' 
 - [ ] **Step 4: Запустить — проходит**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_tasks_house_projects.py tests/test_tasks.py tests/test_tasks_category_meta.py`
-Expected: все зелёные (`9 passed` в новом файле)
+Expected: все зелёные (`10 passed` в новом файле)
 
 - [ ] **Commit**
 
@@ -2538,6 +2605,19 @@ def test_rewrite_one_allowed_for_stuck_and_lost(manager_client, db_session, proj
         assert manager_client.post(f"/api/house-projects/pages/{page.id}/rewrite").status_code == 200
 
 
+def test_waiting_pages_of_live_run_are_not_lost(manager_client, db_session, project):
+    now = utcnow()
+    long_ago = now - STALE_AFTER - timedelta(hours=1)
+    db_session.add(ProjectRewriteRun(site_id=project.id, total=2, started_at=long_ago))
+    db_session.commit()
+    add_page(db_session, project, 16, "done", rewritten_at=now, updated_at=now)
+    add_page(db_session, project, 17, "queued", updated_at=long_ago)
+    body = manager_client.get("/api/house-projects/projects").json()[0]
+    assert (body["busy"], body["error_count"], body["run"]["stale"]) == (True, 0, False)
+    rows = manager_client.get(f"/api/house-projects/projects/{project.id}/pages").json()
+    assert [row["stuck"] for row in rows] == [False, False]
+
+
 def test_update_and_delete_project(manager_client, db_session, project, site_client, enqueued):
     resp = manager_client.put(f"/api/house-projects/projects/{project.id}",
                               json={"site_id": project.id, "parent_id": 40})
@@ -2555,7 +2635,7 @@ def test_update_and_delete_project(manager_client, db_session, project, site_cli
 - [ ] **Step 2: Запустить — падает**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_projects.py`
-Expected: FAIL — `3 failed, 12 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
+Expected: FAIL — `3 failed, 13 errors`: у тестов с подменой `ModuleNotFoundError: No module named 'app.api.house_projects'`, у остальных 404 вместо ответов раздела (`assert 404 == 401`)
 
 - [ ] **Step 3: Реализация**
 
@@ -2582,8 +2662,8 @@ from app.api.deps import get_current_user, get_db
 from app.clock import utcnow
 from app.house_projects.markup import plain_text
 from app.house_projects.runs import (
-    abort_run, active_run, is_busy, is_lost, is_stale, is_stuck, last_run, pages_for_mode,
-    run_progress,
+    abort_run, active_run, is_busy, is_lost, is_stale, is_stuck, is_taken, last_run,
+    pages_for_mode, run_progress,
 )
 from app.models.house_project import HouseProjectPage, ProjectRewriteRun
 from app.models.site import Site
@@ -2654,6 +2734,17 @@ class PageDetailOut(PageOut):
     rewritten_html: str
 
 
+def _run_alive(db: Session, site: Site) -> bool:
+    run = active_run(db, site.id)
+    return run is not None and not is_stale(db, run)
+
+
+def _stuck(row: HouseProjectPage, run_alive: bool) -> bool:
+    """Зависла в работе или потерялась в очереди. Во время живого запуска
+    страница честно ждёт своей очереди часами — потерянной она не считается."""
+    return is_stuck(row) or (is_lost(row) and not run_alive)
+
+
 def _project_out(db: Session, site: Site) -> ProjectOut:
     run = active_run(db, site.id)
     run_out = None
@@ -2662,6 +2753,7 @@ def _project_out(db: Session, site: Site) -> ProjectOut:
         run_out = RunOut(id=run.id, mode=run.mode, total=progress.total, done=progress.done,
                          failed=progress.failed, started_at=run.started_at,
                          stale=progress.stale)
+    run_alive = run_out is not None and not run_out.stale
     rows = db.scalars(select(HouseProjectPage).where(
         HouseProjectPage.site_id == site.id, HouseProjectPage.status != "skipped")).all()
     dates = [row.rewritten_at for row in rows if row.rewritten_at is not None]
@@ -2671,19 +2763,18 @@ def _project_out(db: Session, site: Site) -> ProjectOut:
         parent_id=site.projects_parent_id, parent_title=site.projects_parent_title,
         pages=len(rows), rewritten=len(dates),
         new_count=len(pages_for_mode(db, site.id, "new")),
-        error_count=sum(1 for row in rows
-                        if row.status == "failed" or is_stuck(row) or is_lost(row)),
+        error_count=sum(1 for row in rows if row.status == "failed" or _stuck(row, run_alive)),
         last_rewritten_at=max(dates) if dates else None,
         last_error=finished.error_text if finished else "",
         busy=is_busy(db, site.id), run=run_out)
 
 
-def _page_out(site: Site, row: HouseProjectPage) -> dict:
+def _page_out(site: Site, row: HouseProjectPage, run_alive: bool) -> dict:
     return dict(
         id=row.id, remote_id=row.remote_id, title=row.title, url=row.url,
         page_url=f"{site.base_url.rstrip('/')}{row.url}" if row.url else "",
         status=row.status, skip_reason=row.skip_reason, error_text=row.error_text,
-        stuck=is_stuck(row) or is_lost(row), rewritten_at=row.rewritten_at,
+        stuck=_stuck(row, run_alive), rewritten_at=row.rewritten_at,
         rewrite_count=row.rewrite_count,
         original_chars=len(plain_text(row.original_html)),
         rewritten_chars=len(plain_text(row.rewritten_html)), updated_at=row.updated_at)
@@ -2781,7 +2872,8 @@ def list_pages(site_id: int, db: Session = Depends(get_db),
     site = _project_or_404(db, site_id)
     rows = db.scalars(select(HouseProjectPage).where(HouseProjectPage.site_id == site.id)
                       .order_by(HouseProjectPage.title, HouseProjectPage.id)).all()
-    return [_page_out(site, row) for row in rows]
+    run_alive = _run_alive(db, site)
+    return [_page_out(site, row, run_alive) for row in rows]
 
 
 def _page_or_404(db: Session, page_id: int) -> tuple[HouseProjectPage, Site]:
@@ -2795,7 +2887,8 @@ def _page_or_404(db: Session, page_id: int) -> tuple[HouseProjectPage, Site]:
 def get_page(page_id: int, db: Session = Depends(get_db),
              _user: User = Depends(get_current_user)):
     row, site = _page_or_404(db, page_id)
-    return PageDetailOut(**_page_out(site, row), original_html=row.original_html,
+    return PageDetailOut(**_page_out(site, row, _run_alive(db, site)),
+                         original_html=row.original_html,
                          rewritten_html=row.rewritten_html)
 
 
@@ -2805,16 +2898,15 @@ def rewrite_one(page_id: int, db: Session = Depends(get_db),
     row, site = _page_or_404(db, page_id)
     if row.status == "skipped":
         raise HTTPException(400, f"страница пропущена: {row.skip_reason}")
-    run = active_run(db, site.id)
-    if run is not None and not is_stale(db, run):
+    if _run_alive(db, site):
         raise HTTPException(409, BUSY_TEXT)
-    if row.status in ("queued", "in_work") and not is_stuck(row) and not is_lost(row):
+    if is_taken(row):
         raise HTTPException(409, "страница уже в работе")
     row.status, row.error_text, row.started_at = "queued", "", None
     row.updated_at = utcnow()
     db.commit()
     enqueue_rewrite_page(row.id, continue_run=False)
-    return _page_out(site, row)
+    return _page_out(site, row, False)
 ````
 
 `execution/backend/app/main.py` — правка (дифф относительно main):
@@ -2844,10 +2936,10 @@ def rewrite_one(page_id: int, db: Session = Depends(get_db),
 - [ ] **Step 4: Запустить — проходит, затем полный регресс**
 
 Run: `docker compose run --rm --no-deps backend pytest -q tests/test_api_house_projects.py`
-Expected: `15 passed`
+Expected: `16 passed`
 
 Run: `docker compose run --rm --no-deps backend pytest -q`
-Expected: `968 passed`
+Expected: `972 passed`
 
 - [ ] **Commit**
 

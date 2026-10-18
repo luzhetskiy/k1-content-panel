@@ -8,6 +8,7 @@ import logging
 from datetime import timedelta
 
 from celery import current_task
+from sqlalchemy import update
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.ai.factory import AIConfigError, build_text_client
@@ -27,9 +28,13 @@ from app.celery_app import celery_app
 from app.clock import utcnow
 from app.companies.builder import build_for as build_for_company
 from app.db import SessionLocal
+from app.house_projects import runs as rewrite_runs
+from app.house_projects.rewriter import RewriteError, rewrite_page
+from app.house_projects.sync import sync_pages
 from app.models.article import Article, ArticleBatch
 from app.models.company import Company, CompanyBatch
 from app.models.category_meta import CategoryMeta, MetaRun
+from app.models.house_project import HouseProjectPage, ProjectRewriteRun
 from app.models.job import JobRun, LlmUsage
 from app.models.site import Site
 from app.seed import seed_prompts
@@ -891,3 +896,199 @@ def generate_category_meta(category_id: int, continue_run: bool = True) -> None:
         enqueue_category_meta(category_id, continue_run=continue_run, countdown=countdown)
     elif following is not None:
         enqueue_category_meta(following)
+
+
+# --- проекты домов: рерайт описаний (directions/2026-10-18-house-projects-rewrite-design.md) ---
+
+# Худший случай страницы: три чтения (до рерайта, перед записью, после неё) и
+# PATCH — по 3 × 60 с + паузы 1+2 = 183 с, итого 732 с; LLM 2 попытки × 366 с =
+# 732 с. Итого ≈ 1460 с; обычно — минута.
+PAGE_SOFT_LIMIT = 1500
+PAGE_HARD_LIMIT = 1560
+# Синхронизация — карточка каждой страницы сайта: на stroybaza-samara.ru 265
+# запросов, 1–2 минуты; запас на медленный сайт и повторы.
+REWRITE_START_SOFT_LIMIT = 1800
+REWRITE_START_HARD_LIMIT = 1860
+
+
+def _close_rewrite_job(db, run: ProjectRewriteRun) -> None:
+    job = db.get(JobRun, run.job_run_id) if run.job_run_id else None
+    if job is None or job.finished_at is not None:
+        return
+    if run.error_text:
+        _finish_job(db, job, "failed", run.error_text)
+        return
+    done, failed = rewrite_runs.run_counts(db, run)
+    _finish_job(db, job, "ok" if not failed else "failed",
+                f"готово {done}/{run.total}, ошибок {failed}")
+
+
+def _complete_rewrite_run(db, site_id: int) -> None:
+    run = rewrite_runs.finish_run_if_complete(db, site_id)
+    if run is not None:
+        _close_rewrite_job(db, run)
+
+
+def _fail_rewrite_run(db, run: ProjectRewriteRun, text: str) -> None:
+    run.error_text = text
+    run.finished_at = utcnow()
+    db.commit()
+    _close_rewrite_job(db, run)
+
+
+def start_rewrite_run_sync(db, run_id: int) -> int | None:
+    """Синхронизация страниц и отбор по режиму; возвращает id первой страницы цепочки."""
+    run = db.get(ProjectRewriteRun, run_id)
+    if run is None or run.finished_at is not None:
+        # Запуск уже закрыт — например, прерван как оборванный, пока это
+        # сообщение ждало слот воркера. Начинать для него цепочку поздно.
+        return None
+    site = db.get(Site, run.site_id)
+    job = _start_job(db, "project_rewrite_run", site.id, run.created_by_id,
+                     {"run_id": run_id, "mode": run.mode})
+    run.job_run_id = job.id
+    db.commit()
+    try:
+        sync_pages(db, site, open_site_client(db, site))
+        rows = rewrite_runs.pages_for_mode(db, site.id, run.mode)
+        now = utcnow()
+        for row in rows:
+            row.status, row.error_text, row.started_at, row.updated_at = "queued", "", None, now
+        run.total = len(rows)
+        db.commit()
+    except SoftTimeLimitExceeded:
+        db.rollback()
+        _fail_rewrite_run(db, run, "превышен лимит времени синхронизации страниц")
+        return None
+    except (SiteAPIError, SecretDecryptionError) as exc:
+        db.rollback()
+        _fail_rewrite_run(db, run, str(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 — барьер, см. run_batch_sync
+        db.rollback()
+        _fail_rewrite_run(db, run, f"непредвиденная ошибка: {type(exc).__name__}: {exc}")
+        raise
+
+    first = rewrite_runs.next_queued(db, site.id)
+    if first is None:
+        # Нечего делать. finish_run_if_complete запуск с total=0 не закрывает
+        # (так выглядит запуск посреди синхронизации) — закрываем здесь.
+        run.finished_at = utcnow()
+        db.commit()
+        _close_rewrite_job(db, run)
+        return None
+    return first.id
+
+
+def _fail_page(db, page: HouseProjectPage, text: str) -> None:
+    page.status = "failed"
+    page.error_text = text
+    page.updated_at = utcnow()
+    db.commit()
+
+
+def _fail_queued_pages(db, site_id: int, text: str) -> None:
+    """Ошибка конфигурации (ключ RouterAI, токен сайта) — одна на весь запуск."""
+    for row in db.query(HouseProjectPage).filter(HouseProjectPage.site_id == site_id,
+                                                 HouseProjectPage.status == "queued").all():
+        row.status, row.error_text, row.updated_at = "failed", text, utcnow()
+    db.commit()
+
+
+def rewrite_project_page_sync(db, page_id: int, continue_run: bool = True) -> int | None:
+    """Рерайт одной страницы; возвращает id следующей страницы цепочки."""
+    page = db.get(HouseProjectPage, page_id)
+    if page is None:
+        return None
+    site = db.get(Site, page.site_id)
+    # Захват — одним UPDATE с условием: два воркера с одним сообщением не
+    # возьмут страницу оба. Не взяли — её уже обрабатывает другая задача (или
+    # запуск прерван и очередь сброшена), и цепочку ведёт она: прыжок к
+    # следующей странице отсюда запустил бы вторую цепочку.
+    now = utcnow()
+    claimed = db.execute(
+        update(HouseProjectPage)
+        .where(HouseProjectPage.id == page_id, HouseProjectPage.status == "queued")
+        .values(status="in_work", started_at=now, updated_at=now)).rowcount
+    db.commit()
+    if not claimed:
+        return None
+    db.refresh(page)
+
+    run = rewrite_runs.active_run(db, site.id) if continue_run else None
+    own_job: JobRun | None = None
+
+    def job_id() -> int:
+        nonlocal own_job
+        if run is not None and run.job_run_id is not None:
+            return run.job_run_id
+        if own_job is None:
+            own_job = _start_job(db, "project_rewrite_page", site.id, None, {"page_id": page_id})
+        return own_job.id
+
+    stop_run_text = ""
+    try:
+        seed_prompts(db)   # промпт project_rewrite появился после первых деплоев
+        text_client = build_text_client(db)
+        rewrite_page(db, page, site, site_client=open_site_client(db, site),
+                     text_client=text_client,
+                     record_usage=lambda tp, tc, cost: _record_usage(
+                         db, job_id(), text_client.model, tp, tc, cost))
+    except SoftTimeLimitExceeded:
+        db.rollback()
+        _fail_page(db, page, "превышен лимит времени задачи")
+    except (AIConfigError, SecretDecryptionError) as exc:
+        db.rollback()
+        _fail_page(db, page, str(exc))
+        stop_run_text = str(exc)
+    except (LLMError, PromptError, SiteAPIError, RewriteError) as exc:
+        db.rollback()
+        _fail_page(db, page, str(exc))
+    except Exception as exc:  # noqa: BLE001 — барьер: цепочка не должна рваться
+        logger.exception("рерайт страницы проекта %s: непредвиденная ошибка", page_id)
+        db.rollback()
+        _fail_page(db, page, f"непредвиденная ошибка: {type(exc).__name__}: {exc}")
+
+    if own_job is not None:
+        _finish_job(db, own_job, "ok" if page.status in ("done", "skipped") else "failed",
+                    page.error_text)
+    if stop_run_text:
+        _fail_queued_pages(db, site.id, stop_run_text)
+    _complete_rewrite_run(db, site.id)
+    if not continue_run:
+        return None
+    following = rewrite_runs.next_queued(db, site.id)
+    return following.id if following else None
+
+
+def enqueue_rewrite_page(page_id: int, *, continue_run: bool = True) -> None:
+    rewrite_project_page.apply_async(
+        args=[page_id], kwargs={"continue_run": continue_run},
+        soft_time_limit=PAGE_SOFT_LIMIT, time_limit=PAGE_HARD_LIMIT)
+
+
+def enqueue_rewrite_run(run_id: int) -> None:
+    start_rewrite_run.apply_async(args=[run_id], soft_time_limit=REWRITE_START_SOFT_LIMIT,
+                                  time_limit=REWRITE_START_HARD_LIMIT)
+
+
+@celery_app.task(name="app.tasks.start_rewrite_run")
+def start_rewrite_run(run_id: int) -> None:
+    db = SessionLocal()
+    try:
+        first = start_rewrite_run_sync(db, run_id)
+    finally:
+        db.close()
+    if first is not None:
+        enqueue_rewrite_page(first)
+
+
+@celery_app.task(name="app.tasks.rewrite_project_page")
+def rewrite_project_page(page_id: int, continue_run: bool = True) -> None:
+    db = SessionLocal()
+    try:
+        following = rewrite_project_page_sync(db, page_id, continue_run)
+    finally:
+        db.close()
+    if following is not None:
+        enqueue_rewrite_page(following)

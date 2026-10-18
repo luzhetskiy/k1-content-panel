@@ -82,6 +82,7 @@ def test_block_before_section_is_none():
 
 def test_clean_model_html_strips_fence():
     assert clean_model_html("```html\n<p>Текст</p>\n```") == "<p>Текст</p>"
+    assert clean_model_html("Вот текст:\n```HTML\n<p>Текст</p>\n```\nГотово.") == "<p>Текст</p>"
     assert clean_model_html("  <p>Текст</p> ") == "<p>Текст</p>"
     assert clean_model_html(None) == ""
 
@@ -90,5 +91,6 @@ def test_plain_text_and_same_html():
     assert plain_text("<p>Дом&nbsp;82 м²</p>\n<ul><li>плита</li></ul>") == "Дом 82 м² плита"
     assert same_html("<p>a</p>\n  <p>b</p>", "<p>a</p><p>b</p>")
     assert same_html("<p>a<br />b</p>", "<p>a<br>b</p>")
+    assert same_html("<p>«a» 11×9 b\xa0c</p>", "<p>&laquo;a&raquo; 11&times;9 b&nbsp;c</p>")
     assert not same_html("<p>a b</p>", "<p>ab</p>")
     assert not same_html("<p>a</p>", "<p>b</p>")

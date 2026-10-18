@@ -16,7 +16,7 @@ from dataclasses import dataclass
 _OPEN_TAG = r"<{tag}\b[^>]*>"
 _CLASS = re.compile(r"""\bclass\s*=\s*(["'])(.*?)\1""", re.DOTALL)
 _DIV_TOKEN = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
-_FENCE = re.compile(r"^```[a-z]*\s*|\s*```$")
+_FENCED = re.compile(r"```[\w-]*[ \t]*\r?\n?(.*?)\r?\n?[ \t]*```", re.DOTALL)
 
 
 @dataclass
@@ -63,8 +63,11 @@ def replace_description(page_html: str, block: DescriptionBlock, new_inner: str)
 
 
 def clean_model_html(raw: object) -> str:
-    """Ответ модели без обёртки ```html — остальное оценивает проверка."""
-    return _FENCE.sub("", str(raw or "").strip()).strip()
+    """Если модель обернула ответ в ```html, берётся только содержимое блока:
+    пояснения до и после него на сайт не попадают. Остальное оценивает проверка."""
+    text = str(raw or "").strip()
+    fenced = _FENCED.search(text)
+    return (fenced.group(1) if fenced else text).strip()
 
 
 def plain_text(fragment: str) -> str:
@@ -72,13 +75,14 @@ def plain_text(fragment: str) -> str:
 
 
 def _normalized(fragment: str) -> str:
+    fragment = html.unescape(fragment)
     fragment = re.sub(r">\s+<", "><", fragment)
     fragment = re.sub(r"<br\s*/?>", "<br>", fragment, flags=re.IGNORECASE)
     return " ".join(fragment.split())
 
 
 def same_html(first: str, second: str) -> bool:
-    """Совпадение без учёта пробелов, переносов между тегами и `<br />` против
-    `<br>`: админка сайта переформатирует разметку при сохранении, и это не
-    правка текста."""
+    """Совпадение без учёта пробелов, переносов между тегами, `<br />` против
+    `<br>` и сущностей (`&nbsp;`, `&laquo;`) против самих символов: админка
+    сайта переформатирует разметку при сохранении, и это не правка текста."""
     return _normalized(first) == _normalized(second)

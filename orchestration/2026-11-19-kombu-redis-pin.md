@@ -42,3 +42,12 @@ kombu 5.7.0 на рантайме проверяет `redis.VERSION >= (6,1,0)` 
 - Партия 171: очередь пуста, задач нет → после фикса менеджер жмёт «Дособрать
   партию» (stuck → _reset_stuck_batch: generating→failed, published пропускаются,
   двойной оплаты нет).
+
+## Итог (2026-11-19)
+
+Merge в main (3adb341), деплой api+worker+frontend. Проверки ПОСЛЕ деплоя:
+воркер «celery@… ready», Status=running, RestartCount=0; `celery -A
+app.celery_app inspect ping` → pong, 1 node online; тест совместимости зелёный
+в новом api-образе (producer-сторона); health 200; запись «Доработок» в
+JS-бандле фронта. Регресс до деплоя: 995 passed. Партия 171 ждёт нажатия
+«Дособрать партию» менеджером.

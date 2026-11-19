@@ -4,6 +4,13 @@ sqlalchemy==2.0.36
 alembic==1.14.0
 psycopg[binary]==3.2.3
 celery[redis]==5.4.0
+# kombu закреплён явно: celery 5.4.0 разрешает kombu<6.0, но kombu 5.7.0
+# требует redis-py>=6.1.0 на рантайме, а celery[redis] 5.4.0 ограничивает
+# redis<6.0 — с redis==5.2.1 воркер падает VersionMismatch в цикле
+# перезапуска (инцидент 2026-11-19, партия 171). 5.6.2 — проверенная
+# совместимая версия (порог redis>=3.2). Поднимать только вместе с celery
+# и redis; совместимость ловит tests/test_deps_compat.py.
+kombu==5.6.2
 redis==5.2.1
 pydantic==2.10.4
 pydantic-settings==2.7.0

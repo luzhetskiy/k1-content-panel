@@ -27,6 +27,36 @@ WEBP_QUALITY = 82
 # втрое больше всего бюджета статьи (ARTICLE_TIME_BUDGET_SECONDS в Task 18).
 TIMEOUT = 180
 
+# RouterAI images заворачивает ошибки провайдера в HTTP 200 с телом
+# {"error": {"message": ..., "code": ...}} (инцидент 2026-11-19, партия 171:
+# upstream модели отдавал 404, RouterAI слал 200 + code 503 «Попробуйте ещё
+# раз»). response.ok при этом true — конверт надо распознавать ДО поиска
+# data, иначе причина теряется за KeyError. Коды, при которых повтор
+# осмыслен (лимит частоты и временные отказы провайдера); остальные —
+# немедленный отказ, тот же принцип, что _NON_RETRYABLE в app/ai/text.py.
+TRANSIENT_ERROR_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _envelope_error(body: object) -> tuple[str, int | None] | None:
+    """(message, code) из error-конверта RouterAI либо None, если тело — не
+    конверт. error бывает dict (message/code) или строкой; code приводится
+    к int, не приводится — None: классифицировать нечем, повтор не делаем."""
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not error:
+        return None
+    if isinstance(error, dict):
+        message = str(error.get("message") or error)
+        code = error.get("code")
+    else:
+        message, code = str(error), None
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        code = None
+    return message, code
+
 
 class ImageError(RuntimeError):
     pass
@@ -99,22 +129,41 @@ class ImageGenerator:
                 if response.ok:
                     try:
                         body = response.json()
-                        raw = base64.b64decode(body["data"][0]["b64_json"])
-                        data, image_size = to_webp(raw, crop)
-                    except Exception as exc:
-                        # Мусор в теле 200-го ответа не лечится повтором — тот
-                        # же аргумент, что и с неретраибельными ошибками в
-                        # app/ai/text.py: повторный запрос с высокой
-                        # вероятностью вернёт тот же мусор, а не другой ответ.
+                    except ValueError as exc:
                         raise ImageError(
-                            f"RouterAI images вернул 200, но тело не "
-                            f"разобрать ({type(exc).__name__}): {exc}") from exc
-                    return ImageResult(
-                        data=data, size=image_size,
-                        cost=float(body.get("usage", {}).get("cost") or 0.0),
-                        seconds=round(time.time() - started),
-                    )
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                            f"RouterAI images вернул 200, но тело не JSON: "
+                            f"{response.text[:200]}") from exc
+                    envelope = _envelope_error(body)
+                    if envelope is None:
+                        try:
+                            raw = base64.b64decode(body["data"][0]["b64_json"])
+                            data, image_size = to_webp(raw, crop)
+                        except Exception as exc:
+                            # Мусор в теле 200-го ответа не лечится повтором —
+                            # тот же аргумент, что и с неретраибельными ошибками
+                            # в app/ai/text.py: повторный запрос с высокой
+                            # вероятностью вернёт тот же мусор, а не другой
+                            # ответ. Фрагмент тела — в сообщение: без него
+                            # причина невидима (инцидент 2026-11-19).
+                            raise ImageError(
+                                f"RouterAI images вернул 200, но тело не "
+                                f"разобрать ({type(exc).__name__}): {exc}; "
+                                f"тело: {response.text[:200]}") from exc
+                        return ImageResult(
+                            data=data, size=image_size,
+                            cost=float(body.get("usage", {}).get("cost") or 0.0),
+                            seconds=round(time.time() - started),
+                        )
+                    message, code = envelope
+                    code_part = f" (code {code})" if code is not None else ""
+                    last_error = f"ошибка в теле 200{code_part}: {message}"
+                    if code not in TRANSIENT_ERROR_CODES:
+                        raise ImageError(
+                            f"RouterAI images отклонил запрос — {last_error}")
+                    # Transient-код конверта: повтор осмыслен, как и при
+                    # честном HTTP-сбое ниже — идём к паузе между попытками.
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
             if attempt < self.max_retries:
                 time.sleep(self.backoff * attempt)
 

@@ -40,17 +40,19 @@ TRANSIENT_ERROR_CODES = frozenset({429, 500, 502, 503, 504})
 def _envelope_error(body: object) -> tuple[str, int | None] | None:
     """(message, code) из error-конверта RouterAI либо None, если тело — не
     конверт. error бывает dict (message/code) или строкой; code приводится
-    к int, не приводится — None: классифицировать нечем, повтор не делаем."""
+    к int, не приводится — None: классифицировать нечем, повтор не делаем.
+    message ограничен 200 символами — как фрагменты тела в остальных
+    ошибках: error_text статьи не должен раздуваться на весь UI."""
     if not isinstance(body, dict):
         return None
     error = body.get("error")
     if not error:
         return None
     if isinstance(error, dict):
-        message = str(error.get("message") or error)
+        message = str(error.get("message") or error)[:200]
         code = error.get("code")
     else:
-        message, code = str(error), None
+        message, code = str(error)[:200], None
     try:
         code = int(code)
     except (TypeError, ValueError):
@@ -131,8 +133,12 @@ class ImageGenerator:
                         body = response.json()
                     except ValueError as exc:
                         raise ImageError(
-                            f"RouterAI images вернул 200, но тело не JSON: "
-                            f"{response.text[:200]}") from exc
+                            f"RouterAI images вернул 200, но тело не JSON "
+                            f"({type(exc).__name__}): {exc}; "
+                            f"тело: {response.text[:200]}") from exc
+                    # Конверт проверяется ДО data — намеренный приоритет:
+                    # успешные тела RouterAI ключа error не содержат, гибрид
+                    # «data + error» считаем отказом провайдера.
                     envelope = _envelope_error(body)
                     if envelope is None:
                         try:
@@ -167,5 +173,7 @@ class ImageGenerator:
             if attempt < self.max_retries:
                 time.sleep(self.backoff * attempt)
 
-        raise ImageError(f"RouterAI images не ответил после {self.max_retries} попыток: "
-                         f"{last_error}")
+        # «генерация не удалась», а не «не ответил»: последней попыткой мог
+        # быть как сетевой сбой, так и error-конверт внутри честного 200.
+        raise ImageError(f"RouterAI images: генерация не удалась после "
+                         f"{self.max_retries} попыток: {last_error}")

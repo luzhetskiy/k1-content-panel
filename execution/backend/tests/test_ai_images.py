@@ -151,10 +151,11 @@ def test_generate_wraps_truncated_image_as_image_error(monkeypatch):
 # response.ok при этом true, и старый код падал KeyError 'data', теряя и
 # сообщение провайдера, и возможность повторить transient-сбой.
 
-def test_generate_retries_transient_error_envelope_in_200(monkeypatch):
+@pytest.mark.parametrize("code", [429, 500, 502, 503, 504])
+def test_generate_retries_transient_error_envelope_in_200(monkeypatch, code):
     payload = {"error": {
         "message": "Провайдер вернул пустой ответ (HTTP 404). Попробуйте ещё раз.",
-        "code": 503, "metadata": {"provider_error_code": "404"}}}
+        "code": code, "metadata": {"provider_error_code": "404"}}}
     calls = _post_once_returning(monkeypatch, payload)
     generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
                                max_retries=3)
@@ -162,7 +163,8 @@ def test_generate_retries_transient_error_envelope_in_200(monkeypatch):
         generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
     assert len(calls) == 3
     assert "Провайдер вернул пустой ответ" in str(ei.value)
-    assert "503" in str(ei.value)
+    assert str(code) in str(ei.value)
+    assert "генерация не удалась после 3 попыток" in str(ei.value)
 
 
 @pytest.mark.parametrize("code", [400, 401, 404])
@@ -246,4 +248,49 @@ def test_generate_non_json_body_fails_immediately_with_snippet(monkeypatch):
         generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
     assert len(calls) == 1
     assert "не JSON" in str(ei.value)
+    assert "Expecting value" in str(ei.value)
     assert "<html>bad gateway</html>" in str(ei.value)
+
+
+def test_generate_envelope_message_is_capped(monkeypatch):
+    long_message = "очень длинное сообщение провайдера " * 20
+    payload = {"error": {"message": long_message, "code": 400}}
+    calls = _post_once_returning(monkeypatch, payload)
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError) as ei:
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+    # Сообщение провайдера ограничено 200 символами — как и фрагменты тела
+    # в остальных ошибках: error_text не должен раздуваться на весь UI.
+    assert long_message[:200] in str(ei.value)
+    assert long_message[:201] not in str(ei.value)
+
+
+def test_generate_success_body_with_null_error_returns_image(monkeypatch):
+    payload = {
+        "error": None,
+        "data": [{"b64_json": base64.b64encode(png_bytes(1536, 1024)).decode()}],
+        "usage": {"cost": 5.4},
+    }
+    calls = _post_once_returning(monkeypatch, payload)
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2")
+    result = generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
+    assert result.cost == 5.4
+    assert Image.open(io.BytesIO(result.data)).format == "WEBP"
+
+
+def test_generate_envelope_wins_over_data(monkeypatch):
+    # Приоритет конверта над data — намеренный: успешные тела RouterAI ключа
+    # error не содержат, гибрид «картинка + ошибка» считаем отказом провайдера.
+    payload = {
+        "error": {"message": "отказ", "code": 400},
+        "data": [{"b64_json": base64.b64encode(png_bytes(64, 64)).decode()}],
+    }
+    calls = _post_once_returning(monkeypatch, payload)
+    generator = ImageGenerator("https://routerai.ru/api/v1", "key", "openai/gpt-image-2",
+                               max_retries=3)
+    with pytest.raises(ImageError, match="отказ"):
+        generator.generate(prompt="дом", size="1536x1024", quality="medium", crop=None)
+    assert len(calls) == 1
